@@ -1,14 +1,30 @@
+/* Same palette as the desktop app (agent/sentinel/theme.py): dark, flat, square. */
 :root {
-  --bg: #f6f7f9; --fg: #1d2330; --card: #ffffff; --muted: #5f6b7a; --line: #e2e5ea;
-  --danger: #b42318; --danger-bg: #fdecea; --warn: #9a6700; --ok: #1a7f37; --btn: #1d2330; --btn-fg: #ffffff;
-}
-@media (prefers-color-scheme: dark) {
-  :root { --bg: #14171c; --fg: #e7e9ee; --card: #1c2028; --muted: #9aa3b2; --line: #2c323d;
-          --danger: #ff6b5e; --danger-bg: #3a1a17; --warn: #e3b341; --ok: #3fb950; --btn: #e7e9ee; --btn-fg: #14171c; }
+  --bg: #111113; --card: #18181b; --raised: #222226; --hover: #2b2b30; --line: #2c2c31;
+  --fg: #ececee; --muted: #9a9aa1; --faint: #5f5f66; --core: #c7c8cc;
+  --ok: #4caf7a; --warn: #d4a32a; --danger: #e0524a; --danger-bg: #2a1716;
 }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 "Segoe UI", system-ui, sans-serif; }
-button { font: inherit; border-radius: 8px; padding: 8px 14px; cursor: pointer; border: 1px solid var(--line); background: var(--card); color: var(--fg); }
-button.primary { background: var(--btn); color: var(--btn-fg); border-color: var(--btn); }
+html { color-scheme: dark; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 "Segoe UI", system-ui, sans-serif; }
+button { font: inherit; font-size: 13px; border-radius: 2px; padding: 7px 14px; cursor: pointer; border: 0;
+         background: var(--raised); color: var(--fg); transition: background-color 120ms ease-out; }
+button:hover { background: var(--hover); }
+button:disabled { color: var(--faint); cursor: default; background: var(--card); }
+button.primary { background: var(--fg); color: var(--bg); font-weight: 600; }
+button.primary:hover { background: #ffffff; }
+button.quiet { background: transparent; color: var(--muted); padding: 7px 6px; }
+button.quiet:hover { color: var(--fg); background: transparent; }
 .muted { color: var(--muted); }
-code { font-family: Consolas, ui-monospace, monospace; font-size: 13px; word-break: break-all; }
+.ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--danger); }
+code { font-family: Consolas, ui-monospace, monospace; font-size: 12.5px; word-break: break-all; }
+.mark { display: inline-block; width: 8px; height: 8px; background: currentColor; flex: none; }
+/* Square switch, matching the app's. */
+.switch { position: relative; width: 40px; height: 22px; flex: none; }
+.switch input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
+.switch span { position: absolute; inset: 0; background: #2b2b30; transition: background-color 167ms ease-out; pointer-events: none; }
+.switch span::after { content: ""; position: absolute; top: 4px; left: 4px; width: 14px; height: 14px; background: var(--fg);
+                      transition: transform 167ms cubic-bezier(.22, 1, .36, 1); }
+.switch input:checked + span { background: #244231; }
+.switch input:checked + span::after { transform: translateX(18px); }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }

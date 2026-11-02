@@ -42,6 +42,19 @@ export function buildBlockRules(hosts) {
   return rules;
 }
 
+// One-time passes: session rules limited to one tab (tabIds is session-only in DNR).
+export const ONCE_BASE_ID = 950000;
+export const ONCE_SLOTS = 40000;
+
+export function buildOnceRule(id, host, tabId) {
+  return {
+    id,
+    priority: 10,
+    action: { type: "allow" },
+    condition: { requestDomains: [host], tabIds: [tabId] },
+  };
+}
+
 export function buildAllowRules(hosts) {
   return hosts
     .filter((h) => typeof h === "string" && /^[a-z0-9._-]+$/.test(h))

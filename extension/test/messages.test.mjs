@@ -31,3 +31,10 @@ test("other message shapes keep their checks", () => {
   assert.equal(VALID.set_enabled({ enabled: "yes" }), false);
   assert.equal(VALID.proceed({ url: "u".repeat(8000) }), false);
 });
+
+test("proceed carries an optional boolean 'always'", () => {
+  assert.ok(VALID.proceed({ url: "https://a.test/" }));
+  assert.ok(VALID.proceed({ url: "https://a.test/", always: false }));
+  assert.ok(VALID.proceed({ url: "https://a.test/", always: true }));
+  assert.equal(VALID.proceed({ url: "https://a.test/", always: "yes" }), false);
+});

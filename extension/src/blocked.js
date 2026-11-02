@@ -9,11 +9,10 @@ const $ = (id) => document.getElementById(id);
 function render(url, reasons) {
   $("url").textContent = url || "(không rõ địa chỉ)";
   if (kind === "h") {
-    $("title").textContent = "Trang này có dấu hiệu giả mạo";
-    $("why").textContent = `Địa chỉ có nhiều đặc điểm của trang lừa đảo (điểm rủi ro ${params.get("s") || "?"}/100).`;
+    $("title").textContent = "Trang có dấu hiệu giả mạo";
+    $("why").textContent = `Điểm rủi ro ${params.get("s") || "?"}/100`;
   } else {
-    $("why").textContent = `Trang này được xác định là ${KIND_LABELS[kind] || KIND_LABELS.x}` +
-      (params.get("src") ? ` theo nguồn ${params.get("src")}.` : ".");
+    $("why").textContent = (KIND_LABELS[kind] || KIND_LABELS.x) + (params.get("src") ? ` · nguồn ${params.get("src")}` : "");
   }
   const list = $("reasons");
   list.replaceChildren(...reasons.map((r) => Object.assign(document.createElement("li"), { textContent: r })));
@@ -30,7 +29,9 @@ async function init() {
     if (!target) await new Promise((r) => setTimeout(r, 200));
   }
   render(target, reasons);
-  $("proceed").disabled = !target || !/^https?:/i.test(target);
+  const usable = !!target && /^https?:/i.test(target);
+  $("proceed").disabled = !usable;
+  $("always").disabled = !usable;
 }
 
 $("back").addEventListener("click", () => {
@@ -39,10 +40,14 @@ $("back").addEventListener("click", () => {
   else location.href = "about:blank";
 });
 
-$("proceed").addEventListener("click", async () => {
+// "Mở một lần" lets this tab open the page until it leaves the site;
+// "Luôn tin cậy" adds the host to the trusted list (removable in the app).
+async function proceed(always) {
   if (!target) return;
-  const res = await chrome.runtime.sendMessage({ type: "proceed", url: target }).catch(() => null);
-  if (res?.ok) location.replace(target);
-});
+  const res = await chrome.runtime.sendMessage({ type: "proceed", url: target, always }).catch(() => null);
+  if (res?.ok && !res.navigated) location.replace(target);
+}
+$("proceed").addEventListener("click", () => proceed(false));
+$("always").addEventListener("click", () => proceed(true));
 
 init();

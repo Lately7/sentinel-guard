@@ -6,30 +6,39 @@
   <title>Đã chặn trang nguy hiểm</title>
   <link rel="stylesheet" href="ui.css">
   <style>
-    main { max-width: 680px; margin: 10vh auto 40px; padding: 0 16px; }
-    .card { background: var(--card); border: 1px solid var(--line); border-top: 6px solid var(--danger); border-radius: 12px; padding: 24px; }
-    h1 { margin: 0 0 8px; font-size: 24px; color: var(--danger); }
-    .url { background: var(--danger-bg); border-radius: 8px; padding: 8px 10px; margin: 12px 0; }
-    ul { padding-left: 20px; margin: 8px 0 16px; }
-    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
-    details { margin-top: 18px; }
+    main { max-width: 600px; margin: 14vh auto 40px; padding: 0 16px; }
+    .card { background: var(--card); padding: 32px; border-left: 3px solid var(--danger); }
+    .logo { width: 44px; height: 44px; border: 2px solid var(--danger); display: grid; place-items: center; margin-bottom: 22px; }
+    .logo i { width: 16px; height: 16px; background: var(--core); }
+    h1 { margin: 0 0 6px; font-size: 22px; font-weight: 600; }
+    #why { margin: 0; color: var(--muted); }
+    .url { background: var(--danger-bg); padding: 8px 10px; margin: 16px 0; }
+    ul { padding-left: 18px; margin: 0 0 16px; color: var(--muted); font-size: 13px; }
+    ul:empty { display: none; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
+    details { margin-top: 22px; font-size: 13px; }
+    summary { cursor: pointer; color: var(--muted); }
+    details .actions { margin-top: 10px; }
   </style>
 </head>
 <body>
   <main>
     <div class="card">
-      <h1 id="title">Sentinel Guard đã chặn trang này</h1>
-      <p id="why">Trang này nằm trong danh sách nguy hiểm.</p>
+      <div class="logo"><i></i></div>
+      <h1 id="title">Đã chặn trang này</h1>
+      <p id="why">Trang nằm trong danh sách nguy hiểm.</p>
       <div class="url"><code id="url">—</code></div>
       <ul id="reasons"></ul>
-      <p class="muted">Đừng nhập mật khẩu, mã OTP, thông tin thẻ hay tải tệp từ trang này.</p>
+      <p class="muted">Đừng nhập mật khẩu hay thông tin thẻ ở trang này.</p>
       <div class="actions">
         <button class="primary" id="back">Quay lại an toàn</button>
       </div>
       <details>
-        <summary class="muted">Tôi hiểu rủi ro</summary>
-        <p class="muted">Chỉ tiếp tục nếu bạn chắc chắn đây là báo nhầm. Tên miền sẽ được thêm vào danh sách tin cậy (gỡ được trong bảng điều khiển của Sentinel Guard).</p>
-        <button id="proceed">Vẫn mở trang này</button>
+        <summary>Tôi hiểu rủi ro</summary>
+        <div class="actions">
+          <button id="proceed" title="Chỉ cho phép trang này trong tab hiện tại, đến khi bạn rời trang">Mở một lần</button>
+          <button class="quiet" id="always" title="Thêm tên miền vào danh sách tin cậy; gỡ được trong ứng dụng">Luôn tin cậy tên miền</button>
+        </div>
       </details>
     </div>
   </main>

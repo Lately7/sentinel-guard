@@ -23,7 +23,7 @@ export function validPageSignals(m) {
 
 export const VALID = {
   blocked_context: () => true,
-  proceed: (m) => typeof m.url === "string" && m.url.length < 8000,
+  proceed: (m) => typeof m.url === "string" && m.url.length < 8000 && (m.always === undefined || typeof m.always === "boolean"),
   page_signals: validPageSignals,
   popup_state: () => true,
   set_enabled: (m) => typeof m.enabled === "boolean",

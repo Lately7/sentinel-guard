@@ -33,3 +33,12 @@ test("allow rules outrank block rules", () => {
   assert.equal(r.action.type, "allow");
   assert.deepEqual(r.condition.requestDomains, ["trusted.example"]);
 });
+
+test("one-time pass is a tab-scoped allow rule above the block rules", async () => {
+  const { buildOnceRule, ONCE_BASE_ID, ALLOW_BASE_ID: ALLOW } = await import("../src/rules.js");
+  const r = buildOnceRule(ONCE_BASE_ID + 3, "login-example.test", 42);
+  assert.deepEqual(r.condition, { requestDomains: ["login-example.test"], tabIds: [42] });
+  assert.equal(r.action.type, "allow");
+  assert.ok(r.priority > buildBlockRules([["x.example", "phishing"]])[0].priority);
+  assert.ok(ONCE_BASE_ID > ALLOW + 5000, "one-time ids must not collide with the persistent allow range");
+});

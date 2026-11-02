@@ -8,10 +8,10 @@ async function load() {
   if (!res?.ok) return;
   const { state, agent, tab } = res;
   $("enabled").checked = state.enabled;
-  $("size").textContent = state.blocklistSize ? state.blocklistSize.toLocaleString("vi-VN") : "chưa đồng bộ";
+  $("size").textContent = state.blocklistSize ? `${state.blocklistSize.toLocaleString("vi-VN")} tên miền` : "chưa đồng bộ";
   if (state.enabled && state.syncError) {
     // Degraded: protection is on but the network rules could not be loaded.
-    $("size").textContent = "chưa đồng bộ — đang thử lại";
+    $("size").textContent = "chưa đồng bộ";
     $("size").className = "bad";
     $("size").title = state.syncError;
   }
@@ -25,11 +25,12 @@ async function load() {
   }
 
   if (agent && !agent.error) {
-    $("agent").textContent = `đã kết nối (v${agent.version})`;
-    $("agent").className = "ok";
+    $("agent").textContent = "Agent";
+    $("agent").title = `v${agent.version}`;
+    $("agent-mark").className = "mark ok";
   } else {
-    $("agent").textContent = "chưa kết nối";
-    $("agent").className = "bad";
+    $("agent").textContent = "Agent offline";
+    $("agent-mark").className = "mark bad";
     $("agent").title = agent?.error || "";
   }
 
@@ -39,6 +40,7 @@ async function load() {
   if (!tab || !/^https?:/i.test(tab.url || "")) {
     page.textContent = "Không áp dụng cho trang này";
     page.className = "state muted";
+    $("page-mark").className = "mark muted";
     $("trust").disabled = true;
     return;
   }
@@ -48,6 +50,7 @@ async function load() {
   const st = pageStatus(info, tab.heuristic.score);
   page.textContent = st.text;
   page.className = `state ${st.cls}`;
+  $("page-mark").className = `mark ${st.cls}`;
   reasons.replaceChildren(...items.map((t) => Object.assign(document.createElement("li"), { textContent: t })));
 }
 

@@ -1,5 +1,5 @@
 import { scoreUrl } from "./url_heuristics.js";
-import { buildBlockRules, buildAllowRules, ALLOW_BASE_ID, KIND_CODES, KIND_LABELS } from "./rules.js";
+import { buildBlockRules, buildAllowRules, buildOnceRule, ALLOW_BASE_ID, ONCE_BASE_ID, ONCE_SLOTS, KIND_CODES, KIND_LABELS } from "./rules.js";
 import * as native from "./native.js";
 import { VALID } from "./messages.js";
 import { recordFailure, recordSuccess, retryable } from "./pending.js";
@@ -56,6 +56,45 @@ async function isAllowed(host) {
   const { allowHosts } = await getState();
   return allowHosts.some((h) => host === h || host.endsWith("." + h));
 }
+
+// One-time passes (RT-022): "Mở một lần" on the warning page lets one tab
+// open one host until the tab leaves it or closes. Nothing is added to the
+// trusted list and downloads from the host stay blocked.
+async function getOnce() {
+  return (await chrome.storage.session.get("once")).once || {};
+}
+
+async function allowOnce(tabId, host) {
+  await exclusive(async () => {
+    const { once = {}, onceSeq = 0 } = await chrome.storage.session.get(["once", "onceSeq"]);
+    const prev = once[tabId];
+    const id = ONCE_BASE_ID + (onceSeq % ONCE_SLOTS);
+    await chrome.declarativeNetRequest.updateSessionRules({
+      removeRuleIds: [id, ...(prev ? [prev.ruleId] : [])],
+      addRules: [buildOnceRule(id, host, tabId)],
+    });
+    once[tabId] = { host, ruleId: id };
+    await chrome.storage.session.set({ once, onceSeq: onceSeq + 1 });
+  });
+}
+
+async function onceAllowed(tabId, host) {
+  const o = (await getOnce())[tabId];
+  return !!o && (host === o.host || host.endsWith("." + o.host));
+}
+
+async function dropOnce(tabId) {
+  const once = await getOnce();
+  const o = once[tabId];
+  if (!o) return;
+  delete once[tabId];
+  await chrome.storage.session.set({ once });
+  await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [o.ruleId] }).catch(() => {});
+}
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  dropOnce(tabId).catch(() => {});
+});
 
 function report(action, url, reason) {
   native.request("report", { action, url: String(url).slice(0, 8000), reason: String(reason || "").slice(0, 1000) }).catch(() => {});
@@ -186,7 +225,10 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (d) => {
   const { enabled } = await getState();
   if (!enabled || !current()) return;
   await setTabInfo(d.tabId, { url: d.url, pending: true });
-  if (await isAllowed(hostOf(d.url))) return;
+  const host = hostOf(d.url);
+  if (await onceAllowed(d.tabId, host)) return;
+  if ((await getOnce())[d.tabId]) await dropOnce(d.tabId); // left the site: the pass ends
+  if (await isAllowed(host)) return;
 
   const h = scoreUrl(d.url);
   let rep = null;
@@ -286,7 +328,7 @@ async function scanDownload(d) {
   } else if (label === "suspicious") {
     notify("Tệp tải về đáng ngờ", `${name}: ${res.reason} (điểm ${res.verdict.score})`);
   }
-});
+}
 
 function notify(title, message) {
   chrome.notifications.create({ type: "basic", iconUrl: "icons/icon128.png", title, message: message.slice(0, 300), priority: 2 });
@@ -333,9 +375,20 @@ async function handle(msg, sender) {
         }
       }
       if (!flagged) return { ok: false };
-      // Trust only the exact host the user chose to open, not its whole domain.
-      await trust(host);
-      report("proceeded", msg.url, "");
+      // Trust only the exact host the user chose to open, not its whole domain,
+      // and only for this tab unless the user asked to always trust it.
+      if (msg.always) {
+        await trust(host);
+        report("proceeded", msg.url, "always");
+      } else {
+        await allowOnce(tabId, host);
+        report("proceeded", msg.url, "once");
+        // Navigate from here: a navigation started by the warning page itself
+        // reaches declarativeNetRequest with tabId -1, so the tab-scoped pass
+        // would not match it (seen in Helium 156).
+        await chrome.tabs.update(tabId, { url: msg.url });
+        return { ok: true, navigated: true };
+      }
       return { ok: true };
     }
     case "trust_site":
@@ -344,7 +397,9 @@ async function handle(msg, sender) {
     case "page_signals": {
       if (tabId == null || !sender.url || sender.frameId !== 0) return { ok: false };
       const { enabled } = await getState();
-      if (!enabled || (await isAllowed(hostOf(sender.url)))) return { ok: true, warn: false };
+      if (!enabled || (await isAllowed(hostOf(sender.url))) || (await onceAllowed(tabId, hostOf(sender.url)))) {
+        return { ok: true, warn: false };
+      }
       const info = (await getTabInfo(tabId)) || {};
       const h = scoreUrl(sender.url);
       const pageScore = msg.signals.reduce((s, x) => s + Math.max(0, Math.min(40, x.score)), 0);
