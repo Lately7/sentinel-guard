@@ -27,7 +27,7 @@ log = logging.getLogger(__name__)
 
 # A failed signature update is retried after this, not after the full period:
 # advancing the success time on failure left ClamAV 4 h and YARA 24 h stale.
-ENGINE_RETRY_AFTER = 30 * 60
+ENGINE_RETRY_AFTER = 60 * 60  # ClamAV asks clients not to check more often than hourly
 
 
 def engine_update_due(db: Database, key: str, period: float, now: float | None = None) -> bool:
