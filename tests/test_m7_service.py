@@ -19,6 +19,7 @@ import pytest
 
 from conftest import MARKER
 from sentinel import config, nativehost, protection, quarantine
+from sentinel.engine import clamav
 from sentinel.engine.scanner import Scanner
 from sentinel.service import bridge, consent, entry, winpipe
 from sentinel.service.authz import Caller
@@ -401,6 +402,37 @@ def test_service_disagreeing_means_nothing_is_quarantined_here(leased, db, scann
     assert "xác nhận" in out["error"]
 
 
+def test_a_hit_from_an_engine_the_service_lacks_is_not_lost(leased, db, scanner, tmp_path, monkeypatch):
+    # The tray has ClamAV, the service does not: "found nothing" there proves nothing.
+    bad = bad_file(tmp_path)
+    verdict = scanner.scan_file(bad)
+    monkeypatch.setattr(leased, "_scan", lambda op, **args: {
+        "state": "done", "quarantined": False, "error": None, "trusted": False, "engines": ["core"]})
+    out = protection.act_on(db, verdict, config.Settings(), "scan")
+    assert out["quarantined"] is True and not bad.exists()
+
+
+def test_an_administrators_trust_overrides_a_local_hit(leased, db, scanner, tmp_path, monkeypatch):
+    bad = bad_file(tmp_path)
+    verdict = scanner.scan_file(bad)
+    monkeypatch.setattr(leased, "_scan", lambda op, **args: {
+        "state": "done", "quarantined": False, "error": None, "trusted": True, "engines": []})
+    out = protection.act_on(db, verdict, config.Settings(), "scan")
+    assert out["quarantined"] is False and bad.exists()
+
+
+def test_service_never_takes_clamd_from_a_folder_on_the_path(tmp_path, monkeypatch):
+    planted = tmp_path / "clamd.exe"
+    planted.write_bytes(b"not really")
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setenv("PATHEXT", ".EXE")
+    monkeypatch.setenv("SENTINEL_CLAMAV_DIR", str(tmp_path))
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "nowhere"))
+    assert clamav.install_dir() == tmp_path, "user-level use keeps its overrides"
+    monkeypatch.setattr(clamav, "machine_only", True)
+    assert clamav.install_dir() is None
+
+
 def test_no_service_means_the_tray_keeps_protecting_on_its_own(db, scanner, tmp_path, monkeypatch):
     lease = bridge.ServiceLease(Absent)
     monkeypatch.setattr(protection, "delegate", lease.confirm)
@@ -426,6 +458,17 @@ def test_unc_paths_stay_with_the_users_own_process(leased):
         path = r"\\server\share\x.bin"
 
     assert leased.confirm(V()) is None
+
+
+def test_a_refusal_is_not_a_reason_to_act_locally(leased, backend, tmp_path):
+    # Only "not a path I handle" comes back to this process; "no" stays no.
+    bad = bad_file(tmp_path)
+    backend.denied.append(str(bad))
+
+    class V:
+        path = str(bad)
+
+    assert leased.confirm(V())["code"] == "ACCESS_DENIED"
 
 
 def test_native_host_cannot_write_the_allowlist_while_a_service_runs(leased, db, monkeypatch):

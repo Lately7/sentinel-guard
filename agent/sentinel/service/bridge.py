@@ -106,7 +106,8 @@ class ServiceLease:
         """protection.delegate: asks the service to scan and act on this file."""
         if not v.path or not self.available():
             return None
-        return self._scan("scan_request", path=str(v.path))
+        done = self._scan("scan_request", path=str(v.path))
+        return None if done is not None and _only_we_saw_it(v, done) else done
 
     def scan_download(self, path: str, url: str | None) -> dict[str, Any] | None:
         if not self.available():
@@ -139,6 +140,21 @@ class ServiceLease:
         except (ServiceError, ConsentError, OSError) as e:
             log.warning("confirmation of %s did not complete: %s", kind, e)
             return False
+
+
+def _only_we_saw_it(v: Verdict, done: dict[str, Any]) -> bool:
+    """The service found nothing, but only because it does not run the engine that did.
+
+    This process may act on a file it can reach anyway, so the detection stands.
+    A service that looked with the same engines, or a trust an administrator
+    approved, is an answer and overrides what was found here.
+    """
+    if done.get("state") != "done" or done.get("quarantined") or done.get("error") or done.get("trusted"):
+        return False
+    decision = getattr(v, "decision", None)
+    accepted = set(decision.accepted_evidence_ids) if decision else set()
+    finders = {r.engine_id for r in decision.engine_results if any(e.evidence_id in accepted for e in r.evidence)} if decision else set()
+    return bool(finders - set(done.get("engines", ())))
 
 
 lease = ServiceLease()

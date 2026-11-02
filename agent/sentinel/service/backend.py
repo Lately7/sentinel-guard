@@ -22,6 +22,7 @@ from typing import Any
 
 from .. import __version__, config, feeds, quarantine, urlintel
 from ..db import Database
+from ..engine import clamav
 from ..engine.scanner import Scanner
 from ..engine.verdict import Verdict
 from ..gate_v2 import identity
@@ -234,8 +235,11 @@ class ProductBackend:
         except ProtectionStopped:
             outcome = act_on(self.db, verdict, dataclasses.replace(self.settings, auto_quarantine=False), source,
                              extra=owner, authority=True)
+        decision = getattr(verdict, "decision", None)
         result = {**outcome, "verdict": verdict.to_dict(max_findings=30), "reason": top_reason(verdict),
-                  "url_reputation": reputation}
+                  "url_reputation": reputation,
+                  "engines": sorted(r.engine_id for r in decision.engine_results) if decision else [],
+                  "trusted": bool(decision) and "USER_TRUST" in decision.reason_codes}
         if outcome.get("error"):
             result["code"] = "NOT_QUARANTINED"
         return result
@@ -324,7 +328,11 @@ def _host(host: str) -> str | None:
 def build(state_db: Path | None = None) -> ProductBackend:
     from .workerclient import Isolation
 
+    clamav.machine_only = True
     db = Database(state_db)
     settings = config.Settings.load()
-    scanner = Scanner(db, use_defender=settings.use_defender, use_clamav=settings.use_clamav, isolation=Isolation())
+    # No clamd here yet: it parses hostile files and must not do that as LocalSystem.
+    # Until it can run restricted, a ClamAV hit stays with the user's own process
+    # (bridge.ServiceLease.confirm) instead of a parser running with full rights.
+    scanner = Scanner(db, use_defender=settings.use_defender, use_clamav=False, isolation=Isolation())
     return ProductBackend(db, settings, scanner)

@@ -46,9 +46,12 @@ DATABASE_FILES = ("main.cvd", "main.cld", "daily.cvd", "daily.cld")
 
 
 def install_dir() -> Path | None:
+    machine = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "ClamAV"
+    if machine_only:
+        return machine if (machine / _exe("clamd")).is_file() else None
     override = os.environ.get("SENTINEL_CLAMAV_DIR")
     cands = [Path(override)] if override else []
-    cands.append(Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "ClamAV")
+    cands.append(machine)
     found = shutil.which("clamd")
     if found:
         cands.append(Path(found).parent)
@@ -278,6 +281,11 @@ def finding_for(name: str) -> Finding:
     if name.startswith(("Heuristics.", "PUA.")):
         return Finding("clamav", f"clamav.{name.split('.', 2)[0].lower()}", Severity.MEDIUM, f"ClamAV: {name}", 30)
     return Finding("clamav", "clamav.detection", Severity.CRITICAL, f"ClamAV: {name}", 100)
+
+
+# Set by the service: PATH may name a folder a user can write to, and the first
+# clamd.exe found there would run as LocalSystem.
+machine_only = False
 
 
 class ClamAVEngine:
