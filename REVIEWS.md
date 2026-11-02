@@ -144,6 +144,14 @@ with a desired-behaviour test are in `tests/test_known_issues.py`
 | RT-026 | Real-time "on" with nothing watched | test | Fixed: `start()` raises `NothingToWatch`, tray reports it |
 | RT-027 | Only one registry view of Run keys | fake-registry test | Fixed: HKLM read in 64- and 32-bit views (`HKLM32`) |
 | RT-028 | `BC.Heuristics.*` ClamAV names treated as conclusive (ClamAV itself classes them potentially unwanted) | ClamAV source `others.c:1730-1734` + `clamav.py:231` | Open → Gate v2 ClamAV policy (R8a) |
+| RT-029 | freshclam exit 1 accepted as a successful update | ClamAV source `freshclam.c:2198-2203` | Open → Gate v2 ClamAV adapter (R8c) |
+| RT-030 | `RELOAD` reply ignored; `RELOADING` is not activation, a failed reload keeps the old engine | R8c (not re-checked) | Open → Gate v2 |
+| RT-031 | Readiness = file presence + `PING`; no header/signature/bytecode/age check | R8c (not re-checked) | Open → Gate v2 |
+| RT-032 | Reply parser accepts `FOUND` without the `stream:` frame and EOF before NUL | code | Open → Gate v2 |
+| RT-033 | Local DB/config changes not in the cache identity (daily `VERSION` only) | R8c (not re-checked) | Open → Gate v2 (with RT-009) |
+| RT-034 | No database-age readiness (`FailIfCvdOlderThan` absent; it would check only the youngest DB) | R8c (not re-checked) | Open → Gate v2 |
+| RT-035 | A (possibly weak) ClamAV hit skips Defender, removing corroboration | code | Open → Gate v2 |
+| RT-036 | No record of what an `OK` can mean (no match / FP rule / internal limit) | R8c | Open → Gate v2 contract |
 
 Tests after these fixes: pytest 110 passed, 4 skipped (real-clamd tests, no
 clamd), 3 xfailed (known issues); node --test 12 passed.
