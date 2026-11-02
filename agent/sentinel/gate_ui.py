@@ -8,6 +8,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import TYPE_CHECKING, Any
 
+from . import theme
 from .engine import clamav, defender
 from .scanjob import ScanJob, ScanProgress, describe_paths, fixed_drives
 
@@ -21,7 +22,7 @@ LAYERS = (
     ("defender", "Microsoft Defender", "chỉ khi Defender là phần mềm diệt virus đang chạy"),
 )
 LABEL_VI = {"clean": "sạch", "suspicious": "đáng ngờ", "malicious": "độc hại"}
-OK, WARN, BAD, OFF = "#1f9d55", "#c98a00", "#c0392b", "#8a8a8a"
+OK, WARN, BAD, OFF = theme.OK, theme.WARN, theme.BAD, theme.OFF
 
 
 def layer_text(status: str | None) -> str:
@@ -43,16 +44,16 @@ class GatePanel:
 
         layers = ttk.LabelFrame(frame, text="Các lớp kiểm tra (tệp phải qua tất cả)", padding=8)
         layers.pack(fill="x")
-        self.lights: dict[str, tuple[tk.Label, ttk.Label]] = {}
+        self.lights: dict[str, tuple[theme.Dot, ttk.Label]] = {}
         for row, (key, title, hint) in enumerate(LAYERS):
-            dot = tk.Label(layers, text="●", fg=OFF, font=("Segoe UI", 14))
-            dot.grid(row=row, column=0, padx=(0, 6))
-            ttk.Label(layers, text=title, font=("Segoe UI", 10, "bold"), width=20).grid(row=row, column=1, sticky="w")
-            st = ttk.Label(layers, text="…", width=58)
+            dot = theme.Dot(layers)
+            dot.grid(row=row, column=0, padx=(0, 8), pady=2)
+            ttk.Label(layers, text=title, style="CardTitle.TLabel", width=20).grid(row=row, column=1, sticky="w")
+            st = ttk.Label(layers, text="…", style="Card.TLabel", width=52)
             st.grid(row=row, column=2, sticky="w")
-            ttk.Label(layers, text=hint, foreground=OFF).grid(row=row, column=3, sticky="w", padx=8)
+            ttk.Label(layers, text=hint, style="CardMuted.TLabel").grid(row=row, column=3, sticky="w", padx=8)
             self.lights[key] = (dot, st)
-        cb = ttk.Frame(layers)
+        cb = ttk.Frame(layers, style="Card.TFrame")
         cb.grid(row=len(LAYERS), column=0, columnspan=4, sticky="w", pady=(6, 0))
         self.update_btn = ttk.Button(cb, text="Cập nhật chữ ký ClamAV", command=self.update_clamav)
         self.update_btn.pack(side="left", padx=(0, 6))
@@ -63,31 +64,32 @@ class GatePanel:
         self.buttons = []
         for text, cmd in (("Quét tệp…", self.scan_file), ("Quét thư mục…", self.scan_folder),
                           ("Quét nhanh", self.scan_quick), ("Quét toàn máy", self.scan_full)):
-            b = ttk.Button(ctl, text=text, command=cmd)
+            b = ttk.Button(ctl, text=text, command=cmd, style="Primary.TButton" if cmd == self.scan_quick else "TButton")
             b.pack(side="left", padx=(0, 6))
             self.buttons.append(b)
         self.stop_btn = ttk.Button(ctl, text="Dừng", command=self.stop, state="disabled")
         self.stop_btn.pack(side="left", padx=(12, 0))
 
-        self.bar = ttk.Progressbar(frame, mode="indeterminate")
+        self.bar = theme.ActivityBar(frame)
         self.bar.pack(fill="x")
         self.progress_var = tk.StringVar(value="Chưa quét.")
-        ttk.Label(frame, textvariable=self.progress_var, justify="left").pack(anchor="w", pady=(4, 8))
+        ttk.Label(frame, textvariable=self.progress_var, justify="left", style="Muted.TLabel").pack(anchor="w", pady=(6, 8))
 
         cols = ("Tệp", "Kết luận", "Điểm", "Lõi", "Luật/YARA", "ClamAV", "Defender", "Xử lý", "Lý do")
-        widths = (300, 70, 45, 75, 75, 85, 75, 80, 330)
+        widths = (300, 75, 45, 80, 75, 80, 75, 80, 300)
         box = ttk.Frame(frame)
         box.pack(fill="both", expand=True)
         self.tv = ttk.Treeview(box, columns=cols, show="headings", height=10)
         for c, w in zip(cols, widths):
             self.tv.heading(c, text=c)
-            self.tv.column(c, width=w, stretch=c in ("Tệp", "Lý do"), minwidth=0)
+            self.tv.column(c, width=theme.px(self.tv, w), stretch=c in ("Tệp", "Lý do"), minwidth=0)
         self.tv.tag_configure("malicious", foreground=BAD)
         self.tv.tag_configure("suspicious", foreground=WARN)
         sb = ttk.Scrollbar(box, orient="vertical", command=self.tv.yview)
         self.tv.configure(yscrollcommand=sb.set)
         self.tv.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
+        self.flash = theme.RowFlash(self.tv)
         self.tv.bind("<Double-1>", self.show_detail)
         self.details: dict[str, dict[str, Any]] = {}
         self.refresh_layers()
@@ -110,7 +112,7 @@ class GatePanel:
             else:
                 vi = {"no database": "chưa có chữ ký — bấm Cập nhật", "not running": "đang khởi động…",
                       "not installed": "chưa cài"}.get(st, st)
-                self._set("clamav", WARN if st == "not running" else BAD, vi)
+                self._set("clamav", WARN if st == "not running" else BAD, vi, busy=st == "not running")
         if not self.app.settings.use_defender:
             self._set("defender", OFF, "đang tắt trong cài đặt")
         elif defender.available():
@@ -118,9 +120,9 @@ class GatePanel:
         else:
             self._set("defender", OFF, "không phải phần mềm diệt virus đang chạy (bỏ qua)")
 
-    def _set(self, key: str, color: str, text: str) -> None:
+    def _set(self, key: str, color: str, text: str, busy: bool = False) -> None:
         dot, st = self.lights[key]
-        dot.configure(fg=color)
+        dot.set(color, busy)
         st.configure(text=text)
 
     def update_clamav(self) -> None:
@@ -180,7 +182,8 @@ class GatePanel:
         for b in self.buttons:
             b.configure(state="disabled")
         self.stop_btn.configure(state="normal")
-        self.bar.start(12)
+        self.bar.start()
+        self.app.scanning(True)
         self.tick()
 
     def stop(self) -> None:
@@ -200,6 +203,7 @@ class GatePanel:
 
     def finished(self, p: ScanProgress) -> None:
         self.bar.stop()
+        self.app.scanning(False)
         for b in self.buttons:
             b.configure(state="normal")
         self.stop_btn.configure(state="disabled")
@@ -224,6 +228,7 @@ class GatePanel:
             v.get("path") or v["name"], LABEL_VI.get(v["label"], v["label"]), v["score"],
             layer_text(eng.get("sentinel")), layer_text(eng.get("rules+yara")),
             layer_text(eng.get("clamav")), layer_text(eng.get("defender")), action, reason))
+        self.flash.add(iid)
 
     def show_detail(self, _event: object = None) -> None:
         sel = self.tv.selection()

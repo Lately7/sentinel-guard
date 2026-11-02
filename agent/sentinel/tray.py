@@ -13,7 +13,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 
-from . import config, feeds, quarantine, report, yarafeed
+from . import config, feeds, quarantine, report, theme, yarafeed
 from .db import Database
 from .engine import clamav, defender
 from .engine.scanner import Scanner
@@ -25,17 +25,13 @@ from .watcher import RealtimeProtection
 log = logging.getLogger(__name__)
 
 APP = "Sentinel Guard"
-# The logo is a plain black square with a border; only the border colour
+# The logo is a black-to-grey square in a thin outline; only the outline colour
 # carries state, so the icon stays the same shape in every situation.
-GREEN, AMBER, RED = (230, 230, 230), (220, 150, 20), (200, 40, 40)
+GREEN, AMBER, RED = (150, 150, 156), (220, 150, 20), (220, 60, 50)
 
 
-def _icon_image(border: tuple[int, int, int]):
-    from PIL import Image, ImageDraw
-
-    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-    ImageDraw.Draw(img).rectangle([4, 4, 59, 59], fill=(0, 0, 0, 255), outline=border + (255,), width=6)
-    return img
+def _icon_image(ring: tuple[int, int, int]):
+    return theme.logo_image(64, ring)
 
 
 def _fmt_ts(ts: float | None) -> str:
@@ -55,10 +51,13 @@ class App:
         self.gate: GatePanel | None = None
         self.realtime: RealtimeProtection | None = None
         self.ui_queue: queue.Queue = queue.Queue()
+        theme.enable_dpi_awareness()
         self.root = tk.Tk()
         self.root.withdraw()
         self.root.title(APP)
+        theme.apply(self.root)
         self.window: tk.Toplevel | None = None
+        self.logo: theme.LogoMark | None = None
         self.icon = None
         self._stop = threading.Event()
 
@@ -218,18 +217,31 @@ class App:
             self.window.deiconify()
             self.window.lift()
             return
-        w = tk.Toplevel(self.root)
+        w = tk.Toplevel(self.root, bg=theme.BG)
         w.title(APP)
-        w.geometry("1180x720")
+        w.geometry(f"{theme.px(w, 1100)}x{theme.px(w, 660)}")
+        w.minsize(theme.px(w, 860), theme.px(w, 480))
+        from PIL import ImageTk
+
+        self._window_icon = ImageTk.PhotoImage(theme.logo_image(32))
+        w.iconphoto(False, self._window_icon)
+        theme.dark_title_bar(w)
         self.window = w
+        head = ttk.Frame(w, padding=(12, 10, 12, 2))
+        head.pack(fill="x")
+        self.logo = theme.LogoMark(head, size=20)
+        self.logo.pack(side="left")
+        ttk.Label(head, text=APP, style="Title.TLabel").pack(side="left", padx=(8, 0))
+        self.head_var = tk.StringVar()
+        ttk.Label(head, textvariable=self.head_var, style="Muted.TLabel").pack(side="right")
         nb = ttk.Notebook(w)
-        nb.pack(fill="both", expand=True, padx=8, pady=8)
+        nb.pack(fill="both", expand=True, padx=8, pady=(4, 8))
         self.gate = GatePanel(nb, self)
 
         ov = ttk.Frame(nb, padding=12)
         nb.add(ov, text="Tổng quan")
         self.status_var = tk.StringVar()
-        ttk.Label(ov, textvariable=self.status_var, justify="left", font=("Segoe UI", 11)).pack(anchor="w")
+        ttk.Label(ov, textvariable=self.status_var, justify="left").pack(anchor="w")
         bar = ttk.Frame(ov)
         bar.pack(anchor="w", pady=12)
         for text, cmd in (("Quét nhanh", self.quick_scan), ("Quét thư mục…", self.pick_and_scan),
@@ -264,12 +276,16 @@ class App:
         tv = ttk.Treeview(frame, columns=cols, show="headings")
         for c, wdt in zip(cols, widths):
             tv.heading(c, text=c)
-            tv.column(c, width=wdt, stretch=wdt > 300, minwidth=0)
+            tv.column(c, width=theme.px(tv, wdt), stretch=wdt > 300, minwidth=0)
         sb = ttk.Scrollbar(frame, orient="vertical", command=tv.yview)
         tv.configure(yscrollcommand=sb.set)
         tv.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
         return tv
+
+    def scanning(self, on: bool) -> None:
+        if self.logo is not None:
+            (self.logo.start if on else self.logo.stop)()
 
     def refresh(self) -> None:
         if self.gate is not None:
@@ -287,6 +303,7 @@ class App:
             f"Cập nhật dữ liệu lần cuối: {_fmt_ts(last) if last else 'chưa'}\n"
             f"Tệp đang cách ly: {c['quarantine']}"
         )
+        self.head_var.set(f"Bảo vệ thời gian thực {'bật' if rt else 'tắt'} · {c['quarantine']} tệp đang cách ly")
         _fill(self.events_tv, [(e["id"], (_fmt_ts(e["ts"]), e["source"], e["level"], f"{e['title']} — {e['detail']}"))
                                for e in self.db.events(300)])
         items = []
