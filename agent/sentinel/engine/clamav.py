@@ -138,7 +138,9 @@ def update(timeout: float = 1800.0) -> str:
         return "error: freshclam timed out"
     except OSError as e:
         return f"error: {e}"
-    if proc.returncode not in (0, 1) or not has_database():
+    # freshclam returns 0 for "up to date" and "updated"; every other code is a failure
+    # (freshclam/freshclam.c:2198-2203 in ClamAV 1.5.4), even when an older database exists.
+    if proc.returncode != 0 or not has_database():
         tail = (proc.stdout or proc.stderr or "").strip().splitlines()[-3:]
         return f"error: freshclam exit {proc.returncode}: {' | '.join(tail)}"
     try:
