@@ -27,11 +27,19 @@ log = logging.getLogger(__name__)
 APP = "Sentinel Guard"
 # The logo is a black-to-grey square in a thin outline; only the outline colour
 # carries state, so the icon stays the same shape in every situation.
-GREEN, AMBER, RED = (150, 150, 156), (220, 150, 20), (220, 60, 50)
+GREEN, AMBER, RED = (116, 116, 122), (212, 163, 42), (224, 82, 74)
+_TRAY_FILES = {GREEN: "tray-normal.png", AMBER: "tray-warning.png", RED: "tray-threat.png"}
 
 
 def _icon_image(ring: tuple[int, int, int]):
-    return theme.logo_image(64, ring)
+    # Hand-tuned rasters from assets/brand; the procedural logo is only a fallback.
+    from PIL import Image
+
+    path = Path(__file__).with_name("icons") / _TRAY_FILES.get(ring, "tray-normal.png")
+    try:
+        return Image.open(path).convert("RGBA")
+    except OSError:
+        return theme.logo_image(64, ring)
 
 
 def _fmt_ts(ts: float | None) -> str:

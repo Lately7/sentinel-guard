@@ -138,8 +138,9 @@ def logo_image(size: int = 64, ring: tuple[int, int, int] | None = None):
     d = ImageDraw.Draw(img)
     stroke = max(scale, round(n * 0.045))
     gap = round(n * 0.09)
-    d.rectangle([0, 0, n - 1, n - 1], outline=(ring or (58, 58, 62)) + (255,), width=stroke)
-    top, bottom = (6, 6, 7), (118, 118, 124)
+    d.rectangle([0, 0, n - 1, n - 1], outline=(ring or (116, 116, 122)) + (255,), width=stroke)
+    # Same values as assets/brand (core #050506 -> #707076, outline #74747a).
+    top, bottom = (5, 5, 6), (112, 112, 118)
     x0 = y0 = stroke + gap
     x1 = y1 = n - 1 - stroke - gap
     h = max(1, y1 - y0)

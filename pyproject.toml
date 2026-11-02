@@ -20,7 +20,7 @@ sentinel = "sentinel.__main__:main"
 where = ["agent"]
 
 [tool.setuptools.package-data]
-sentinel = ["rules/*.json"]
+sentinel = ["rules/*.json", "icons/*.png", "sentinel.ico"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
