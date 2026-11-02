@@ -32,7 +32,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
     settings.auto_quarantine = args.quarantine
     scanner = Scanner(db, use_defender=not args.no_defender and settings.use_defender,
                       use_clamav=not args.no_clamav and settings.use_clamav)
-    worst = 0
+    malicious = suspicious = False
     results = []
     missing = [p for p in args.paths if not os.path.exists(p)]
     for p in missing:
@@ -43,8 +43,14 @@ def cmd_scan(args: argparse.Namespace) -> int:
         if v.skipped and v.skipped.startswith(("unreadable", "changed while")):
             failures.append(f"{f}: {v.skipped}")
             print(f"ERROR      {f}: {v.skipped}", file=sys.stderr)
-        rank = {"clean": 0, "suspicious": 1, "malicious": 2}[v.label]
-        worst = max(worst, rank)
+        # An engine that was asked and failed did not check the file; a layer
+        # that is off or not installed is a configuration, not a failure.
+        broken = [f"{k} {s}" for k, s in v.engines.items() if s.split(":", 1)[0] in ("error", "timeout")]
+        if broken:
+            failures.append(f"{f}: {'; '.join(broken)}")
+            print(f"ERROR      {f}: {'; '.join(broken)}", file=sys.stderr)
+        malicious |= v.label == "malicious"
+        suspicious |= v.label == "suspicious"
         if args.json:
             results.append(v.to_dict())
         elif v.label != "clean" or args.verbose:
@@ -58,8 +64,14 @@ def cmd_scan(args: argparse.Namespace) -> int:
                 print(f"           -> quarantined as {out['quarantine_id']}")
     if args.json:
         print(json.dumps(results, indent=2, ensure_ascii=False))
-    # A target that couldn't be scanned must not look like a clean result to scripts.
-    return 3 if failures and worst == 0 else worst
+    # Precedence agreed in design round 3 (R5): a known threat matters most;
+    # then anything that could not be checked, which must never read as clean
+    # or merely suspicious to a script; then suspicious; then clean.
+    if malicious:
+        return 2
+    if failures:
+        return 3
+    return 1 if suspicious else 0
 
 
 def cmd_update(args: argparse.Namespace) -> int:
