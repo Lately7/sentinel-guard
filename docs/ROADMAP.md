@@ -3,7 +3,7 @@
 Một trang duy nhất để theo dõi tiến độ. Chi tiết kỹ thuật vẫn nằm trong
 `docs/handoff/PROJECT_CONTEXT.md`; khi hai nơi khác nhau thì code là đúng.
 
-**Cập nhật:** 2026-11-02 · **Nhánh:** `gate-baseline` (chưa push)
+**Cập nhật:** 2026-11-02 tối · **Nhánh:** `gate-baseline` (chưa push) · **Bàn giao:** `docs/handoff/NEXT_SESSION.md`
 
 ## Ai làm gì
 
@@ -40,8 +40,8 @@ cổng** vẫn làm ngay: native host (C3e, C3j), extension (C3k), mã thoát CL
 |---|---|---|
 | 0 | **Nền tảng**: C1 icon cũ, C2a cổng quét, C2b baseline, giao diện tối, bộ icon v2 | ✅ xong |
 | 1 | **Sửa lỗi** (C3a, d, e, g, h, j, k ✅; C3b/c/f vào Gate v2; C3i bỏ) | ✅ xong |
-| R | **Nghiên cứu sâu cho Gate v2** (R8a–R11, `docs/research/`) | ⏳ R9, R10 đang chạy; R8 chờ tải mã nguồn ClamAV |
-| G | **Gate v2** do Codex viết theo đặc tả R11, Claude review | chờ R11 |
+| R | **Nghiên cứu sâu cho Gate v2** (R8a–R12d, R11 đặc tả) | ✅ xong |
+| G | **Gate v2** do Codex viết theo đặc tả R11 (8 mốc), Claude review | ⏭ mốc 1 (xem `docs/handoff/NEXT_SESSION.md`) |
 | 2 | **Red Team viết test** (Codex vòng 1a, 1b) | chờ giai đoạn 1 |
 | 3 | **Contract v1**: tách trạng thái quét khỏi kết luận; "một phần"/lỗi không bao giờ là "sạch" | chờ |
 | 4 | **Chính sách ClamAV + cách ly an toàn** | chờ |
@@ -128,10 +128,10 @@ cần xử lý mới sáng lên (333 ms); tắt hết khi Windows tắt hiệu �
 | RT-019 | Native host chấp nhận khi thiếu origin | Thấp | ✅ C3j |
 | RT-020 | Thông điệp từ trang thiếu kiểm tra số (NaN) và độ dài | Thấp | ✅ C3k |
 | RT-021 | Allowlist bị cắt im lặng sau 5.000 tên miền | TB | GĐ 5 |
-| RT-022 | "Vẫn tiếp tục" tạo ngoại lệ vĩnh viễn cho cả tên miền | TB | GĐ 5 |
-| RT-023 | Tải về không gửi được tới agent vẫn đếm là đã quét | TB | GĐ 5 |
+| RT-022 | "Vẫn tiếp tục" tạo ngoại lệ vĩnh viễn cho cả tên miền | TB | ⏳ đã tách "Mở một lần"/"Luôn tin cậy"; "Mở một lần" chưa mở được trang (xem `docs/handoff/NEXT_SESSION.md` §3) |
+| RT-023 | Tải về không gửi được tới agent vẫn đếm là đã quét | TB | ✅ |
 | RT-024 | Quét bỏ sót (junction, đường dẫn dài, thiếu quyền) không ghi vào độ phủ | TB | GĐ 5 |
-| RT-025 | Popup nói "Không phát hiện vấn đề" khi chưa kiểm tra | TB | GĐ 5 |
+| RT-025 | Popup nói "Không phát hiện vấn đề" khi chưa kiểm tra | TB | ✅ |
 | RT-026 | Thời gian thực báo "bật" dù không theo dõi thư mục nào | TB | ✅ |
 | RT-027 | Chỉ đọc một view registry của khoá Run | TB | ✅ |
 | RT-028 | Tên ClamAV `BC.Heuristics.*` bị coi là chắc chắn độc (ClamAV coi là "có thể không mong muốn") | TB | Gate v2 |
@@ -154,5 +154,5 @@ cần xử lý mới sáng lên (333 ms); tắt hết khi Windows tắt hiệu �
 
 ## Kiểm thử gần nhất
 
-pytest **110 passed, 4 skipped, 3 xfailed** (không có clamd; 3 xfail = lỗi đã biết RT-001/002/026) · extension **12 passed**.
+pytest **119 passed, 4 skipped, 2 xfailed** (không có clamd; 2 xfail = RT-001, RT-002) · extension **32 passed** · Helium e2e: xem `docs/handoff/NEXT_SESSION.md` §3.
 Baseline tại C2a: `docs/baseline.md`.
