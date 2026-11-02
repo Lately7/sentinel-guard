@@ -57,6 +57,7 @@ class _Plan:
     summary: str
     requester: tuple[str, int]
     expires: float
+    claimed_by: tuple[tuple[str, int], str | None] | None = None
 
 
 @dataclass
@@ -81,7 +82,7 @@ class ServiceCore:
 
     # -- entry points
 
-    def handle(self, caller: Caller, frame: dict[str, Any]) -> dict[str, Any]:
+    def handle(self, caller: Caller, frame: dict[str, Any], *, connection_id: str | None = None) -> dict[str, Any]:
         """One request frame in, one response frame out; never raises."""
         rid = frame.get("id") if isinstance(frame.get("id"), int) and not isinstance(frame.get("id"), bool) else None
         try:
@@ -95,7 +96,11 @@ class ServiceCore:
                 stopping = self._stopping
             if stopping and req.op.name not in ("hello", "status"):
                 return error(req.id, "STOPPING")
-            return ok(req.id, getattr(self, "_op_" + req.op.name)(caller, req.args))
+            if req.op.name in ("get_plan", "approve_plan"):
+                result = getattr(self, "_op_" + req.op.name)(caller, req.args, connection_id=connection_id)
+            else:
+                result = getattr(self, "_op_" + req.op.name)(caller, req.args)
+            return ok(req.id, result)
         except ProtocolError as e:
             return error(rid, e.code, str(e))
         except Exception:
@@ -211,7 +216,7 @@ class ServiceCore:
             self._expire(now)
             if sum(1 for p in self._plans.values() if p.requester == caller.key) >= MAX_PLANS_PER_CALLER:
                 raise ProtocolError("BUSY", "too many pending confirmations")
-            plan = _Plan(secrets.token_hex(16), 1, args["kind"], args["params"], summary[:500],
+            plan = _Plan(secrets.token_hex(16), 1, args["kind"], dict(args["params"]), summary[:500],
                          caller.key, now + PLAN_TTL_SECONDS)
             self._plans[plan.plan_id] = plan
         # The requester learns only the id; what gets approved is what the
@@ -226,18 +231,26 @@ class ServiceCore:
             plan = self._plans.get(plan_id)
         # The helper runs in the requester's interactive session; an approval
         # from another session (or another machine user's desktop) is refused.
-        if plan is None or plan.requester[1] != caller.session_id:
+        if plan is None or plan.requester != caller.key:
             raise ProtocolError("NOT_FOUND", "no such confirmation (expired?)")
         return plan
 
-    def _op_get_plan(self, caller: Caller, args: dict[str, Any]) -> dict[str, Any]:
+    def _op_get_plan(self, caller: Caller, args: dict[str, Any], *, connection_id: str | None = None) -> dict[str, Any]:
         plan = self._plan_for(caller, args["plan_id"])
+        with self._lock:
+            if plan.claimed_by is not None:
+                raise ProtocolError("PLAN_CLAIMED", "confirmation already displayed")
+            plan.claimed_by = (caller.key, connection_id)
         return {"plan_id": plan.plan_id, "version": plan.version, "kind": plan.kind, "summary": plan.summary}
 
-    def _op_approve_plan(self, caller: Caller, args: dict[str, Any]) -> dict[str, Any]:
+    def _op_approve_plan(self, caller: Caller, args: dict[str, Any], *, connection_id: str | None = None) -> dict[str, Any]:
         plan = self._plan_for(caller, args["plan_id"])
+        if plan.claimed_by is not None and plan.claimed_by != (caller.key, connection_id):
+            raise ProtocolError("PLAN_CLAIMED", "confirmation belongs to another helper")
         if args["version"] != plan.version:
             raise ProtocolError("STALE_PLAN", "the confirmation changed; show it again")
+        if self.backend.describe_plan(plan.kind, plan.params) != plan.summary:
+            raise ProtocolError("STALE_PLAN", "the target changed; show it again")
         with self._lock:
             # Single use: removed before acting, so a replayed approval finds nothing.
             if self._plans.pop(plan.plan_id, None) is None:

@@ -55,7 +55,7 @@ def test_caller_identity_comes_from_the_client_token(server):
     assert me.sid.startswith("S-1-5-") and me.integrity in ("medium", "high", "system")
     seen = []
     real = srv.core.handle
-    srv.core.handle = lambda caller, frame: (seen.append(caller), real(caller, frame))[1]
+    srv.core.handle = lambda caller, frame, **kwargs: (seen.append(caller), real(caller, frame, **kwargs))[1]
     [hello] = ask(winpipe, name, {"v": 1, "id": 1, "op": "hello"})
     assert hello["ok"]
     assert [(c.sid, c.session_id, c.integrity, c.is_admin, c.remote) for c in seen] == [
@@ -104,7 +104,7 @@ def test_client_round_trip_and_typed_errors(server):
     from sentinel.service.client import ServiceClient, ServiceError, ServiceUnavailable
 
     _winpipe, _srv, name, me = server
-    with ServiceClient(name) as c:
+    with ServiceClient(name, expected_sid=me.sid) as c:
         assert c.request("hello")["protocol"] == 1
         assert c.request("status") == {"realtime": True}
         with pytest.raises(ServiceError) as e:
@@ -113,3 +113,15 @@ def test_client_round_trip_and_typed_errors(server):
         assert c.request("hello")["protocol"] == 1, "the connection survives a refused request"
     with pytest.raises(ServiceUnavailable):
         ServiceClient(rf"\\.\pipe\SentinelGuardTest-missing-{uuid.uuid4().hex}").request("hello")
+
+
+def test_squatting_same_user_pipe_is_rejected_before_any_request(server):
+    from sentinel.service.client import ServiceClient, WrongServer
+
+    _winpipe, srv, name, me = server
+    seen = []
+    srv.core.handle = lambda caller, frame, **kwargs: seen.append(frame)
+    with pytest.raises(WrongServer) as error:
+        ServiceClient(name).request("hello")
+    assert error.value.code == "WRONG_SERVER"
+    assert seen == []

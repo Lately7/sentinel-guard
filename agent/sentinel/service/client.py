@@ -20,9 +20,19 @@ class ServiceUnavailable(ServiceError):
     """No service is listening (not installed, stopped, or still starting)."""
 
 
+class WrongServer(ServiceError):
+    """The pipe is answered by a process with the wrong token user."""
+
+
+# Objects a LocalSystem service creates are owned by SYSTEM or, depending on its
+# token's default owner, by Administrators. A same-user process can be neither.
+SERVICE_OWNERS = ("S-1-5-18", "S-1-5-32-544")
+
+
 class ServiceClient:
-    def __init__(self, name: str = winpipe.PIPE_NAME) -> None:
+    def __init__(self, name: str = winpipe.PIPE_NAME, *, expected_sid: str | None = None) -> None:
         self.name = name
+        self.expected = (expected_sid,) if expected_sid else SERVICE_OWNERS
         self._conn: winpipe.PipeStream | None = None
         self._ids = itertools.count(1)
 
@@ -41,7 +51,12 @@ class ServiceClient:
         if self._conn is None:
             try:
                 self._conn = winpipe.connect(self.name)
+                if winpipe.server_pipe_owner(self._conn).upper() not in (sid.upper() for sid in self.expected):
+                    # Before anything is sent: a squatter must not learn or answer requests.
+                    self.close()
+                    raise WrongServer("WRONG_SERVER", "pipe owner mismatch")
             except winpipe.PipeError as e:
+                self.close()
                 raise ServiceUnavailable("SERVICE_UNAVAILABLE", str(e)) from e
         rid = next(self._ids)
         try:

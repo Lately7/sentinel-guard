@@ -161,6 +161,28 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_service(args: argparse.Namespace) -> int:
+    from . import __version__
+    from .service import installer
+
+    try:
+        if args.action == "snapshot":
+            digest = installer.snapshot_runtime(Path(args.source))
+            print(f"Bản sao để xem xét: {args.source}\nSHA-256 tổng: {digest}")
+            print("Xem lại thư mục này, rồi chạy `sentinel service install --source <thư mục>` với quyền admin.")
+        elif args.action == "install":
+            installer.install(Path(args.source), args.version_id or __version__, dry_run=args.dry_run)
+        else:
+            print(installer.uninstall())
+    except installer.ElevationRequired:
+        print("Lệnh này cần cửa sổ dòng lệnh chạy với quyền Administrator.", file=sys.stderr)
+        return 1
+    except (installer.InstallError, OSError) as e:
+        print(f"Không thực hiện được: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     from . import report
     from .db import Database
@@ -287,6 +309,13 @@ def main(argv: list[str] | None = None) -> int:
     i.set_defaults(fn=cmd_install)
     sub.add_parser("uninstall").set_defaults(fn=cmd_uninstall)
 
+    v = sub.add_parser("service", help="dịch vụ Windows: snapshot | install | uninstall (hai lệnh sau cần quyền admin)")
+    v.add_argument("action", choices=["snapshot", "install", "uninstall"])
+    v.add_argument("--source", help="thư mục bản sao runtime đã xem xét")
+    v.add_argument("--version-id")
+    v.add_argument("--dry-run", action="store_true", help="in kế hoạch, không thay đổi gì")
+    v.set_defaults(fn=cmd_service)
+
     r = sub.add_parser("report", help="xuất báo cáo HTML + JSON")
     r.add_argument("--out")
     r.set_defaults(fn=cmd_report)
@@ -296,6 +325,8 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     if args.cmd == "quarantine" and args.action != "list" and not args.id:
         ap.error("quarantine restore/delete needs an id")
+    if args.cmd == "service" and args.action != "uninstall" and not args.source:
+        ap.error("service snapshot/install needs --source")
     return int(args.fn(args) or 0)
 
 
