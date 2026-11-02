@@ -98,3 +98,18 @@ def test_a_squatted_pipe_name_stops_the_server_from_starting():
             winpipe.PipeServer(ServiceCore(FakeBackend()), name=name, sddl=f"D:P(A;;GA;;;{me.sid})")
     finally:
         winpipe._k32.CloseHandle(first._pending)
+
+
+def test_client_round_trip_and_typed_errors(server):
+    from sentinel.service.client import ServiceClient, ServiceError, ServiceUnavailable
+
+    _winpipe, _srv, name, me = server
+    with ServiceClient(name) as c:
+        assert c.request("hello")["protocol"] == 1
+        assert c.request("status") == {"realtime": True}
+        with pytest.raises(ServiceError) as e:
+            c.request("approve_plan", plan_id="0" * 32, version=1)
+        assert e.value.code == ("NOT_FOUND" if me.is_admin else "ELEVATION_REQUIRED")
+        assert c.request("hello")["protocol"] == 1, "the connection survives a refused request"
+    with pytest.raises(ServiceUnavailable):
+        ServiceClient(rf"\\.\pipe\SentinelGuardTest-missing-{uuid.uuid4().hex}").request("hello")
