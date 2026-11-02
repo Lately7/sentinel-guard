@@ -30,8 +30,12 @@ Brave).
 * Theo dõi thời gian thực Downloads, Desktop, Documents (theo đường dẫn thật, kể
   cả khi OneDrive chuyển chỗ), thư mục Startup, %TEMP%, và khoá Run trong
   registry.
-* Cách ly an toàn (kiểm tra lại hash trước khi đụng tệp, ghi sổ trước khi xoá),
-  khôi phục không ghi đè.
+* Cách ly qua handle đã giữ, nên tráo junction không đổi được mục tiêu; gỡ mọi
+  hard link; nhật ký phục hồi sau sự cố; khôi phục không ghi đè và chỉ miễn trừ đúng
+  tệp ở đúng vị trí. Chương trình đang chạy: xem trước các bước, xác nhận, rồi dừng
+  và cách ly, tự khởi động quay lại nếu khôi phục tệp.
+* Quét thông minh: khởi động cùng máy, tác vụ, dịch vụ, tiến trình và thư mục theo
+  dõi. Mục không xem được được đếm, không coi là sạch.
 * Dữ liệu mối đe dọa: malware-filter (urlhaus, phishing, pup), OpenPhish,
   HaGeZi TIF và fake, Phishing.Database, NoCoin — khoảng 550.000 tên miền.
   Tranco top 100.000 không bao giờ bị chặn nguyên tên miền.
@@ -66,10 +70,28 @@ Chạy agent: shortcut **Sentinel Guard** trên Desktop, hoặc
 `.\.venv\Scripts\pythonw -m sentinel tray`. Mở lần nữa chỉ đưa bảng điều khiển
 lên, không chạy bản thứ hai.
 
+### Dịch vụ quyền quản trị (tuỳ chọn, mới)
+
+Không cài thì mọi thứ chạy bằng quyền người dùng như trên. Cài rồi thì dịch vụ
+chạy nền là bên duy nhất được hành động: khay, CLI và native host chỉ báo tệp cho
+dịch vụ, dịch vụ tự quét và tự quyết. Khôi phục, tin cậy, tắt bảo vệ, xử lý chương
+trình đang chạy đều phải qua hộp xác nhận quản trị. Trong PowerShell chạy Administrator:
+
+```powershell
+.\.venv\Scripts\python -m sentinel service snapshot --source C:\SentinelSnapshot
+# xem lại thư mục đó, rồi:
+.\.venv\Scripts\python -m sentinel service install --source C:\SentinelSnapshot
+.\.venv\Scripts\python -m sentinel service verify --restart   # PASS/FAIL/SKIP từng mục
+.\.venv\Scripts\python -m sentinel service uninstall          # giữ khu cách ly và nhật ký
+```
+
+Chưa chạy thật ở bản này: chưa ai cài dịch vụ dưới LocalSystem, `verify` là lần đầu.
+
 ## Lệnh
 
 ```powershell
-sentinel scan <tệp|thư mục> [--quarantine] [--json] [-v]   # 0 sạch, 1 đáng ngờ, 2 độc hại, 3 không truy cập được; -v in kết quả từng lớp
+sentinel scan [--smart | --deep | <tệp|thư mục>] [--quarantine] [--json] [-v]   # 0 sạch, 1 đáng ngờ, 2 độc hại, 3 có phần chưa kiểm tra được; -v in kết quả từng lớp
+sentinel service snapshot | install | verify | uninstall
 sentinel clamav update | start | stop | status
 sentinel rules update
 sentinel check-url <url>
@@ -110,13 +132,17 @@ sentinel unblock blocked-selftest.sentinelguard.invalid
 ## Giới hạn đã biết
 
 * Phát hiện sau khi tệp đã ghi xuống đĩa, không chặn trước khi chạy.
-* abuse.ch (MalwareBazaar, URLhaus, ThreatFox) giờ yêu cầu khoá tài khoản nên
-  chưa có nguồn hash mã độc riêng; phát hiện tệp dựa vào ClamAV, YARA Forge,
-  Defender (nếu đang là AV chính) và nguồn tải về. Không cài ClamAV thì lớp 3
-  hiện "không có" và kết quả quét ghi rõ tệp chỉ được lõi kiểm tra.
-* `clamd` nghe trên 127.0.0.1: một chương trình cùng quyền người dùng có thể
-  chiếm cổng đó trước và trả lời "sạch" — cùng giới hạn với mọi phần mềm chạy
-  bằng quyền người dùng.
-* Agent chạy bằng quyền người dùng; mã độc chạy cùng quyền có thể can thiệp.
+* abuse.ch (MalwareBazaar, URLhaus, ThreatFox) yêu cầu khoá tài khoản miễn phí;
+  có `abusech_auth_key` trong settings thì ba nguồn này tự được dùng. Không có
+  thì phát hiện tệp dựa vào ClamAV, YARA Forge, Defender (nếu đang là AV chính) và
+  nguồn tải về. Không cài ClamAV thì lớp 3 hiện "không có" và kết quả quét ghi rõ
+  tệp chỉ được lõi kiểm tra.
+* Dịch vụ chưa chạy ClamAV: `clamd` phân tích tệp độc nên không được chạy dưới
+  LocalSystem. Khay vẫn dùng ClamAV và tự xử lý phát hiện của nó.
+* Không có driver: dịch vụ thấy tệp và tiến trình sau khi chúng xuất hiện (nhật ký
+  USN, lấy mẫu 500 ms), không ngăn được chúng chạy. Tiến trình sống dưới một mẫu có
+  thể không được thấy.
+* Không có dịch vụ thì agent chạy bằng quyền người dùng; mã độc chạy cùng quyền có
+  thể can thiệp.
 * Trình duyệt giới hạn số quy tắc; ~400.000 tên miền được chặn ở tầng mạng,
   phần còn lại được bắt khi điều hướng.
