@@ -1,15 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" role="img" aria-label="Sentinel Guard">
-  <defs>
-    <linearGradient id="core16" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#050506"/>
-      <stop offset="0.5" stop-color="#202021"/>
-      <stop offset="0.75" stop-color="#424245"/>
-      <stop offset="1" stop-color="#707076"/>
-    </linearGradient>
-  </defs>
   <g shape-rendering="crispEdges">
-    <rect x="0.5" y="0.5" width="15" height="15" fill="none" stroke="#74747a" stroke-width="1"/>
-    <rect x="3" y="3" width="10" height="10" fill="url(#core16)"/>
+    <rect x="2.5" y="2.5" width="11" height="11" fill="none" stroke="#74747a" stroke-width="1"/>
+    <rect x="4" y="4" width="7" height="7" fill="#0a0a0b"/>
   </g>
 </svg>

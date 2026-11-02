@@ -1,13 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="Sentinel Guard">
-  <defs>
-    <linearGradient id="core" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#050506"/>
-      <stop offset="0.5" stop-color="#202021"/>
-      <stop offset="0.75" stop-color="#424245"/>
-      <stop offset="1" stop-color="#707076"/>
-    </linearGradient>
-  </defs>
-  <rect x="1" y="1" width="62" height="62" fill="none" stroke="#74747a" stroke-width="2"/>
-  <rect x="8" y="8" width="48" height="48" fill="url(#core)"/>
+  <g shape-rendering="crispEdges">
+    <rect x="8" y="8" width="48" height="48" fill="none" stroke="#74747a" stroke-width="4"/>
+    <rect x="18" y="18" width="28" height="28" fill="#0a0a0b"/>
+  </g>
 </svg>
