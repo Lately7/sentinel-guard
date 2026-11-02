@@ -45,6 +45,16 @@ class _NeverCancel:
         return False
 
 
+@dataclass(frozen=True)
+class _DeadlineCancel:
+    token: CancellationToken
+    deadline_ns: int
+    clock: Clock
+
+    def cancelled(self) -> bool:
+        return self.token.cancelled() or self.clock() >= self.deadline_ns
+
+
 def _empty_coverage(size: int) -> Coverage:
     return Coverage(size, (), "none", 0, 0, 0, 0, (), (), (), "unknown")
 
@@ -103,6 +113,7 @@ def scan(
         raise ValueError("duplicate adapters")
     required = stages or RequiredStages(frozenset(ids))
     token = cancel or _NeverCancel()
+    bounded_token = _DeadlineCancel(token, request.deadline_monotonic_ns, clock)
     machine = ScanState()
     reader: BoundReader | None = None
     admitted = _admitted or not isinstance(emit, EventStream) or emit.admit(request.file_id, terminal_slots=len(ordered) + 2)
@@ -171,13 +182,16 @@ def scan(
                 _publish(emit, request.file_id, adapter.engine_id, "started", "RUNNING")
                 try:
                     if getattr(adapter, "reopens_path", False) and request.path is not None:
-                        checked = identity.revalidate(request.path, measured, rehash=True, max_bytes=max_bytes, cancel=token)
+                        checked = identity.revalidate(request.path, measured, rehash=True, max_bytes=max_bytes, cancel=bounded_token)
                         if not checked.ok:
-                            result = _synthetic(adapter, request, measured, StageStatus.CHANGED, checked.code, start)
+                            status = StageStatus.CANCELLED if token.cancelled() else StageStatus.TIMEOUT if clock() >= request.deadline_monotonic_ns else StageStatus.CHANGED
+                            result = _synthetic(adapter, request, measured, status, checked.code, start)
                         else:
                             result = adapter.scan(request, measured, token)
                     else:
                         scan_bound = getattr(adapter, "scan_bound", None)
+                        if callable(scan_bound) and reader is not None:
+                            reader.begin_stage()
                         result = (scan_bound(request, measured, token, reader) if callable(scan_bound)
                                   else adapter.scan(request, measured, token))
                     if not isinstance(result, EngineResult):
@@ -191,9 +205,12 @@ def scan(
                 elif result.identity != measured:
                     result = _synthetic(adapter, request, measured, StageStatus.CHANGED, "RESULT_IDENTITY", start, elapsed)
                 elif getattr(adapter, "reopens_path", False) and request.path is not None:
-                    checked = identity.revalidate(request.path, measured, rehash=True, max_bytes=max_bytes)
+                    checked = identity.revalidate(request.path, measured, rehash=True, max_bytes=max_bytes, cancel=bounded_token)
                     if not checked.ok:
-                        result = _synthetic(adapter, request, measured, StageStatus.CHANGED, checked.code, start, elapsed)
+                        status = StageStatus.CANCELLED if token.cancelled() else StageStatus.TIMEOUT if clock() >= request.deadline_monotonic_ns else StageStatus.CHANGED
+                        result = replace(result, status=status, verdict=VerdictCode.UNKNOWN,
+                                         coverage=_empty_coverage(measured.size), readiness_code=checked.code,
+                                         error=ScanError(checked.code, "scan", checked.code, True))
                 if token.cancelled():
                     stop = StageStatus.CANCELLED
                 elif clock() >= request.deadline_monotonic_ns:
@@ -223,7 +240,7 @@ def scan(
             identity_reverified=True,
         )
         if action.action is ActionCode.QUARANTINE and request.path is not None:
-            if not identity.revalidate(request.path, measured, rehash=True, max_bytes=max_bytes).ok:
+            if not identity.revalidate(request.path, measured, rehash=True, max_bytes=max_bytes, cancel=bounded_token).ok:
                 action = should_auto_quarantine(
                     decision, policy_version=request.action_policy_version,
                     auto_quarantine=auto_quarantine, protection_generation=request.protection_generation,

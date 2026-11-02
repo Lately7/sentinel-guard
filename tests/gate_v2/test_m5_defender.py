@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import hashlib
 import time
 from pathlib import Path
 
@@ -21,7 +22,7 @@ def request(path: Path, seconds: float = 5) -> ScanRequest:
 
 
 def run(path: Path, runner, *, active: bool = True):
-    engine = DefenderAdapter(applicability=lambda: ("MpCmdRun.exe", active), runner=runner)
+    engine = DefenderAdapter(applicability=lambda _: ("MpCmdRun.exe", "active" if active else "passive"), runner=runner)
     return scan(request(path), adapters=[engine], gate_generation="m5",
                 auto_quarantine=False, skip_after_conclusive=False)
 
@@ -74,7 +75,7 @@ def test_timeout_and_oserror(tmp_path: Path) -> None:
         late_calls.append(deadline)
         time.sleep(max(0, (deadline - time.monotonic_ns()) / 1e9) + 0.01)
         return 0, "Scan completed"
-    engine = DefenderAdapter(applicability=lambda: ("MpCmdRun.exe", True), runner=late)
+    engine = DefenderAdapter(applicability=lambda _: ("MpCmdRun.exe", "active"), runner=late)
     delayed = scan(request(path, 0.25), adapters=[engine], gate_generation="m5",
                    auto_quarantine=False)
     assert late_calls
@@ -90,9 +91,9 @@ def test_passive_never_runs_and_ttl(tmp_path: Path) -> None:
     path = tmp_path / "harmless.bin"
     path.write_bytes(b"ordinary")
     calls = []
-    def applicability():
+    def applicability(_):
         calls.append(1)
-        return "MpCmdRun.exe", False
+        return "MpCmdRun.exe", "passive"
     engine = DefenderAdapter(applicability=applicability,
                              runner=lambda *args: pytest.fail("passive runner called"))
     first = scan(request(path), adapters=[engine], gate_generation="m5", auto_quarantine=False)
@@ -106,7 +107,7 @@ def test_passive_never_runs_and_ttl(tmp_path: Path) -> None:
 def test_not_installed_and_scan_cap(tmp_path: Path) -> None:
     path = tmp_path / "harmless.bin"
     path.write_bytes(b"ordinary")
-    missing = DefenderAdapter(applicability=lambda: (None, False),
+    missing = DefenderAdapter(applicability=lambda _: (None, "unknown"),
                               runner=lambda *args: pytest.fail("missing runner called"))
     unavailable = scan(request(path), adapters=[missing], gate_generation="m5",
                        auto_quarantine=False).engine_results[0]
@@ -116,7 +117,7 @@ def test_not_installed_and_scan_cap(tmp_path: Path) -> None:
     def fake(argv, deadline, cancel):
         seen.append(deadline)
         return 0, "Scan completed"
-    ready = DefenderAdapter(applicability=lambda: ("MpCmdRun.exe", True), runner=fake)
+    ready = DefenderAdapter(applicability=lambda _: ("MpCmdRun.exe", "active"), runner=fake)
     began = time.monotonic_ns()
     scan(request(path, 120), adapters=[ready], gate_generation="m5",
          auto_quarantine=False)
@@ -131,9 +132,11 @@ def test_swapped_before_defender_stage(tmp_path: Path) -> None:
     class Swap(CoreAdapter):
         def scan_bound(self, request, measured, cancel, reader):
             found = super().scan_bound(request, measured, cancel, reader)
-            replacement.replace(path)
+            moved = path.with_name("old.bin")
+            path.rename(moved)
+            replacement.rename(path)
             return found
-    defender = DefenderAdapter(applicability=lambda: ("MpCmdRun.exe", True),
+    defender = DefenderAdapter(applicability=lambda _: ("MpCmdRun.exe", "active"),
                                runner=lambda *args: pytest.fail("changed path scanned"))
     decision = scan(request(path), adapters=[Swap(), defender], gate_generation="m5",
                     auto_quarantine=False, skip_after_conclusive=False)
@@ -147,7 +150,9 @@ def test_swapped_during_defender_stage(tmp_path: Path) -> None:
     replacement = tmp_path / "replacement.bin"
     replacement.write_bytes(b"other synthetic generation")
     def swapped(argv, deadline, cancel):
-        replacement.replace(path)
+        moved = path.with_name("old.bin")
+        path.rename(moved)
+        replacement.rename(path)
         return 0, "Scan completed"
     decision = run(path, swapped)
     assert decision.engine_results[0].status is StageStatus.CHANGED
@@ -157,10 +162,10 @@ def test_swapped_during_defender_stage(tmp_path: Path) -> None:
 def test_named_hit_with_clean_companion(tmp_path: Path) -> None:
     path = tmp_path / "harmless.bin"
     path.write_bytes(b"ordinary synthetic bytes")
-    defender = DefenderAdapter(applicability=lambda: ("MpCmdRun.exe", True),
+    defender = DefenderAdapter(applicability=lambda _: ("MpCmdRun.exe", "active"),
                                runner=lambda *_: (2, "Threat : Named.Detection"))
     decision = scan(request(path), adapters=[CoreAdapter(), defender],
                     gate_generation="m5", auto_quarantine=False)
     assert decision.engine_results[0].verdict is VerdictCode.CLEAN
     assert decision.verdict is VerdictCode.MALICIOUS
-    assert decision.accepted_evidence_ids == ("defender.named_threat",)
+    assert decision.accepted_evidence_ids == ("defender." + hashlib.sha256(b"Named.Detection").hexdigest()[:24],)

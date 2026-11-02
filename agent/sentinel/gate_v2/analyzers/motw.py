@@ -23,9 +23,12 @@ def read_zone(path: str) -> str | None:
     if os.name != "nt":
         return None
     try:
-        with open(path + ":Zone.Identifier", "r", encoding="utf-8", errors="replace") as stream:
-            return stream.read(MAX_TEXT + 1)
-    except OSError:
+        with open(path + ":Zone.Identifier", "rb") as stream:
+            raw = stream.read(MAX_TEXT * 2 + 2)
+        if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+            return raw.decode("utf-16", errors="replace")
+        return raw.decode("utf-8", errors="replace")
+    except FileNotFoundError:
         return None
 
 
@@ -80,8 +83,10 @@ class MotwAdapter:
     engine_id = "motw"
     reopens_path = False
 
-    def __init__(self, reader: Reader = read_zone) -> None:
+    def __init__(self, reader: Reader = read_zone,
+                 url_check: Callable[[str], bool] | None = None) -> None:
         self.reader = reader
+        self.url_check = url_check
 
     def readiness(self) -> str:
         return "READY"
@@ -96,16 +101,17 @@ class MotwAdapter:
             return result(self.engine_id, request, measured, start, StageStatus.UNAVAILABLE,
                           "PATH_REQUIRED", (), parser_state="unavailable")
         try:
-            if not identity.revalidate(request.path, measured, rehash=True).ok:
+            path = measured.canonical_path or request.path
+            if not identity.revalidate(path, measured, rehash=False, cancel=cancel).ok:
                 return result(self.engine_id, request, measured, start, StageStatus.CHANGED,
                               "CHANGED", (), parser_state="changed")
-            raw = self.reader(request.path)
-            if not identity.revalidate(request.path, measured, rehash=True).ok:
+            raw = self.reader(path)
+            if not identity.revalidate(path, measured, rehash=False, cancel=cancel).ok:
                 return result(self.engine_id, request, measured, start, StageStatus.CHANGED,
                               "CHANGED", (), parser_state="changed")
             if raw is None:
-                return result(self.engine_id, request, measured, start, StageStatus.UNAVAILABLE,
-                              "ZONE_STREAM_ABSENT", (), parser_state="unavailable")
+                return result(self.engine_id, request, measured, start, StageStatus.COMPLETED,
+                              "NO_ORIGIN", (), certainty="declared")
             origin = parse(raw)
             codes = []
             if origin.zone is not None:
@@ -114,14 +120,27 @@ class MotwAdapter:
                 codes.append("HOST_URL_PRESENT")
             if origin.referrer_url:
                 codes.append("REFERRER_URL_PRESENT")
+            check_failed = False
+            if self.url_check is not None:
+                for url in (origin.host_url, origin.referrer_url):
+                    if url:
+                        try:
+                            if self.url_check(url):
+                                codes.append("ORIGIN_BLOCKLISTED")
+                                break
+                        except Exception:
+                            check_failed = True
             evidence = tuple(context_evidence(self.engine_id, code, Category.ORIGIN,
-                                              Strength.CONTEXT, (), scope="origin")
+                                              Strength.SUPPORTING if code == "ORIGIN_BLOCKLISTED" else Strength.CONTEXT,
+                                              (), scope="origin")
                              for code in codes)
             if origin.malformed:
                 return result(self.engine_id, request, measured, start, StageStatus.PARTIAL,
                               "MOTW_MALFORMED", (), evidence, parser_state="malformed")
-            return result(self.engine_id, request, measured, start, StageStatus.COMPLETED,
-                          "READY", (), evidence, certainty="declared")
+            return result(self.engine_id, request, measured, start,
+                          StageStatus.PARTIAL if check_failed else StageStatus.COMPLETED,
+                          "URL_CHECK_ERROR" if check_failed else "READY", (), evidence,
+                          certainty="declared", parser_state="partial" if check_failed else "complete")
         except Exception:
             return result(self.engine_id, request, measured, start, StageStatus.ERROR,
                           "MOTW_READ_ERROR", (), parser_state="error")

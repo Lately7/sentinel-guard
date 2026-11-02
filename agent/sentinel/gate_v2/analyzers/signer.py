@@ -10,14 +10,13 @@ from collections.abc import Callable
 from ctypes import wintypes
 from typing import Literal
 
-from .. import identity
 from ..content import BoundReader, ContentError
 from ..contract import (ByteRange, CancellationToken, Category, EngineResult,
                         FileIdentity, ScanRequest, StageStatus, Strength)
 from . import context_evidence, result
 
 TrustState = Literal["valid", "unsigned", "invalid", "revoked", "unavailable"]
-TrustCheck = Callable[[str], TrustState]
+TrustCheck = Callable[[str, int | None], TrustState]
 MAX_HEADER = 4096
 _TRUST_SLOT = threading.BoundedSemaphore(1)
 
@@ -53,34 +52,45 @@ def certificate_present(data: bytes, file_size: int) -> tuple[bool | None, str]:
         return None, "malformed"
 
 
-def win_verify_trust(path: str) -> TrustState:
+class GUID(ctypes.Structure):
+    _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD),
+                ("Data3", wintypes.WORD), ("Data4", ctypes.c_ubyte * 8)]
+
+
+class FileInfo(ctypes.Structure):
+    _fields_ = [("cbStruct", wintypes.DWORD), ("pcwszFilePath", wintypes.LPCWSTR),
+                ("hFile", wintypes.HANDLE), ("pgKnownSubject", ctypes.c_void_p)]
+
+
+class WinTrustData(ctypes.Structure):
+    _fields_ = [("cbStruct", wintypes.DWORD), ("pPolicyCallbackData", ctypes.c_void_p),
+                ("pSIPClientData", ctypes.c_void_p), ("dwUIChoice", wintypes.DWORD),
+                ("fdwRevocationChecks", wintypes.DWORD), ("dwUnionChoice", wintypes.DWORD),
+                ("pFile", ctypes.POINTER(FileInfo)), ("dwStateAction", wintypes.DWORD),
+                ("hWVTStateData", wintypes.HANDLE), ("pwszURLReference", wintypes.LPCWSTR),
+                ("dwProvFlags", wintypes.DWORD), ("dwUIContext", wintypes.DWORD),
+                ("pSignatureSettings", ctypes.c_void_p)]
+
+
+if os.name == "nt":
+    _WIN_VERIFY_TRUST = ctypes.WinDLL("wintrust", use_last_error=True).WinVerifyTrust
+    _WIN_VERIFY_TRUST.argtypes = [wintypes.HWND, ctypes.POINTER(GUID), ctypes.POINTER(WinTrustData)]
+    _WIN_VERIFY_TRUST.restype = ctypes.c_long
+
+
+def win_verify_trust(path: str, handle: int | None) -> TrustState:
     if os.name != "nt":
         return "unavailable"
-    class GUID(ctypes.Structure):
-        _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD),
-                    ("Data3", wintypes.WORD), ("Data4", ctypes.c_ubyte * 8)]
-    class FileInfo(ctypes.Structure):
-        _fields_ = [("cbStruct", wintypes.DWORD), ("pcwszFilePath", wintypes.LPCWSTR),
-                    ("hFile", wintypes.HANDLE), ("pgKnownSubject", ctypes.c_void_p)]
-    class WinTrustData(ctypes.Structure):
-        _fields_ = [("cbStruct", wintypes.DWORD), ("pPolicyCallbackData", ctypes.c_void_p),
-                    ("pSIPClientData", ctypes.c_void_p), ("dwUIChoice", wintypes.DWORD),
-                    ("fdwRevocationChecks", wintypes.DWORD), ("dwUnionChoice", wintypes.DWORD),
-                    ("pFile", ctypes.POINTER(FileInfo)), ("dwStateAction", wintypes.DWORD),
-                    ("hWVTStateData", wintypes.HANDLE), ("pwszURLReference", wintypes.LPCWSTR),
-                    ("dwProvFlags", wintypes.DWORD), ("dwUIContext", wintypes.DWORD),
-                    ("pSignatureSettings", ctypes.c_void_p)]
+    if handle is None:
+        return "unavailable"
     action = GUID(0x00AAC56B, 0xCD44, 0x11D0,
                   (ctypes.c_ubyte * 8)(0x8C, 0xC2, 0, 0xC0, 0x4F, 0xC2, 0x95, 0xEE))
-    info = FileInfo(ctypes.sizeof(FileInfo), path, None, None)
+    info = FileInfo(ctypes.sizeof(FileInfo), path, handle, None)
     # Cache-only retrieval prevents an implicit network revocation request.
     data = WinTrustData(ctypes.sizeof(WinTrustData), None, None, 2, 0, 1,
                         ctypes.pointer(info), 0, None, None, 0x1000, 0, None)
     try:
-        api = ctypes.WinDLL("wintrust", use_last_error=True).WinVerifyTrust
-        api.argtypes = [wintypes.HWND, ctypes.POINTER(GUID), ctypes.POINTER(WinTrustData)]
-        api.restype = ctypes.c_long
-        code = api(None, ctypes.byref(action), ctypes.byref(data)) & 0xffffffff
+        code = _WIN_VERIFY_TRUST(None, ctypes.byref(action), ctypes.byref(data)) & 0xffffffff
     except (OSError, AttributeError, ValueError):
         return "unavailable"
     if code == 0:
@@ -102,16 +112,17 @@ class SignerAdapter:
     def readiness(self) -> str:
         return "READY"
 
-    def _bounded_trust(self, path: str, deadline_ns: int,
+    def _bounded_trust(self, path: str, handle: int | None, deadline_ns: int,
                        cancel: CancellationToken) -> TrustState:
-        remaining = max(0.0, (deadline_ns - time.monotonic_ns()) / 1e9)
-        if not _TRUST_SLOT.acquire(timeout=remaining):
+        if handle is None or cancel.cancelled() or time.monotonic_ns() >= deadline_ns:
+            return "unavailable"
+        if not _TRUST_SLOT.acquire(blocking=False):
             return "unavailable"
         finished = threading.Event()
         value: list[TrustState] = ["unavailable"]
         def run() -> None:
             try:
-                value[0] = self.trust(path)
+                value[0] = self.trust(path, handle)
             except Exception:
                 pass
             finally:
@@ -141,20 +152,15 @@ class SignerAdapter:
                         "CERTIFICATE_PRESENT" if present else "CERTIFICATE_ABSENT",
                         Category.STRUCTURE, Strength.CONTEXT, span)]
             trust_state: TrustState = "unavailable"
-            if request.path and present:
-                if not identity.revalidate(request.path, measured, rehash=True).ok:
-                    return result(self.engine_id, request, measured, start, StageStatus.CHANGED,
-                                  "CHANGED", span, parser_state="changed")
-                trust_state = self._bounded_trust(request.path, request.deadline_monotonic_ns, cancel)
+            if present:
+                trust_state = self._bounded_trust(measured.canonical_path or request.path or "",
+                                                  reader.os_handle(), request.deadline_monotonic_ns, cancel)
                 if cancel.cancelled():
                     return result(self.engine_id, request, measured, start, StageStatus.CANCELLED,
                                   "CANCELLED", span, parser_state="cancelled")
                 if time.monotonic_ns() >= request.deadline_monotonic_ns:
                     return result(self.engine_id, request, measured, start, StageStatus.TIMEOUT,
                                   "DEADLINE", span, parser_state="timeout")
-                if not identity.revalidate(request.path, measured, rehash=True).ok:
-                    return result(self.engine_id, request, measured, start, StageStatus.CHANGED,
-                                  "CHANGED", span, parser_state="changed")
             if trust_state not in ("valid", "unsigned", "invalid", "revoked", "unavailable"):
                 trust_state = "unavailable"
             evidence.append(context_evidence(self.engine_id, "TRUST_" + trust_state.upper(),

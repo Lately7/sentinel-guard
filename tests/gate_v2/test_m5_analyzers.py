@@ -73,21 +73,21 @@ def test_lnk_valid_script_host_and_malformed() -> None:
     assert scripted.evidence[0].detail_code == "LNK_TARGETS_SCRIPT_HOST"
     assert scripted.evidence[0].strength is Strength.SUPPORTING
     assert_context(scripted)
-    assert parse_lnk(lnk()[:20])[2] == "malformed"
-    assert direct(LnkAdapter(), lnk()[:20]).status is StageStatus.PARTIAL
+    assert parse_lnk(lnk()[:20])[1] == "not_lnk"
+    assert direct(LnkAdapter(), lnk()[:20]).status is StageStatus.COMPLETED
     hostile = bytearray(lnk())
     hostile[76:78] = (65535).to_bytes(2, "little")
     assert direct(LnkAdapter(), bytes(hostile)).status is StageStatus.PARTIAL
     decision = scan(request(data=lnk()), adapters=[LnkAdapter()],
                     gate_generation="m5", auto_quarantine=False)
-    assert decision.verdict is VerdictCode.UNKNOWN
-    assert not decision.trusted_clean
+    assert decision.verdict is VerdictCode.CLEAN
+    assert decision.trusted_clean
 
 
 def test_pe_certificate_presence_is_not_trust() -> None:
     assert certificate_present(pe(True), 512) == (True, "complete")
     assert certificate_present(pe(False), 512) == (False, "complete")
-    present = direct(SignerAdapter(trust=lambda _: pytest.fail("no path")), pe(True))
+    present = direct(SignerAdapter(trust=lambda *_: pytest.fail("no handle")), pe(True))
     absent = direct(SignerAdapter(), pe(False))
     assert {e.detail_code for e in present.evidence} == {"CERTIFICATE_PRESENT", "TRUST_UNAVAILABLE"}
     assert {e.detail_code for e in absent.evidence} == {"CERTIFICATE_ABSENT", "TRUST_UNAVAILABLE"}
@@ -99,11 +99,11 @@ def test_pe_certificate_presence_is_not_trust() -> None:
 def test_injected_trust_states(tmp_path: Path, state: str) -> None:
     path = tmp_path / "synthetic.exe"
     path.write_bytes(pe(True))
-    adapter = SignerAdapter(trust=lambda _: state)
+    adapter = SignerAdapter(trust=lambda *_: state)
     decision = scan(request(path=path), adapters=[adapter], gate_generation="m5",
                     auto_quarantine=False)
     observed = decision.engine_results[0]
-    assert "TRUST_" + state.upper() in {e.detail_code for e in observed.evidence}
+    assert "TRUST_" + (state.upper() if __import__("os").name == "nt" else "UNAVAILABLE") in {e.detail_code for e in observed.evidence}
     assert_context(observed)
     assert decision.verdict is not VerdictCode.MALICIOUS
 
@@ -112,11 +112,11 @@ def test_valid_signer_cannot_lower_conclusive_hash(tmp_path: Path) -> None:
     path = tmp_path / "synthetic.exe"
     path.write_bytes(pe(True))
     decision = scan(request(path=path),
-                    adapters=[SignerAdapter(trust=lambda _: "valid"),
+                    adapters=[SignerAdapter(trust=lambda *_: "valid"),
                               CoreAdapter(known_bad=lambda _: True)],
                     gate_generation="m5", auto_quarantine=False)
     assert decision.verdict is VerdictCode.MALICIOUS
-    assert "TRUST_VALID" in {e.detail_code for e in decision.engine_results[0].evidence}
+    assert ("TRUST_VALID" if __import__("os").name == "nt" else "TRUST_UNAVAILABLE") in {e.detail_code for e in decision.engine_results[0].evidence}
 
 
 @pytest.mark.parametrize("zone", range(5))

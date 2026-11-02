@@ -14,6 +14,11 @@ from .coverage import contains_range
 _COVERAGE_PREFIXES = ("Heuristics.Limits.Exceeded.", "Heuristics.Encrypted.")
 _WEAK_PREFIXES = ("PUA.", "Heuristics.", "BC.Heuristics.", "Weak.")
 _WEAK_NAMES = frozenset({"Win.Trojan.Suspect-34"})
+_CONTEXT_RULES = frozenset({"LNK_TARGETS_SCRIPT_HOST", "ORIGIN_BLOCKLISTED"})
+_DECLARED_COVERAGE_ENGINES = frozenset({"defender"})
+_DEFENDER_PUA = frozenset({"Adware", "BrowserModifier", "Program", "SoftwareBundler",
+                           "SettingsModifier", "Misleading", "MonitoringTool", "RemoteAccess", "Joke"})
+_DEFENDER_RISKWARE = frozenset({"HackTool", "VirTool", "Constructor"})
 _BAD_STATUSES = {
     StageStatus.SKIPPED, StageStatus.UNAVAILABLE, StageStatus.ERROR,
     StageStatus.TIMEOUT, StageStatus.CANCELLED, StageStatus.UNVERIFIED,
@@ -42,6 +47,15 @@ def classify_clamav_name(name: str) -> tuple[Category, Strength]:
         return Category.HEALTH, Strength.COVERAGE
     if name.startswith(_WEAK_PREFIXES) or name in _WEAK_NAMES:
         return (Category.PUA if name.startswith("PUA.") else Category.MALWARE), Strength.SUPPORTING
+    return Category.MALWARE, Strength.CONCLUSIVE
+
+
+def classify_defender_name(name: str) -> tuple[Category, Strength]:
+    prefix = name.split(":", 1)[0]
+    if prefix.startswith("PUA") or prefix in _DEFENDER_PUA:
+        return Category.PUA, Strength.SUPPORTING
+    if prefix in _DEFENDER_RISKWARE:
+        return Category.RISKWARE, Strength.SUPPORTING
     return Category.MALWARE, Strength.CONCLUSIVE
 
 
@@ -98,8 +112,10 @@ def decide(
                 if result.engine_id in stages.required and result.engine_id not in stages.disabled_by_policy:
                     coverage_name = True
                 continue
-            # Structure, origin, and health evidence provide context, even at conclusive strength.
-            if category not in (Category.MALWARE, Category.PUA, Category.RISKWARE) or strength not in (
+            context_rule = evidence.detail_code in _CONTEXT_RULES and strength is Strength.SUPPORTING
+            if not context_rule and category not in (Category.MALWARE, Category.PUA, Category.RISKWARE):
+                continue
+            if strength not in (
                 Strength.CONCLUSIVE, Strength.STRONG, Strength.SUPPORTING,
             ):
                 continue
@@ -107,7 +123,7 @@ def decide(
                 result.status in _BAD_STATUSES or identity_mismatch):
                 unaccepted_detection = True
                 continue
-            if not evidence.ranges or any(not contains_range(result.coverage.inspected, span) for span in evidence.ranges):
+            if evidence.scope != "origin" and (not evidence.ranges or any(not contains_range(result.coverage.inspected, span) for span in evidence.ranges)):
                 if result.engine_id in stages.required:
                     unbound_evidence = True
                 unaccepted_detection = True
@@ -147,14 +163,14 @@ def decide(
                 reduced = True
             else:
                 incomplete.append("INCOMPLETE_COVERAGE")
-        if result.coverage.mode in ("runtime_partial", "none") or result.coverage.objects_opaque or result.coverage.objects_omitted or result.coverage.limits_hit:
+        if (result.engine_id != "motw" and result.coverage.mode in ("runtime_partial", "none")) or result.coverage.objects_opaque or result.coverage.objects_omitted or result.coverage.limits_hit:
             incomplete.append("INCOMPLETE_COVERAGE")
         elif result.coverage.mode == "fixed_partial":
             reduced = True
-        if result.coverage.certainty != "verified" and not (
-            result.engine_id == "defender" and result.coverage.certainty == "declared" and
+        if result.engine_id != "motw" and result.coverage.certainty != "verified" and not (
+            result.engine_id in _DECLARED_COVERAGE_ENGINES and result.coverage.certainty == "declared" and
             result.coverage.mode == "full" and status is StageStatus.COMPLETED
-        ) and status is StageStatus.COMPLETED:
+        ):
             # Defender's path result is bound by before/after generation checks;
             # other declared coverage does not establish a trusted negative.
             incomplete.append("UNCERTAIN_COVERAGE")
@@ -170,7 +186,7 @@ def decide(
             reasons += ("UNACCEPTED_DETECTION",)
     elif weak:
         verdict = VerdictCode.SUSPICIOUS
-        lead = "PUA_DETECTION" if any(category is Category.PUA for category, _ in weak) else "WEAK_DETECTION"
+        lead = "CONTEXT_RULE" if any(category in (Category.STRUCTURE, Category.ORIGIN) for category, _ in weak) else "PUA_DETECTION" if any(category is Category.PUA for category, _ in weak) else "WEAK_DETECTION"
         reasons = (lead, "UNACCEPTED_DETECTION") if unaccepted_detection else (lead,)
     elif incomplete:
         verdict = VerdictCode.UNKNOWN

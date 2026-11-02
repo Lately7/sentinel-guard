@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import glob
+import hashlib
+import ctypes
 import os
 import queue
 import re
@@ -11,8 +13,10 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from ctypes import wintypes
 
 from . import identity
+from .policy import classify_defender_name
 from .contract import (CONTRACT_VERSION, ByteRange, CancellationToken, Category,
                        Coverage, EngineResult, Evidence, FileIdentity, ScanError,
                        ScanRequest, StageStatus, Strength, VerdictCode)
@@ -23,85 +27,98 @@ MAX_OUTPUT = 64 * 1024
 ACTIVE_TTL_NS = 600_000_000_000
 SCAN_CAP_NS = 90_000_000_000
 Runner = Callable[[list[str], int, CancellationToken], tuple[int, str]]
-Applicability = Callable[[], tuple[str | None, bool]]
+Applicability = Callable[[int | None], tuple[str | None, str]]
+_DEFENDER_SLOT = threading.BoundedSemaphore(1)
+
+
+class _JobBasic(ctypes.Structure):
+    _fields_ = [("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong), ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t), ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD), ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD), ("SchedulingClass", wintypes.DWORD)]
+
+
+class _JobCounters(ctypes.Structure):
+    _fields_ = [(name, ctypes.c_ulonglong) for name in ("r", "w", "o", "rb", "wb", "ob")]
+
+
+class _JobLimits(ctypes.Structure):
+    _fields_ = [("BasicLimitInformation", _JobBasic), ("IoInfo", _JobCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+
+class _ThreadEntry(ctypes.Structure):
+    _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                ("th32ThreadID", wintypes.DWORD), ("th32OwnerProcessID", wintypes.DWORD),
+                ("tpBasePri", wintypes.LONG), ("tpDeltaPri", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD)]
+
+
+if os.name == "nt":
+    _KERNEL = ctypes.WinDLL("kernel32", use_last_error=True)
+    _KERNEL.CreateJobObjectW.restype = wintypes.HANDLE
+    _KERNEL.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    _KERNEL.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    _KERNEL.CloseHandle.argtypes = [wintypes.HANDLE]
+    _KERNEL.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    _KERNEL.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    _KERNEL.Thread32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(_ThreadEntry)]
+    _KERNEL.Thread32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(_ThreadEntry)]
+    _KERNEL.OpenThread.restype = wintypes.HANDLE
+    _KERNEL.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    _KERNEL.ResumeThread.argtypes = [wintypes.HANDLE]
+    _KERNEL.ResumeThread.restype = wintypes.DWORD
 
 
 class _Cancelled(Exception):
     pass
 
 
-def _applicability(deadline_ns: int | None = None) -> tuple[str | None, bool]:
+def _applicability(deadline_ns: int | None = None) -> tuple[str | None, str]:
     if os.name != "nt":
-        return None, False
+        return None, "unknown"
     roots = [os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"),
                           "Microsoft", "Windows Defender", "Platform", "*", "MpCmdRun.exe")]
-    candidates = sorted(glob.glob(roots[0]), reverse=True)
+    def version(path: str) -> tuple[int, ...]:
+        return tuple(int(part) for part in re.findall(r"\d+", os.path.basename(os.path.dirname(path))))
+    candidates = sorted(glob.glob(roots[0]), key=version, reverse=True)
     candidates.append(os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"),
                                    "Windows Defender", "MpCmdRun.exe"))
     exe = next((path for path in candidates if os.path.isfile(path)), None)
     if exe is None:
-        return None, False
+        return None, "unknown"
     script = ("(Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct "
               "| Where-Object displayName -eq 'Windows Defender').productState")
     try:
         timeout = (20.0 if deadline_ns is None else
                    min(20.0, max(0.0, (deadline_ns - time.monotonic_ns()) / 1e9)))
         if timeout <= 0:
-            return exe, False
-        completed = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            return exe, "unknown"
+        powershell = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+        completed = subprocess.run([powershell, "-NoProfile", "-NonInteractive", "-Command", script],
                                    capture_output=True, text=True, timeout=timeout, shell=False,
                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         state = int((completed.stdout or "").strip().splitlines()[0])
-        return exe, completed.returncode == 0 and bool(state & 0x1000)
+        return exe, "active" if completed.returncode == 0 and state & 0x1000 else "passive" if completed.returncode == 0 else "unknown"
     except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
-        return exe, False
+        return exe, "unknown"
 
 
 def _run(argv: list[str], deadline_ns: int, cancel: CancellationToken) -> tuple[int, str]:
     """Run inside a kill-on-close Job Object; close it on every exit path."""
     if os.name != "nt":
         raise OSError("Defender is Windows-only")
-    import ctypes
-    from ctypes import wintypes
-
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel = _KERNEL
     KILL_ON_CLOSE = 0x2000
-    class Basic(ctypes.Structure):
-        _fields_ = [("PerProcessUserTimeLimit", ctypes.c_longlong),
-                    ("PerJobUserTimeLimit", ctypes.c_longlong), ("LimitFlags", wintypes.DWORD),
-                    ("MinimumWorkingSetSize", ctypes.c_size_t), ("MaximumWorkingSetSize", ctypes.c_size_t),
-                    ("ActiveProcessLimit", wintypes.DWORD), ("Affinity", ctypes.c_size_t),
-                    ("PriorityClass", wintypes.DWORD), ("SchedulingClass", wintypes.DWORD)]
-    class Counters(ctypes.Structure):
-        _fields_ = [(name, ctypes.c_ulonglong) for name in ("r", "w", "o", "rb", "wb", "ob")]
-    class Limits(ctypes.Structure):
-        _fields_ = [("BasicLimitInformation", Basic), ("IoInfo", Counters),
-                    ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
-                    ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
-    class ThreadEntry(ctypes.Structure):
-        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
-                    ("th32ThreadID", wintypes.DWORD), ("th32OwnerProcessID", wintypes.DWORD),
-                    ("tpBasePri", wintypes.LONG), ("tpDeltaPri", wintypes.LONG),
-                    ("dwFlags", wintypes.DWORD)]
-    kernel.CreateJobObjectW.restype = wintypes.HANDLE
-    kernel.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
-    kernel.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
-    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-    kernel.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
-    kernel.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
-    kernel.Thread32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(ThreadEntry)]
-    kernel.Thread32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(ThreadEntry)]
-    kernel.OpenThread.restype = wintypes.HANDLE
-    kernel.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    kernel.ResumeThread.argtypes = [wintypes.HANDLE]
-    kernel.ResumeThread.restype = wintypes.DWORD
 
     def resume(pid: int) -> None:
         snapshot = kernel.CreateToolhelp32Snapshot(0x4, 0)
         if snapshot == ctypes.c_void_p(-1).value:
             raise OSError(ctypes.get_last_error(), "CreateToolhelp32Snapshot")
         try:
-            entry = ThreadEntry()
+            entry = _ThreadEntry()
             entry.dwSize = ctypes.sizeof(entry)
             found = kernel.Thread32First(snapshot, ctypes.byref(entry))
             while found:
@@ -125,7 +142,7 @@ def _run(argv: list[str], deadline_ns: int, cancel: CancellationToken) -> tuple[
     process: subprocess.Popen[bytes] | None = None
     stop_read = threading.Event()
     try:
-        limits = Limits()
+        limits = _JobLimits()
         limits.BasicLimitInformation.LimitFlags = KILL_ON_CLOSE
         if not kernel.SetInformationJobObject(job, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
             raise OSError(ctypes.get_last_error(), "SetInformationJobObject")
@@ -171,7 +188,9 @@ def _run(argv: list[str], deadline_ns: int, cancel: CancellationToken) -> tuple[
                 continue
             if not block:
                 process.wait(timeout=max(0.001, (deadline_ns - time.monotonic_ns()) / 1e9))
-                return process.returncode, output.decode("utf-8", errors="replace")
+                # MpCmdRun includes paths in the console code page; only ASCII threat names are parsed.
+                # Real Defender output could not be checked on this machine because Defender is passive.
+                return process.returncode, output.decode("latin-1")
             output.extend(block)
             if len(output) > MAX_OUTPUT:
                 return 1, "\0"  # typed parse error, no raw output
@@ -181,6 +200,8 @@ def _run(argv: list[str], deadline_ns: int, cancel: CancellationToken) -> tuple[
         if process is not None and process.poll() is None:
             process.kill()
             process.wait()
+        if process is not None and process.stdout is not None:
+            process.stdout.close()
 
 
 @dataclass
@@ -194,23 +215,40 @@ class DefenderAdapter:
 
     def __post_init__(self) -> None:
         self._ready_at = -ACTIVE_TTL_NS
-        self._ready: tuple[str | None, bool] = (None, False)
+        self._ready: tuple[str | None, str] = (None, "unknown")
+        self._ready_lock = threading.Lock()
 
     def readiness(self) -> str:
-        exe, active = self._applicable()
-        return "READY" if exe and active else "NOT_INSTALLED" if not exe else "PASSIVE"
+        exe, state = self._applicable()
+        return "READY" if state == "active" and exe else "NOT_INSTALLED" if not exe else "PASSIVE" if state == "passive" else "APPLICABILITY_UNKNOWN"
 
-    def _applicable(self, deadline_ns: int | None = None) -> tuple[str | None, bool]:
-        now = self.clock()
-        if now - self._ready_at >= ACTIVE_TTL_NS:
-            try:
-                self._ready = (_applicability(deadline_ns) if self.applicability is _applicability
-                               else self.applicability())
-            except Exception:
-                self._ready = (None, False)
-            self._ready_at = (-ACTIVE_TTL_NS if deadline_ns is not None and
-                              self.clock() >= deadline_ns else now)
-        return self._ready
+    def _applicable(self, deadline_ns: int | None = None,
+                    cancel: CancellationToken | None = None) -> tuple[str | None, str]:
+        while not self._ready_lock.acquire(timeout=0.05):
+            if (cancel is not None and cancel.cancelled()) or (deadline_ns is not None and self.clock() >= deadline_ns):
+                return None, "unknown"
+        try:
+            now = self.clock()
+            ttl = 30_000_000_000 if self._ready[1] == "unknown" else ACTIVE_TTL_NS
+            if now - self._ready_at >= ttl:
+                finished = threading.Event()
+                observed: list[tuple[str | None, str]] = [(None, "unknown")]
+                def probe() -> None:
+                    try:
+                        observed[0] = self.applicability(deadline_ns)
+                    except Exception:
+                        pass
+                    finally:
+                        finished.set()
+                threading.Thread(target=probe, daemon=True).start()
+                while not finished.wait(0.05):
+                    if (cancel is not None and cancel.cancelled()) or (deadline_ns is not None and self.clock() >= deadline_ns):
+                        return None, "unknown"
+                self._ready = observed[0]
+                self._ready_at = self.clock()
+            return self._ready
+        finally:
+            self._ready_lock.release()
 
     def scan(self, request: ScanRequest, measured: FileIdentity,
              cancel: CancellationToken) -> EngineResult:
@@ -219,12 +257,16 @@ class DefenderAdapter:
         code = "NOT_INSTALLED"
         evidence: tuple[Evidence, ...] = ()
         coverage = Coverage(measured.size, (), "none", 0, 0, 0, 0, (), (), (), "unknown")
-        exe, active = self._applicable(request.deadline_monotonic_ns)
-        if self.clock() >= request.deadline_monotonic_ns:
+        exe, state = self._applicable(request.deadline_monotonic_ns, cancel)
+        if cancel.cancelled():
+            status, code = StageStatus.CANCELLED, "CANCELLED"
+        elif self.clock() >= request.deadline_monotonic_ns:
             status, code = StageStatus.TIMEOUT, "DEADLINE"
-        elif exe and not active:
+        elif exe and state == "unknown":
+            code = "APPLICABILITY_UNKNOWN"
+        elif exe and state == "passive":
             code = "PASSIVE"
-        elif exe and active:
+        elif exe and state == "active":
             if request.path is None:
                 code = "PATH_REQUIRED"
             elif cancel.cancelled():
@@ -234,30 +276,41 @@ class DefenderAdapter:
                 if self.clock() >= deadline:
                     status, code = StageStatus.TIMEOUT, "DEADLINE"
                 else:
-                    argv = [exe, "-Scan", "-ScanType", "3", "-File", request.path,
+                    argv = [exe, "-Scan", "-ScanType", "3", "-File", measured.canonical_path or request.path,
                             "-DisableRemediation"]
+                    acquired = False
                     try:
+                        while not acquired and not cancel.cancelled() and self.clock() < deadline:
+                            acquired = _DEFENDER_SLOT.acquire(timeout=min(0.1, max(0, (deadline - self.clock()) / 1e9)))
+                        if cancel.cancelled():
+                            raise _Cancelled()
+                        if not acquired:
+                            raise subprocess.TimeoutExpired(argv, 0)
                         returncode, output = self.runner(argv, deadline, cancel)
-                        if self.clock() >= deadline:
-                            status, code = StageStatus.TIMEOUT, "DEADLINE"
-                        elif (not isinstance(output, str) or len(output) > MAX_OUTPUT or
+                        if (not isinstance(output, str) or len(output) > MAX_OUTPUT or
                               "\ufffd" in output or any(ord(char) < 32 and char not in "\r\n\t"
                                                            for char in output)):
                             status, code = StageStatus.ERROR, "OUTPUT_INVALID"
-                        elif returncode == 0:
-                            status, code = StageStatus.COMPLETED, "READY"
                         elif returncode == 2:
-                            names = [name.strip() for name in _NAME.findall(output)]
-                            if len(names) == 1 and _SAFE.fullmatch(names[0]):
-                                name = names[0]
-                                evidence = (Evidence("defender.named_threat", self.engine_id, name,
-                                                     name, Category.MALWARE, Strength.CONCLUSIVE,
-                                                     "outer", None, (ByteRange(0, measured.size),),
-                                                     "microsoft-defender", None, None, True,
-                                                     "NAMED_THREAT"),)
+                            names = list(dict.fromkeys(name.strip() for name in _NAME.findall(output)
+                                                      if _SAFE.fullmatch(name.strip())))
+                            if names:
+                                limited = len(names) > 16
+                                evidence = tuple(Evidence("defender." + hashlib.sha256(name.encode()).hexdigest()[:24],
+                                                      self.engine_id, name, name, *classify_defender_name(name),
+                                                      "outer", None, (ByteRange(0, measured.size),),
+                                                      "microsoft-defender", None, None, True,
+                                                      "NAMED_THREAT", name == "EICAR_Test_File" or name.endswith("/EICAR_Test_File"))
+                                                 for name in names[:16])
                                 status, code = StageStatus.COMPLETED, "READY"
+                                if limited:
+                                    coverage = Coverage(measured.size, (), "none", 0, 0, 0, 0, (), (), ("THREAT_NAME_LIMIT",), "unknown")
                             else:
                                 status, code = StageStatus.ERROR, "THREAT_NAME_MISSING_OR_INVALID"
+                        elif self.clock() >= deadline:
+                            status, code = StageStatus.TIMEOUT, "DEADLINE"
+                        elif returncode == 0:
+                            status, code = StageStatus.COMPLETED, "READY"
                         else:
                             status, code = StageStatus.ERROR, "EXIT_NONZERO"
                     except subprocess.TimeoutExpired:
@@ -268,17 +321,23 @@ class DefenderAdapter:
                         status, code = StageStatus.UNAVAILABLE, "RUNNER_UNAVAILABLE"
                     except Exception:
                         status, code = StageStatus.ERROR, "RUNNER_ERROR"
+                    finally:
+                        if acquired:
+                            _DEFENDER_SLOT.release()
                     if status is StageStatus.COMPLETED:
                         # This extra negative check also protects callers using the adapter
                         # directly. The orchestrator performs full before/after revalidation.
-                        checked = identity.revalidate(request.path, measured, rehash=True)
+                        checked = identity.revalidate(request.path, measured, rehash=False, cancel=cancel)
                         if not checked.ok:
-                            status, code, evidence = StageStatus.CHANGED, checked.code, ()
+                            status, code = StageStatus.CHANGED, checked.code
                         else:
+                            limited = bool(coverage.limits_hit)
                             coverage = Coverage(measured.size,
-                                                (ByteRange(0, measured.size),) if measured.size else (),
-                                                "full", 0, 0, 0, 0, (), (), (), "declared")
-        verdict = (VerdictCode.MALICIOUS if evidence else VerdictCode.CLEAN
+                                                 (ByteRange(0, measured.size),) if measured.size else (),
+                                                 "fixed_partial" if limited else "full", 0, 0, 0, 0,
+                                                 (), (), ("THREAT_NAME_LIMIT",) if limited else (), "declared")
+        verdict = (VerdictCode.MALICIOUS if status is StageStatus.COMPLETED and any(item.strength is Strength.CONCLUSIVE for item in evidence) else
+                   VerdictCode.SUSPICIOUS if status is StageStatus.COMPLETED and evidence else VerdictCode.CLEAN
                    if status is StageStatus.COMPLETED else VerdictCode.UNKNOWN)
         error = (None if status is StageStatus.COMPLETED else
                  ScanError(code, "defender", code, status in (StageStatus.TIMEOUT,
