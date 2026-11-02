@@ -3,14 +3,17 @@
 Một trang duy nhất để theo dõi tiến độ. Chi tiết kỹ thuật vẫn nằm trong
 `docs/handoff/PROJECT_CONTEXT.md`; khi hai nơi khác nhau thì code là đúng.
 
-**Cập nhật:** 2026-11-02 đêm (≈19:50) · **Nhánh:** `gate-baseline` (chưa push) · **Bàn giao:** `docs/handoff/NEXT_SESSION.md`
+**Cập nhật:** 2026-11-02 tối (≈20:20) · **Nhánh:** `gate-baseline` (chưa push) · **Kế hoạch toàn bộ:** `docs/handoff/PLAN.md` · **Bàn giao:** `docs/handoff/NEXT_SESSION.md`
 
 ## Ai làm gì
 
-| Phe | Ai | Việc |
-|---|---|---|
-| Blue Team | Claude | Viết toàn bộ code, sửa lỗi, test, tài liệu, commit |
-| Red Team | Codex | Review chỉ-đọc, nghiên cứu, viết test trong `tests/codex/**`, làm icon trong `assets/brand/**`; **sẽ viết Gate v2** trong nhánh riêng |
+Quyết định của chủ dự án (2026-11-02 tối): Claude chịu trách nhiệm toàn bộ; Codex chỉ tận
+dụng nốt hạn mức còn lại cho việc dài chạy nền, không bước nào được chờ Codex.
+
+| Ai | Việc |
+|---|---|
+| Claude | Toàn bộ code, sửa lỗi, tích hợp, test, tài liệu, commit; đọc từng dòng Codex viết |
+| Codex | Khi còn hạn mức: review chỉ-đọc, nghiên cứu, các phần được giao trong brief, chạy trong worktree riêng |
 
 Mọi phát hiện của Codex được Claude kiểm chứng rồi mới sửa hoặc từ chối (có lý do).
 
@@ -217,5 +220,5 @@ cần xử lý mới sáng lên (333 ms); tắt hết khi Windows tắt hiệu �
 
 ## Kiểm thử gần nhất
 
-pytest **393 passed, 4 skipped, 2 xfailed** (không có clamd; 2 xfail = RT-001, RT-002; 209 test Gate v2, 55 test dịch vụ A1/A2) · extension **39 passed** · Helium e2e: mọi kiểm tra đạt (2026-11-02 đêm).
+pytest **393 passed, 4 skipped, 2 xfailed** (không có clamd; 2 xfail = RT-001, RT-002; 209 test Gate v2, 55 test dịch vụ A1/A2) · extension **39 passed** (chạy lại 2026-11-02 ≈20:20, commit `31a7df4`) · Helium e2e: mọi kiểm tra đạt (lần cuối 2026-11-02 đêm, chưa chạy lại).
 Baseline tại C2a: `docs/baseline.md`.

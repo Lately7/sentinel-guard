@@ -8,8 +8,8 @@ Helium browser and also working in Chrome and Edge.
 
 | Who    | Does                                                                 |
 |--------|----------------------------------------------------------------------|
-| Claude | Production code and integration, tests, running the tests, reports and docs, review of every Codex change |
-| Codex  | Independent reviewer, researcher and test engineer; writes only what a round's brief allows (below) |
+| Claude | All production code and integration, tests, running the tests, reports and docs, review of every Codex change |
+| Codex  | Optional, while its quota lasts (owner decision 2026-11-02): long independent background work; writes only what a round's brief allows (below). No step may wait for it |
 
 Codex rounds and what each may write:
 

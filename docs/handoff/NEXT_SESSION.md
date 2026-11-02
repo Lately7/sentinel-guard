@@ -3,6 +3,15 @@
 You have no memory of earlier sessions. Everything you need is in this repo.
 Code beats documents: when they disagree, trust the code and say so.
 
+**Update 2026-11-02 ~20:20 — read `docs/handoff/PLAN.md` next.** It replaces the
+order of work in §3–§5 below. Owner decision: Claude owns all the work; Codex only
+uses up its remaining quota on long background tasks, and no step may wait for it.
+§4 still describes how to run a Codex round. Five rounds started at 20:13: M5 round 2,
+M6 part 1, R14, R15, R16; results in `%TEMP%\sg-codex\`. The M5 draft is `3cdb0de` on
+`codex/gate-v2-m5`; M6 part 1 has its own worktree `..\sentinel-guard-gate-v2-m6`.
+§2's "393 passed" was luck: a test failed 6 of 12 runs until `31a7df4`.
+§7 stays in force.
+
 ## 1. Where things are
 
 * Repo: `C:\Users\lately07\Desktop\Folder Group\sentinel-guard`, branch
