@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import io
 import json
 import struct
@@ -30,10 +29,9 @@ def test_quarantine_roundtrip(db, scanner, tmp_path):
 
     restored = quarantine.restore(db, out["quarantine_id"])
     assert restored.read_bytes() == content
-    assert db.is_hash_allowed(hashlib.sha256(content).hexdigest())
     assert db.quarantine_items() == []
-    # Once trusted, the same file is no longer flagged.
-    assert scanner.scan_file(restored).label == "clean"
+    # What restore trusts afterwards is RT-002 (restore must not mean global
+    # trust); the desired behaviour is in test_known_issues.py.
 
 
 def test_no_quarantine_when_disabled(db, scanner, tmp_path):

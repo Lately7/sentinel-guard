@@ -8,12 +8,22 @@ Helium browser and also working in Chrome and Edge.
 
 | Who    | Does                                                                 |
 |--------|----------------------------------------------------------------------|
-| Claude | All logic and code, all tests, running the tests, reports and docs   |
-| Codex  | Read-only review of Claude's logic; findings go into `REVIEWS.md` via Claude |
+| Claude | Production code and integration, tests, running the tests, reports and docs, review of every Codex change |
+| Codex  | Independent reviewer, researcher and test engineer; writes only what a round's brief allows (below) |
 
-Codex never edits files in this repository. Each review is started with
-`codex exec -s read-only`, its findings are checked by Claude, and Claude
-applies (or rejects, with a reason) every finding.
+Codex rounds and what each may write:
+
+| Round | Sandbox | May write |
+|---|---|---|
+| Review / research | `codex exec -s read-only` | nothing (answer only; Claude records it) |
+| Test round | `-s workspace-write`, own worktree | `tests/codex/**`, `reports/red-team.md` |
+| Asset round | `-s workspace-write`, own worktree | `assets/brand/**` |
+| Gate v2 (owner decision 2026-11-02) | `-s workspace-write`, own worktree and branch | the paths its task file names |
+
+`workspace-write` does not restrict paths by itself. After every writing round
+Claude runs `tools/check_codex_scope.ps1 -Base <start commit> -Allow <paths>`
+and reviews the diff before anything is merged. Claude checks every finding
+and applies it or rejects it with a reason in `REVIEWS.md`.
 
 ## Layout
 
@@ -49,7 +59,7 @@ applies (or rejects, with a reason) every finding.
 ```powershell
 python -m venv .venv; .\.venv\Scripts\python -m pip install -e ".[ui,dev]"
 .\.venv\Scripts\python -m pytest              # Python tests
-node --test extension/test/                  # extension unit tests
+node --test "extension/test/*.test.mjs"     # extension unit tests (Node 24 needs the glob)
 .\.venv\Scripts\python -m sentinel install   # register native host + autostart
 .\.venv\Scripts\python -m sentinel tray      # run the agent with tray icon
 .\.venv\Scripts\python -m sentinel report    # write reports/status report

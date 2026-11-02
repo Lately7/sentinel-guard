@@ -105,3 +105,44 @@ Tests after round 2: pytest 52 passed, node --test 8 passed; Helium 156
 end-to-end (`tools/helium_e2e.mjs`): extension loads, 400,000 hosts synced,
 block page, heuristic warning, normal site, crafted-proceed rejected,
 genuine proceed trusted, no service-worker errors.
+
+## Rounds r4–r7 (new Codex account, 2026-11-02) and the RT registry
+
+Codex answers are kept verbatim in `docs/handoff/` (`codex-review-r4.md`,
+`codex-research-r5.md`, `codex-product-r6.md`, `codex-literature-r7.md`).
+"Verified" means Claude reproduced it or read the code path; open issues
+with a desired-behaviour test are in `tests/test_known_issues.py`
+(xfail strict).
+
+| Id | Issue | Verified | Outcome |
+|---|---|---|---|
+| RT-001 | Weak ClamAV names are conclusive → auto-quarantine | code + xfail test | Open → Gate v2 / ClamAV policy |
+| RT-002 | Restore grants global hash trust | code + xfail test | Open → quarantine hardening; old test no longer asserts it |
+| RT-003 | Watcher scans Sentinel's own data dir | code | Open → Gate v2 |
+| RT-004 | Partial coverage can read as clean | code | Open → Gate v2 (C3c moved there) |
+| RT-005 | Layers may see different file generations | code | Open → Gate v2 |
+| RT-006 | Native host single body read | test | Fixed `5af59ed` (C3e) |
+| RT-007 | CLI/scan-job self-data exclusion inconsistent | code | Open → Gate v2 |
+| RT-008 | Defender failure/timeout recorded as clean | test | Fixed for the layer `d77dea1` (C3a); top-level label → Gate v2 |
+| RT-009 | Stale/incomplete results cacheable | code | Open → Gate v2 (C3b moved there) |
+| RT-010 | Failed engine update advanced the success time | test | Fixed `754b745`, `c3714fd` (C3h; retry 60 min) |
+| RT-011 | CLI exit precedence | reproduced (exit 1, expected 3) | Fixed `290f4a0` (C3g) |
+| RT-012 | `AlertExceedsMax no` hides ClamAV limits | config read | Open → Gate v2 ClamAV adapter |
+| RT-013 | ClamAV unavailable/error, label still clean | code | Open → Gate v2 |
+| RT-014 | Encrypted content not shown as uninspected | not yet | Open → Gate v2 |
+| RT-015 | Unquoted paths in clamd.conf | ClamAV source | **Rejected**: `common/optparser.c:1094-1135` (ClamAV 1.5.4) takes the rest of the line as the value, so spaces work; quotes are optional |
+| RT-016 | Locked files not retried by the watcher | not yet | Open → phase 5 |
+| RT-017 | Unbounded debounce state | not yet | Open → phase 5 |
+| RT-018 | Stopping protection does not stop an in-flight action | not yet | Open → phase 5 |
+| RT-019 | Native host accepted a missing origin | code + test | Fixed `5af59ed` (C3j; `--diagnostic` for manual runs) |
+| RT-020 | page_signals: NaN scores, unbounded fields | test | Fixed `62ff720` (C3k) |
+| RT-021 | Allowlist silently truncated at 5,000 | not yet | Open → phase 5 |
+| RT-022 | "Proceed" creates a permanent host exception | code | Open → phase 5 |
+| RT-023 | Failed download hand-off counted as scanned | code | Open → phase 5 |
+| RT-024 | Traversal omissions missing from coverage | not yet | Open → Gate v2 / phase 5 |
+| RT-025 | Popup "no issue" when nothing was checked | not yet | Open → phase 5 |
+| RT-026 | Real-time "on" with nothing watched | code + xfail test | Open → phase 5 |
+| RT-027 | Only one registry view of Run keys | not yet | Open → phase 5 |
+
+Tests after these fixes: pytest 110 passed, 4 skipped (real-clamd tests, no
+clamd), 3 xfailed (known issues); node --test 12 passed.
