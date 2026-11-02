@@ -25,6 +25,26 @@ from .singleton import FEEDS_MUTEX, NamedLock
 
 log = logging.getLogger(__name__)
 
+# A failed signature update is retried after this, not after the full period:
+# advancing the success time on failure left ClamAV 4 h and YARA 24 h stale.
+ENGINE_RETRY_AFTER = 30 * 60
+
+
+def engine_update_due(db: Database, key: str, period: float, now: float | None = None) -> bool:
+    """Whether the engine database `key` ("clamav", "yara") should be refreshed now."""
+    now = time.time() if now is None else now
+    last_ok = float(db.get_meta(f"{key}_updated", "0") or 0)
+    last_try = float(db.get_meta(f"{key}_attempted", "0") or 0)
+    return now - last_ok > period and now - last_try > ENGINE_RETRY_AFTER
+
+
+def record_engine_update(db: Database, key: str, result: str, now: float | None = None) -> None:
+    now = time.time() if now is None else now
+    db.set_meta(f"{key}_attempted", str(now))
+    if result.startswith("ok"):
+        db.set_meta(f"{key}_updated", str(now))
+
+
 MAX_FEED_BYTES = 80 * 1024 * 1024
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _HOST_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$")

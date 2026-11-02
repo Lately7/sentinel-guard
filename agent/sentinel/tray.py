@@ -177,22 +177,20 @@ class App:
         if not clamav.has_database():
             res = clamav.update()
             self.db.add_event("feeds", "info" if res == "ok" else "warning", "Tải chữ ký ClamAV lần đầu", res)
-            self.db.set_meta("clamav_updated", str(time.time()))
+            feeds.record_engine_update(self.db, "clamav", res)
         if not eng.start(wait=120):
             self.db.add_event("system", "warning", "Lớp ClamAV chưa sẵn sàng", eng.status())
 
     def update_feeds(self) -> dict[str, str]:
         res = feeds.update_all(self.db)
-        if self.scanner.clamav is not None:
-            # ClamAV asks clients not to check more often than hourly.
-            last = float(self.db.get_meta("clamav_updated", "0") or 0)
-            if time.time() - last > 4 * 3600:
-                res["clamav"] = clamav.update()
-                self.db.set_meta("clamav_updated", str(time.time()))
-        last = float(self.db.get_meta("yara_updated", "0") or 0)
-        if time.time() - last > 24 * 3600:
+        # ClamAV asks clients not to check more often than hourly; a failure is
+        # retried after feeds.ENGINE_RETRY_AFTER rather than a whole period.
+        if self.scanner.clamav is not None and feeds.engine_update_due(self.db, "clamav", 4 * 3600):
+            res["clamav"] = clamav.update()
+            feeds.record_engine_update(self.db, "clamav", res["clamav"])
+        if feeds.engine_update_due(self.db, "yara", 24 * 3600):
             res["yara-forge"] = yarafeed.update()
-            self.db.set_meta("yara_updated", str(time.time()))
+            feeds.record_engine_update(self.db, "yara", res["yara-forge"])
             if res["yara-forge"].startswith("ok"):
                 # New rules only take effect in a freshly built scanner.
                 self.scanner.sigs = SignatureEngine(self.db)
