@@ -1,0 +1,147 @@
+{
+  "generated": "2026-11-02T13:14:34",
+  "holdout_feeds": {
+    "urlhaus_filter": "ok (17072)",
+    "phishing_filter": "ok (13154)",
+    "pup_filter": "ok (189)",
+    "hagezi_tif": "ok (315081)",
+    "hagezi_fake": "ok (17354)",
+    "phishing_database": "ok (261182)",
+    "nocoin": "ok (305)"
+  },
+  "phishing_sample": {
+    "source": "openphish (live, excluded from blocklist)",
+    "urls": 300,
+    "blocklist_hits": 73,
+    "blocklist_pct": 24.3,
+    "heuristic_ge70": 0,
+    "heuristic_ge70_pct": 0.0,
+    "heuristic_ge40": 3,
+    "heuristic_ge40_pct": 1.0,
+    "blocked_total": 73,
+    "blocked_total_pct": 24.3,
+    "blocked_or_warned": 76,
+    "blocked_or_warned_pct": 25.3,
+    "hits_by_source": {
+      "phishing_database": 4,
+      "phishing_filter": 58,
+      "hagezi_tif": 11
+    },
+    "missed_examples": [
+      "https://www.instagramcom-weld.vercel.app/",
+      "https://skylanai.com/",
+      "https://internationaldatasystems.ca/speed/",
+      "http://connect.mytonwallet.org/",
+      "http://vpn.spheremama.com/index.html",
+      "http://jacog60r.spheremama.com/index.html",
+      "https://vendors.spheremama.com/index.html",
+      "https://operator.zh5-app-ayxsports.com/index.html",
+      "https://qtlm.spheremama.com/index.html",
+      "http://6tg19ha5.sanpinjia.com/",
+      "http://231mbutu5udwntnq.spheremama.com/",
+      "https://z28ae00t218otkz2.spheremama.com/index.html",
+      "http://567787.spheremama.com/",
+      "https://promo.sanpinjia.com/index.html",
+      "http://e8y3qufn.sanpinjia.com/",
+      "https://file.spheremama.com/",
+      "https://etransfer-accept.duckdns.org/captcha.php",
+      "https://kjfycvb5.sanpinjia.com/",
+      "https://sumeethukkeri-cmyk.github.io/Netflix_med/",
+      "https://customer-sp-logandaviau1.pages.dev/help/contact/460861104943987appeals/submit-appeal-form/return/",
+      "https://vmi3696769.contaboserver.net/as/btm/na/msg.php",
+      "https://afc-benton-fert253498.pages.dev/help/contact/209582772746445/appeals/submit-appeal-form/return/",
+      "https://rajdeveloper4321q.github.io/Amazon-cloneS/",
+      "https://afc-benton-fert253498.pages.dev/help/contact/285342366444889appeals/submit-appeal-form/returnappeals/submit-appeal-form/return/",
+      "https://miicro67soft.vercel.app/"
+    ]
+  },
+  "legit_sample": {
+    "blocklist_checked": 10000,
+    "blocklist_false_positives": 19,
+    "blocklist_fp_pct": 0.2,
+    "blocklist_fp_examples": [
+      [
+        "https://unstoppabledomains.com/",
+        "phishing_database"
+      ],
+      [
+        "https://dvrlists.com/",
+        "hagezi_tif"
+      ],
+      [
+        "https://ffm.to/",
+        "phishing_database"
+      ],
+      [
+        "https://nereserv.com/",
+        "hagezi_tif"
+      ],
+      [
+        "https://earn.fm/",
+        "hagezi_tif"
+      ],
+      [
+        "https://forthnet.gr/",
+        "hagezi_tif"
+      ],
+      [
+        "https://ycxrl.com/",
+        "hagezi_tif"
+      ],
+      [
+        "https://cbphe.com/",
+        "hagezi_tif"
+      ],
+      [
+        "https://mercadolibre.com.uy/",
+        "phishing_database"
+      ],
+      [
+        "https://mez.ink/",
+        "phishing_database"
+      ],
+      [
+        "https://geocities.ws/",
+        "phishing_database"
+      ],
+      [
+        "https://wavebrowser.co/",
+        "hagezi_tif"
+      ],
+      [
+        "https://genspark.ai/",
+        "phishing_database"
+      ],
+      [
+        "https://cyberprotector.online/",
+        "hagezi_tif"
+      ],
+      [
+        "https://000webhost.com/",
+        "hagezi_tif"
+      ],
+      [
+        "https://werefilledwit.org/",
+        "hagezi_tif"
+      ],
+      [
+        "https://ghabovethec.info/",
+        "phishing_database"
+      ],
+      [
+        "https://qemow.com/",
+        "hagezi_tif"
+      ],
+      [
+        "https://bit.do/",
+        "phishing_database"
+      ]
+    ],
+    "heuristic_checked": 20000,
+    "heuristic_ge70": 0,
+    "heuristic_ge70_pct": 0.0,
+    "heuristic_ge40": 108,
+    "heuristic_ge40_pct": 0.5,
+    "heuristic_fp_examples": []
+  }
+}

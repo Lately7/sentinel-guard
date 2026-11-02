@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Đã chặn trang nguy hiểm</title>
+  <link rel="stylesheet" href="ui.css">
+  <style>
+    main { max-width: 680px; margin: 10vh auto 40px; padding: 0 16px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-top: 6px solid var(--danger); border-radius: 12px; padding: 24px; }
+    h1 { margin: 0 0 8px; font-size: 24px; color: var(--danger); }
+    .url { background: var(--danger-bg); border-radius: 8px; padding: 8px 10px; margin: 12px 0; }
+    ul { padding-left: 20px; margin: 8px 0 16px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+    details { margin-top: 18px; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="card">
+      <h1 id="title">Sentinel Guard đã chặn trang này</h1>
+      <p id="why">Trang này nằm trong danh sách nguy hiểm.</p>
+      <div class="url"><code id="url">—</code></div>
+      <ul id="reasons"></ul>
+      <p class="muted">Đừng nhập mật khẩu, mã OTP, thông tin thẻ hay tải tệp từ trang này.</p>
+      <div class="actions">
+        <button class="primary" id="back">Quay lại an toàn</button>
+      </div>
+      <details>
+        <summary class="muted">Tôi hiểu rủi ro</summary>
+        <p class="muted">Chỉ tiếp tục nếu bạn chắc chắn đây là báo nhầm. Tên miền sẽ được thêm vào danh sách tin cậy (gỡ được trong bảng điều khiển của Sentinel Guard).</p>
+        <button id="proceed">Vẫn mở trang này</button>
+      </details>
+    </div>
+  </main>
+  <script type="module" src="blocked.js"></script>
+</body>
+</html>

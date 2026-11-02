@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <title>Sentinel Guard</title>
+  <link rel="stylesheet" href="ui.css">
+  <style>
+    body { width: 340px; }
+    header { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+    header b { font-size: 16px; }
+    section { padding: 12px 14px; border-bottom: 1px solid var(--line); }
+    .state { font-weight: 600; }
+    .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--danger); }
+    ul { margin: 6px 0 0; padding-left: 18px; }
+    .row { display: flex; justify-content: space-between; gap: 8px; }
+    .stats { display: grid; grid-template-columns: repeat(3, 1fr); text-align: center; gap: 6px; }
+    .stats b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
+    footer { display: flex; gap: 8px; padding: 12px 14px; }
+    label { display: flex; align-items: center; gap: 6px; }
+  </style>
+</head>
+<body>
+  <header><b>Sentinel Guard</b><label><input type="checkbox" id="enabled"> Bảo vệ</label></header>
+  <section>
+    <div class="muted">Trang hiện tại</div>
+    <div id="page" class="state">—</div>
+    <ul id="reasons"></ul>
+  </section>
+  <section>
+    <div class="row"><span class="muted">Agent trên máy</span><span id="agent">—</span></div>
+    <div class="row"><span class="muted">Tên miền bị chặn</span><span id="size">—</span></div>
+  </section>
+  <section class="stats">
+    <div><b id="s-blocked">0</b><span class="muted">đã chặn</span></div>
+    <div><b id="s-warned">0</b><span class="muted">cảnh báo</span></div>
+    <div><b id="s-downloads">0</b><span class="muted">tệp đã quét</span></div>
+  </section>
+  <footer>
+    <button id="sync">Đồng bộ danh sách</button>
+    <button id="trust">Tin cậy trang này</button>
+  </footer>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

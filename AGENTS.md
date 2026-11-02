@@ -4,21 +4,26 @@ Sentinel Guard is a Windows desktop agent (real-time file/malware protection)
 plus a Chromium MV3 extension (real-time web protection), built first for the
 Helium browser and also working in Chrome and Edge.
 
+## Roles
+
+| Who    | Does                                                                 |
+|--------|----------------------------------------------------------------------|
+| Claude | All logic and code, all tests, running the tests, reports and docs   |
+| Codex  | Read-only review of Claude's logic; findings go into `REVIEWS.md` via Claude |
+
+Codex never edits files in this repository. Each review is started with
+`codex exec -s read-only`, its findings are checked by Claude, and Claude
+applies (or rejects, with a reason) every finding.
+
 ## Layout
 
-| Path                          | Owner (default) | Contents                                        |
-|-------------------------------|-----------------|-------------------------------------------------|
-| `agent/sentinel/`             | Claude          | Python agent: engine, watcher, native host, UI  |
-| `agent/sentinel/engine/pe.py` | Codex           | PE (Windows executable) static heuristics       |
-| `extension/`                  | Claude          | MV3 extension (service worker, pages, rules)    |
-| `extension/src/url_heuristics.js` | Codex       | URL risk scoring (pure, no `chrome.*`)          |
-| `extension/src/content/`      | Codex           | page_guard.js, clipboard_guard.js               |
-| `tests/`                      | Claude + Codex  | pytest suite (Codex owns files it creates)      |
-| `extension/test/`             | Claude + Codex  | `node --test` suite (Codex owns files it creates) |
-| `*.md`                        | Claude          | documentation (Codex may review)                |
-
-Two agents never edit the same file at the same time. A Codex task names the
-files it may create or change; everything else is read-only for that task.
+| Path               | Contents                                                |
+|--------------------|---------------------------------------------------------|
+| `agent/sentinel/`  | Python agent: engine, DB, feeds, watcher, native host, tray UI |
+| `extension/`       | MV3 extension: service worker, warning page, popup, rules |
+| `tests/`           | pytest suite                                            |
+| `extension/test/`  | `node --test` suite                                     |
+| `reports/`         | generated test/scan reports                             |
 
 ## Conventions
 
@@ -31,8 +36,8 @@ files it may create or change; everything else is read-only for that task.
 * Detection functions never raise on hostile input: malformed data becomes a
   finding or an empty result.
 * Heuristics alone must not reach the `malicious` label for common legitimate
-  software; only signatures, blocklists, or several strong signals together
-  may. Automatic quarantine happens only on `malicious`.
+  software; only signatures, blocklists, Defender, or several strong signals
+  together may. Automatic quarantine happens only on `malicious`.
 * Extension: plain ES modules, no bundler, no remote code, every message from a
   content script or page is validated in `background.js` before use.
 * No shell strings: spawn with argv arrays and `shell=False`.
@@ -43,15 +48,17 @@ files it may create or change; everything else is read-only for that task.
 
 ```powershell
 python -m venv .venv; .\.venv\Scripts\python -m pip install -e ".[ui,dev]"
-.\.venv\Scripts\python -m pytest          # Python tests
-node --test extension/test/              # extension unit tests
+.\.venv\Scripts\python -m pytest              # Python tests
+node --test extension/test/                  # extension unit tests
 .\.venv\Scripts\python -m sentinel install   # register native host + autostart
 .\.venv\Scripts\python -m sentinel tray      # run the agent with tray icon
+.\.venv\Scripts\python -m sentinel report    # write reports/status report
 ```
 
 ## Review process
 
-1. Interfaces and acceptance criteria for each Codex task are in `TASKS.md`.
-2. Codex results are summarised in `TASKS.md` (Codex log).
-3. Claude reviews every Codex diff before committing it.
-4. Never record a result that was not produced by running the command.
+1. Acceptance criteria are in `TASKS.md`.
+2. Codex reviews each finished module read-only; Claude records the outcome
+   of every finding in `REVIEWS.md`.
+3. Tests must pass before a milestone is marked complete. Never record a
+   result that was not produced by running the command.

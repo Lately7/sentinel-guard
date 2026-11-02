@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "Sentinel Guard",
+  "version": "0.1.0",
+  "description": "Chặn trang lừa đảo, phát tán mã độc, đào coin và quét tệp tải về bằng agent Sentinel Guard trên máy.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuGOa9orPMOkA5bLfloO/0HOVNpm84+Cck8ocg12TH9RgjrzWO/BMdtfAHzGquPzFF3hQ0ZS9Fh+SdzGVMuZbr6gKwU+3OPLBYwwY4yHCt6TrFOzzeBqFX9gPhUZ6uP5sXoOJtMtGaUh1BgFVQnP4ti783ExVZScSGWWLgPLX9ypBiUQRFIHL4KjsasRzceAPuHZe/+fnZiLWNpC56RBQvGVrxPR0y8mLMgtPQXnIlojoA5gCu4J7ida1XDF12Bk3Y0h+YA22MVqpSHc8DjbxukDfm4Z+6Zpz9MiBThxTyLdJj9h6svwgdVPvmT3Fw7pwzVR/Abz3TZqWDA6tWj/rqwIDAQAB",
+  "minimum_chrome_version": "121",
+  "permissions": [
+    "declarativeNetRequest",
+    "declarativeNetRequestFeedback",
+    "webNavigation",
+    "tabs",
+    "storage",
+    "downloads",
+    "notifications",
+    "nativeMessaging",
+    "alarms"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "src/background.js", "type": "module" },
+  "content_scripts": [
+    { "matches": ["http://*/*", "https://*/*"], "js": ["src/content/page_guard.js"], "run_at": "document_idle" }
+  ],
+  "action": {
+    "default_title": "Sentinel Guard",
+    "default_popup": "src/popup.html",
+    "default_icon": { "16": "icons/icon16.png", "48": "icons/icon48.png", "128": "icons/icon128.png" }
+  },
+  "icons": { "16": "icons/icon16.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
+  "web_accessible_resources": [
+    { "resources": ["src/blocked.html", "src/blocked.js", "src/ui.css"], "matches": ["<all_urls>"] }
+  ]
+}

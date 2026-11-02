@@ -1,0 +1,14 @@
+:root {
+  --bg: #f6f7f9; --fg: #1d2330; --card: #ffffff; --muted: #5f6b7a; --line: #e2e5ea;
+  --danger: #b42318; --danger-bg: #fdecea; --warn: #9a6700; --ok: #1a7f37; --btn: #1d2330; --btn-fg: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #14171c; --fg: #e7e9ee; --card: #1c2028; --muted: #9aa3b2; --line: #2c323d;
+          --danger: #ff6b5e; --danger-bg: #3a1a17; --warn: #e3b341; --ok: #3fb950; --btn: #e7e9ee; --btn-fg: #14171c; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 "Segoe UI", system-ui, sans-serif; }
+button { font: inherit; border-radius: 8px; padding: 8px 14px; cursor: pointer; border: 1px solid var(--line); background: var(--card); color: var(--fg); }
+button.primary { background: var(--btn); color: var(--btn-fg); border-color: var(--btn); }
+.muted { color: var(--muted); }
+code { font-family: Consolas, ui-monospace, monospace; font-size: 13px; word-break: break-all; }
