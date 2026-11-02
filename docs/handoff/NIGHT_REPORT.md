@@ -163,6 +163,19 @@ phát hiện một test có thể làm **treo pytest** khi nó fail (socket khô
 mọi user, script `tools/admin_acceptance.ps1` (cần anh/chị chạy với quyền
 admin).
 
+## 2f. Vỏ dịch vụ (A1) và worker quyền thấp (A2)
+
+* `service/host.py` (`f5dad5a`): vỏ dịch vụ Windows bằng `ctypes`; chỉ báo
+  "đã dừng" sau khi rào chặn hành động đóng. 5 test với SCM giả.
+* `service/worker.py` (`194ae38`): tiến trình worker để đọc tệp lạ — token
+  rút gọn từ chính token của mình, **low integrity**, Administrators bị vô
+  hiệu, Job Object (giới hạn bộ nhớ, 1 tiến trình, tự chết khi đóng job), chỉ
+  kế thừa 2 handle pipe, môi trường sạch. Chạy thật trên máy, không cần admin:
+  worker báo `low`, không admin, đọc được tệp cần quét nhưng **không ghi được**
+  cạnh nó, **không sinh được tiến trình**, không cấp phát quá giới hạn, không
+  thấy biến môi trường của tiến trình cha. Thử phá: bỏ low integrity → 2 test
+  đỏ; bỏ giới hạn tiến trình → 1 test đỏ.
+
 ## 3. Watcher (RT-016, RT-017, RT-018) và allowlist (RT-021)
 
 * **RT-016**: tệp bị chương trình khác giữ được thử lại sau 0,5 / 2 / 8 /

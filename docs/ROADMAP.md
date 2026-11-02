@@ -60,8 +60,8 @@ tiến trình bằng chụp danh sách 500 ms trước, ETW để sau.
 | Mốc | Việc | Ghi chú |
 |---|---|---|
 | G3–G6 | Gate v2 mốc 3–6 (core/luật, ClamAV, Defender, cache + adapter) | song song với A1 |
-| A1 | Giao thức pipe + phân quyền lệnh + `ServiceCore` + named pipe thật + client | ✅ phần không cần admin: `1276db7`, `2b69586`, `d295c93` (36 test); còn: vỏ dịch vụ Windows, hộp xác nhận UAC, script kiểm thử admin |
-| A2 | Worker quét quyền thấp + Job Object | sau adapter Gate v2 |
+| A1 | Giao thức pipe + phân quyền lệnh + `ServiceCore` + named pipe thật + client + vỏ dịch vụ | ✅ phần không cần admin: `1276db7`, `2b69586`, `d295c93`, `f5dad5a` (41 test); còn: hộp xác nhận UAC, cài dịch vụ, script kiểm thử admin |
+| A2 | Worker quét quyền thấp + Job Object | ✅ khởi chạy worker: `194ae38` (low integrity, không admin, không ghi được, không sinh tiến trình, giới hạn bộ nhớ); còn: giao thức worker + vòng quét |
 | A3 | Gate v2 mốc 7 qua dịch vụ: cách ly có kiểm lại, nhật ký hoàn tác, hộp xác nhận UAC | |
 | A4 | Gate v2 mốc 8 + nguồn quét admin (mọi user, dịch vụ, tác vụ, WMI…) | |
 | A5 | USN journal, chụp danh sách tiến trình 500 ms, quét lại tệp tải về | cần chủ dự án chạy thử với quyền admin |
