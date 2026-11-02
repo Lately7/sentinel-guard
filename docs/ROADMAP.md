@@ -39,7 +39,7 @@ cổng** vẫn làm ngay: native host (C3e, C3j), extension (C3k), mã thoát CL
 | # | Giai đoạn | Trạng thái |
 |---|---|---|
 | 0 | **Nền tảng**: C1 icon cũ, C2a cổng quét, C2b baseline, giao diện tối, bộ icon v2 | ✅ xong |
-| 1 | **Sửa lỗi** (C3a ✅; C3b/C3c tạm dừng vì Gate v2; còn C3d–C3k) | ⏳ đang làm |
+| 1 | **Sửa lỗi** (C3a, e, g, h, j, k ✅; C3b/c/f vào Gate v2; C3i bỏ; còn C3d) | ⏳ gần xong |
 | R | **Nghiên cứu sâu cho Gate v2** (R8a–R11, `docs/research/`) | ⏳ R9, R10 đang chạy; R8 chờ tải mã nguồn ClamAV |
 | G | **Gate v2** do Codex viết theo đặc tả R11, Claude review | chờ R11 |
 | 2 | **Red Team viết test** (Codex vòng 1a, 1b) | chờ giai đoạn 1 |
@@ -51,20 +51,20 @@ cổng** vẫn làm ngay: native host (C3e, C3j), extension (C3k), mã thoát CL
 
 ### Giai đoạn 1 — từng commit
 
-| Commit | Nội dung | Sửa |
-|---|---|---|
-| C3a | Kết quả Defender có kiểu (sạch/độc/lỗi/hết giờ/không có) | RT-008 |
-| C3b | Định danh cổng quét theo nội dung luật; không cache kết quả chưa đầy đủ | RT-009 |
-| C3c | Giữ trạng thái "bỏ qua"/"một phần" cho ZIP quá lớn | một phần RT-004 |
-| C3d | Sửa 2 test đang khoá quyết định sai; sổ RT; `tools/check_codex_scope.ps1`; vai trò Codex trong `AGENTS.md` | — |
-| C3e | Native host đọc đủ thân thông điệp | RT-006 |
-| C3f | Chỗ cắm test cho ClamAV client | — |
-| C3g | Mã thoát CLI đúng thứ tự 2 > 3 > 1 > 0 | RT-011 |
-| C3h | Cập nhật chữ ký thất bại thì thử lại sớm | RT-010 |
-| C3i | Đặt đường dẫn trong `clamd.conf` vào ngoặc kép | RT-015 |
-| C3j | Native host bắt buộc đúng origin của extension | RT-019 |
-| C3k | Extension kiểm tra số/độ dài trong thông điệp từ trang | RT-020 |
-| C4 | `CODEX_TASK_1a.md`, `CODEX_TASK_1b.md` ghim vào commit C3k | — |
+| Commit | Nội dung | Sửa | Trạng thái |
+|---|---|---|---|
+| C3a | Kết quả Defender có kiểu (sạch/độc/lỗi/hết giờ/không có) | RT-008 | ✅ `d77dea1` |
+| C3b | Định danh cổng quét theo nội dung luật; không cache kết quả chưa đầy đủ | RT-009 | ⏸ chuyển vào Gate v2 |
+| C3c | Giữ trạng thái "bỏ qua"/"một phần" cho ZIP quá lớn | một phần RT-004 | ⏸ chuyển vào Gate v2 |
+| C3d | Sửa 2 test đang khoá quyết định sai; sổ RT; `tools/check_codex_scope.ps1`; vai trò Codex trong `AGENTS.md` | — | ⏭ |
+| C3e | Native host đọc đủ thân thông điệp | RT-006 | ✅ `5af59ed` |
+| C3f | Chỗ cắm test cho ClamAV client | — | ⏸ chuyển vào Gate v2 |
+| C3g | Mã thoát CLI đúng thứ tự 2 > 3 > 1 > 0 | RT-011 | ✅ `290f4a0` |
+| C3h | Cập nhật chữ ký thất bại thì thử lại sau 60 phút | RT-010 | ✅ `754b745`, `c3714fd` |
+| C3i | Đặt đường dẫn trong `clamd.conf` vào ngoặc kép | RT-015 | ✖ bỏ: không phải lỗi |
+| C3j | Native host bắt buộc đúng origin của extension | RT-019 | ✅ `5af59ed` |
+| C3k | Extension kiểm tra số/độ dài trong thông điệp từ trang | RT-020 | ✅ `62ff720` |
+| C4 | `CODEX_TASK_1a.md`, `CODEX_TASK_1b.md` ghim vào commit C3k | — | xem lại sau R11 |
 
 ### Giai đoạn 5 — ba tính năng chính (theo Codex r6, đã chỉnh theo ý chủ dự án)
 
@@ -112,21 +112,21 @@ cần xử lý mới sáng lên (333 ms); tắt hết khi Windows tắt hiệu �
 | RT-003 | Thời gian thực quét cả dữ liệu của Sentinel | TB | GĐ 4 |
 | RT-004 | Quét một phần có thể hiện "sạch" | Cao | C3c + GĐ 3 |
 | RT-005 | Các lớp có thể đọc hai phiên bản khác nhau của tệp | Cao | GĐ 3–4 |
-| RT-006 | Native host đọc thông điệp một lần | TB | C3e |
+| RT-006 | Native host đọc thông điệp một lần | TB | ✅ C3e |
 | RT-007 | CLI/quét theo yêu cầu không loại trừ dữ liệu Sentinel nhất quán | TB | GĐ 4 |
-| RT-008 | Defender lỗi/hết giờ bị báo "sạch" | Cao | C3a |
+| RT-008 | Defender lỗi/hết giờ bị báo "sạch" | Cao | ✅ C3a (lớp); nhãn chung: Gate v2 |
 | RT-009 | Cache giữ kết quả cũ hoặc chưa đầy đủ | Cao | C3b |
-| RT-010 | Cập nhật lỗi vẫn ghi mốc thành công | TB | C3h |
-| RT-011 | Mã thoát CLI sai thứ tự ưu tiên | TB | C3g |
+| RT-010 | Cập nhật lỗi vẫn ghi mốc thành công | TB | ✅ C3h |
+| RT-011 | Mã thoát CLI sai thứ tự ưu tiên | TB | ✅ C3g |
 | RT-012 | `AlertExceedsMax no` giấu việc ClamAV chạm giới hạn | Cao | GĐ 3 |
 | RT-013 | ClamAV lỗi/không chạy mà kết luận chung vẫn "sạch" | Cao | GĐ 3 |
 | RT-014 | Lưu trữ/tài liệu mã hoá không được ghi là "chưa kiểm tra được" | TB | GĐ 3 |
-| RT-015 | Đường dẫn trong `clamd.conf` không có ngoặc kép | Thấp | C3i |
+| RT-015 | Đường dẫn trong `clamd.conf` không có ngoặc kép | Thấp | ✖ từ chối: `common/optparser.c:1094-1135` của ClamAV lấy cả phần còn lại của dòng làm giá trị, dấu cách vẫn đúng |
 | RT-016 | Thời gian thực không thử lại tệp đang bị khoá | Cao | GĐ 5 |
 | RT-017 | Hàng đợi chống dội không có giới hạn | TB | GĐ 5 |
 | RT-018 | Tắt bảo vệ không dừng lượt quét/cách ly đang chạy | TB | GĐ 5 |
-| RT-019 | Native host chấp nhận khi thiếu origin | Thấp | C3j |
-| RT-020 | Thông điệp từ trang thiếu kiểm tra số (NaN) và độ dài | Thấp | C3k |
+| RT-019 | Native host chấp nhận khi thiếu origin | Thấp | ✅ C3j |
+| RT-020 | Thông điệp từ trang thiếu kiểm tra số (NaN) và độ dài | Thấp | ✅ C3k |
 | RT-021 | Allowlist bị cắt im lặng sau 5.000 tên miền | TB | GĐ 5 |
 | RT-022 | "Vẫn tiếp tục" tạo ngoại lệ vĩnh viễn cho cả tên miền | TB | GĐ 5 |
 | RT-023 | Tải về không gửi được tới agent vẫn đếm là đã quét | TB | GĐ 5 |
@@ -151,5 +151,5 @@ cần xử lý mới sáng lên (333 ms); tắt hết khi Windows tắt hiệu �
 
 ## Kiểm thử gần nhất
 
-pytest **78 passed, 4 skipped** (không có clamd) / **82 passed** (có clamd) ·
-extension **8 passed** — xem `docs/baseline.md`.
+pytest **103 passed, 4 skipped** (không có clamd, sau C3k) · extension **12 passed**.
+Baseline tại C2a: `docs/baseline.md`.
