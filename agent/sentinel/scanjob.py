@@ -14,7 +14,7 @@ from pathlib import Path
 from . import config
 from .db import Database
 from .engine.scanner import Scanner
-from .engine.verdict import CLEAN, Verdict
+from .engine.verdict import CLEAN, MALICIOUS, Verdict
 from .protection import act_on
 
 log = logging.getLogger(__name__)
@@ -84,7 +84,9 @@ class ScanProgress:
     started: float = field(default_factory=time.time)
     finished: float | None = None
     scanned: int = 0
-    detections: int = 0
+    detections: int = 0  # threats + suspicious
+    threats: int = 0
+    suspicious: int = 0
     quarantined: int = 0
     unreadable: int = 0
     # Files no external engine (ClamAV/Defender) confirmed: a clean label for
@@ -160,6 +162,10 @@ class ScanJob:
         if v.label == CLEAN:
             return
         p.detections += 1
+        if v.label == MALICIOUS:
+            p.threats += 1
+        else:
+            p.suspicious += 1
         outcome = act_on(self.db, v, self.settings, "scan")
         if outcome["quarantined"]:
             p.quarantined += 1

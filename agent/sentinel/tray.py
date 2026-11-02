@@ -15,10 +15,12 @@ from tkinter import messagebox, ttk
 
 from . import config, feeds, quarantine, report, theme, yarafeed
 from .db import Database
-from .engine import clamav, defender
+from .engine import clamav
 from .engine.scanner import Scanner
 from .engine.signatures import SignatureEngine
 from .gate_ui import GatePanel
+from .engine_status import EngineStatus
+from .overview_ui import Overview, protection_state
 from .singleton import AppInstance
 from .watcher import RealtimeProtection
 
@@ -57,6 +59,7 @@ class App:
         self.db.prune_cache()
         self.scanner = Scanner(self.db, use_defender=self.settings.use_defender, use_clamav=self.settings.use_clamav)
         self.gate: GatePanel | None = None
+        self.engine_status = EngineStatus(self.scanner, on_change=lambda: self.ui(self.refresh))
         self.realtime: RealtimeProtection | None = None
         self.ui_queue: queue.Queue = queue.Queue()
         theme.enable_dpi_awareness()
@@ -66,6 +69,7 @@ class App:
         theme.apply(self.root)
         self.window: tk.Toplevel | None = None
         self.logo: theme.LogoMark | None = None
+        self.overview: Overview | None = None
         self.icon = None
         self._stop = threading.Event()
 
@@ -77,6 +81,7 @@ class App:
         if self.settings.realtime:
             self.start_realtime()
         threading.Thread(target=self._clamav_bootstrap, daemon=True, name="clamav").start()
+        self.engine_status.start()
         menu = pystray.Menu(
             pystray.MenuItem("Mở bảng điều khiển", lambda: self.ui(self.show), default=True),
             pystray.MenuItem("Quét nhanh", lambda: self.quick_scan()),
@@ -98,6 +103,7 @@ class App:
         self._stop.set()
         if self.realtime:
             self.realtime.stop()
+        self.engine_status.stop()
         if self.gate and self.gate.job:
             self.gate.job.cancel()
         if self.scanner.clamav is not None:
@@ -225,64 +231,68 @@ class App:
             return
         w = tk.Toplevel(self.root, bg=theme.BG)
         w.title(APP)
-        w.geometry(f"{theme.px(w, 1100)}x{theme.px(w, 660)}")
-        w.minsize(theme.px(w, 860), theme.px(w, 480))
+        w.geometry(f"{theme.px(w, 1080)}x{theme.px(w, 680)}")
+        w.minsize(theme.px(w, 880), theme.px(w, 520))
         from PIL import ImageTk
 
         self._window_icon = ImageTk.PhotoImage(theme.logo_image(32))
         w.iconphoto(False, self._window_icon)
         theme.dark_title_bar(w)
         self.window = w
-        head = ttk.Frame(w, padding=(12, 10, 12, 2))
+        gap = theme.px(w, 16)
+        head = ttk.Frame(w, padding=(gap, gap, gap, theme.px(w, 4)))
         head.pack(fill="x")
-        self.logo = theme.LogoMark(head, size=20)
+        self.logo = theme.LogoMark(head, size=22)
         self.logo.pack(side="left")
-        ttk.Label(head, text=APP, style="Title.TLabel").pack(side="left", padx=(8, 0))
-        self.head_var = tk.StringVar()
-        ttk.Label(head, textvariable=self.head_var, style="Muted.TLabel").pack(side="right")
+        ttk.Label(head, text=APP, style="Title.TLabel").pack(side="left", padx=(10, 0))
+        state = ttk.Frame(head)
+        state.pack(side="right")
+        self.state_dot = theme.Dot(state, bg=theme.BG, size=10)
+        self.state_dot.pack(side="left", padx=(0, 8))
+        self.state_title = ttk.Label(state, style="State.TLabel")
+        self.state_title.pack(side="left")
+        self.state_detail = ttk.Label(state, style="Muted.TLabel")
+        self.state_detail.pack(side="left", padx=(10, 0))
+
         nb = ttk.Notebook(w)
-        nb.pack(fill="both", expand=True, padx=8, pady=(4, 8))
+        nb.pack(fill="both", expand=True, padx=theme.px(w, 6), pady=(0, theme.px(w, 6)))
+        self.overview = Overview(nb, self)
         self.gate = GatePanel(nb, self)
-
-        ov = ttk.Frame(nb, padding=12)
-        nb.add(ov, text="Tổng quan")
-        self.status_var = tk.StringVar()
-        ttk.Label(ov, textvariable=self.status_var, justify="left").pack(anchor="w")
-        bar = ttk.Frame(ov)
-        bar.pack(anchor="w", pady=12)
-        for text, cmd in (("Quét nhanh", self.quick_scan), ("Quét thư mục…", self.pick_and_scan),
-                          ("Cập nhật dữ liệu", self.update_feeds_async),
-                          ("Bật/tắt bảo vệ thời gian thực", self.toggle_realtime),
-                          ("Xuất báo cáo", self.export_report)):
-            ttk.Button(bar, text=text, command=cmd).pack(side="left", padx=4)
-
-        self.events_tv = self._table(nb, "Sự kiện", ("Thời gian", "Nguồn", "Mức", "Nội dung"), (130, 90, 70, 640))
-        qf = ttk.Frame(nb)
+        self.events_tv = self._table(nb, "Lịch sử", ("Thời gian", "Nguồn", "Mức", "Nội dung"), (130, 100, 80, 640))
+        qf = ttk.Frame(nb, padding=gap)
         nb.add(qf, text="Cách ly")
         self.q_tv = self._table(qf, None, ("ID", "Thời gian", "Vị trí gốc", "Lý do"), (0, 130, 380, 400))
         qb = ttk.Frame(qf)
-        qb.pack(anchor="w", pady=6)
-        ttk.Button(qb, text="Khôi phục (tin cậy tệp này)", command=self.restore_selected).pack(side="left", padx=4)
-        ttk.Button(qb, text="Xóa vĩnh viễn", command=self.delete_selected).pack(side="left", padx=4)
-        self.web_tv = self._table(nb, "Web", ("Thời gian", "Mức", "Nội dung"), (130, 70, 720))
-        af = ttk.Frame(nb)
-        nb.add(af, text="Trang được tin cậy")
-        self.allow_tv = self._table(af, None, ("Tên miền",), (600,))
-        ttk.Button(af, text="Bỏ tin cậy", command=self.unallow_selected).pack(anchor="w", pady=6)
+        qb.pack(anchor="w", pady=(10, 0))
+        ttk.Button(qb, text="Khôi phục", command=self.restore_selected).pack(side="left", padx=(0, 8))
+        ttk.Button(qb, text="Xóa vĩnh viễn", command=self.delete_selected).pack(side="left")
+        wf = ttk.Frame(nb, padding=gap)
+        nb.add(wf, text="Web")
+        ttk.Label(wf, text="Sự kiện từ trình duyệt", style="Section.TLabel").pack(anchor="w", pady=(0, 6))
+        self.web_tv = self._table(wf, None, ("Thời gian", "Mức", "Nội dung"), (130, 80, 720))
+        ttk.Label(wf, text="Trang bạn đã tin cậy", style="Section.TLabel").pack(anchor="w", pady=(gap, 6))
+        self.allow_tv = self._table(wf, None, ("Tên miền",), (600,), height=5)
+        ab = ttk.Frame(wf)
+        ab.pack(anchor="w", pady=(10, 0))
+        ttk.Button(ab, text="Bỏ tin cậy", command=self.unallow_selected).pack(side="left", padx=(0, 8))
+        ttk.Button(ab, text="Xuất báo cáo", command=self.export_report).pack(side="left")
+        nb.select(self.overview.frame)
         self.refresh()
 
-    def _table(self, parent, tab: str | None, cols, widths) -> ttk.Treeview:
-        frame = ttk.Frame(parent)
+    def _table(self, parent, tab: str | None, cols, widths, height: int | None = None) -> ttk.Treeview:
+        frame = ttk.Frame(parent, style="Card.TFrame")
         # A notebook page is placed by the notebook; packing it as well pulls it
         # out of the notebook and stacks it over the tab bar.
         if tab:
             parent.add(frame, text=tab)
         else:
-            frame.pack(fill="both", expand=True)
-        tv = ttk.Treeview(frame, columns=cols, show="headings")
+            frame.pack(fill="both", expand=height is None)
+        tv = ttk.Treeview(frame, columns=cols, show="headings", **({"height": height} if height else {}))
         for c, wdt in zip(cols, widths):
-            tv.heading(c, text=c)
-            tv.column(c, width=theme.px(tv, wdt), stretch=wdt > 300, minwidth=0)
+            tv.heading(c, text=c, anchor="w")
+            tv.column(c, width=theme.px(tv, wdt), stretch=wdt > 300, minwidth=0, anchor="w")
+        tv.tag_configure("threat", foreground=theme.BAD)
+        tv.tag_configure("warning", foreground=theme.WARN)
         sb = ttk.Scrollbar(frame, orient="vertical", command=tv.yview)
         tv.configure(yscrollcommand=sb.set)
         tv.pack(side="left", fill="both", expand=True)
@@ -290,44 +300,42 @@ class App:
         return tv
 
     def scanning(self, on: bool) -> None:
-        pass  # hook for scan-state UI outside the scan tab; the activity bar shows progress
+        if self.window is not None and self.window.winfo_exists():
+            self.overview.refresh()
 
     def refresh(self) -> None:
+        if self.window is None or not self.window.winfo_exists():
+            return
         if self.gate is not None:
             self.gate.refresh_layers()
-        c = self.db.counts()
-        fs = self.db.feed_status()
-        last = max((f["updated"] or 0 for f in fs), default=0)
-        rt = self.realtime and self.realtime.running
-        self.status_var.set(
-            f"Bảo vệ thời gian thực: {'BẬT' if rt else 'TẮT'}\n"
-            f"Thư mục theo dõi: {', '.join(self.realtime.files.dirs) if rt else '—'}\n"
-            f"Microsoft Defender (ý kiến thứ hai): {'có' if defender.available() and self.settings.use_defender else 'không'}\n"
-            f"ClamAV: {self.scanner.clamav.status() if self.scanner.clamav else 'không dùng'}\n"
-            f"Chữ ký hash: {c['bad_hashes']:,} · Tên miền độc hại: {c['bad_hosts']:,} · URL độc hại: {c['bad_urls']:,}\n"
-            f"Cập nhật dữ liệu lần cuối: {_fmt_ts(last) if last else 'chưa'}\n"
-            f"Tệp đang cách ly: {c['quarantine']}"
-        )
-        self.head_var.set(f"Bảo vệ thời gian thực {'bật' if rt else 'tắt'} · {c['quarantine']} tệp đang cách ly")
-        _fill(self.events_tv, [(e["id"], (_fmt_ts(e["ts"]), e["source"], e["level"], f"{e['title']} — {e['detail']}"))
-                               for e in self.db.events(300)])
+        st = protection_state(self)
+        self.state_dot.set(st.color)
+        self.state_title.configure(text=st.title)
+        self.state_detail.configure(text=st.detail)
+        self.overview.refresh()
+        _fill(self.events_tv, [(e["id"], (_fmt_ts(e["ts"]), SOURCE_VI.get(e["source"], e["source"]),
+                                          LEVEL_VI.get(e["level"], e["level"]), f"{e['title']} — {e['detail']}"),
+                                e["level"]) for e in self.db.events(300)])
         items = []
         for q in self.db.quarantine_items():
             try:
                 why = json.loads(q["verdict"])["findings"][0]["detail"]
             except (ValueError, KeyError, IndexError):
                 why = ""
-            items.append((q["id"], (q["id"], _fmt_ts(q["ts"]), q["original_path"], why)))
+            items.append((q["id"], (q["id"], _fmt_ts(q["ts"]), q["original_path"], why), ""))
         _fill(self.q_tv, items)
         web = [e for e in self.db.events(300) if e["source"] in ("web", "download")]
-        _fill(self.web_tv, [(e["id"], (_fmt_ts(e["ts"]), e["level"], f"{e['title']} — {e['detail']}")) for e in web])
-        _fill(self.allow_tv, [(h, (h,)) for h in self.db.allowed_hosts()])
+        _fill(self.web_tv, [(e["id"], (_fmt_ts(e["ts"]), LEVEL_VI.get(e["level"], e["level"]),
+                                       f"{e['title']} — {e['detail']}"), e["level"]) for e in web])
+        _fill(self.allow_tv, [(h, (h,), "") for h in self.db.allowed_hosts()])
 
     def restore_selected(self) -> None:
         sel = self.q_tv.selection()
         if not sel:
             return
-        if not messagebox.askyesno(APP, "Khôi phục tệp này? Tệp sẽ được đánh dấu tin cậy và không bị quét chặn lại."):
+        # Restore still trusts the file's hash everywhere (RT-002); say so plainly until that changes.
+        if not messagebox.askyesno(APP, "Khôi phục tệp này về vị trí cũ?\n\nNội dung này sẽ được tin cậy và không bị "
+                                        "chặn lại ở bất kỳ đâu trên máy."):
             return
         for qid in sel:
             try:
@@ -355,11 +363,16 @@ class App:
         os.startfile(paths["html"])  # type: ignore[attr-defined]
 
 
+SOURCE_VI = {"scan": "Quét", "realtime": "Thời gian thực", "web": "Web", "download": "Tải về",
+             "feeds": "Dữ liệu", "system": "Hệ thống", "persistence": "Khởi động"}
+LEVEL_VI = {"threat": "đe dọa", "warning": "cảnh báo", "info": "thông tin"}
+
+
 def _fill(tv: ttk.Treeview, rows) -> None:
     keep = tv.selection()
     tv.delete(*tv.get_children())
-    for iid, values in rows:
-        tv.insert("", "end", iid=str(iid), values=values)
+    for iid, values, tag in rows:
+        tv.insert("", "end", iid=str(iid), values=values, tags=(tag,) if tag else ())
     present = [i for i in keep if tv.exists(i)]
     if present:
         tv.selection_set(present)

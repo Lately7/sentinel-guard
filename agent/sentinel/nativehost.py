@@ -13,6 +13,7 @@ import os
 import struct
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -90,6 +91,8 @@ class Host:
         return out
 
     def on_hello(self, msg: dict[str, Any]) -> dict[str, Any]:
+        # The dashboard shows when the browser extension last checked in.
+        self.db.set_meta("extension_seen", str(time.time()))
         return {"version": __version__, "blocklist_version": self.db.get_meta("blocklist_version", "0"),
                 "allow_version": self.db.allow_version(), "counts": self.db.counts()}
 
