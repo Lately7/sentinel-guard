@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
-import queue
 import threading
 import time
 from collections.abc import Callable
@@ -13,6 +13,7 @@ from pathlib import Path
 from .config import Settings
 from .db import Database
 from .engine.scanner import Scanner
+from .engine.verdict import Verdict
 from .protection import act_on
 
 log = logging.getLogger(__name__)
@@ -24,21 +25,52 @@ log = logging.getLogger(__name__)
 PARTIAL_SUFFIXES = (".crdownload", ".part", ".partial", ".download", ".tmp", ".opdownload", ".!ut")
 SETTLE_SECONDS = 1.5
 PARTIAL_SETTLE_SECONDS = 90.0
+# Every event pushes the quiet timer back, so a file that never stops changing
+# would never be scanned; past this age it is scanned anyway (RT-017).
+MAX_AGE_SECONDS = 30.0
+PARTIAL_MAX_AGE_SECONDS = 600.0
+# Upper bound on paths waiting to be scanned (RT-017). Beyond it events are
+# counted and reported instead of growing memory without limit.
+MAX_PENDING = 10_000
+OVERFLOW_REPORT_SECONDS = 60.0
+# A file another program holds open (download manager, installer, Office) is
+# retried with growing delays: five attempts in about 40 s (RT-016, following
+# docs/research/R12d-wazuh.md section 2). After that it is reported as
+# unscanned; it is rescanned on its next change.
+RETRY_DELAYS = (0.5, 2.0, 8.0, 30.0)
+SIZE_RECHECK_SECONDS = 0.3
+# How long stop() waits for an automatic action that is already running.
+ACTION_BARRIER_SECONDS = 30.0
 # Our own in-flight quarantine claims (see quarantine.py) must not be rescanned.
 CLAIM_MARK = ".sentinel-"
+
+
+@dataclasses.dataclass
+class _Pending:
+    first_seen: float
+    due: float
+    attempts: int = 0  # failed reads of this file so far
 
 
 class ScanQueue:
     """Debounces bursts of events per path and scans once the file stops changing."""
 
     def __init__(self, scanner: Scanner, db: Database, settings: Settings,
-                 on_result: Callable[[dict], None] | None = None) -> None:
+                 on_result: Callable[[dict], None] | None = None,
+                 clock: Callable[[], float] = time.monotonic) -> None:
         self.scanner = scanner
         self.db = db
         self.settings = settings
         self.on_result = on_result
-        self._pending: dict[str, float] = {}
+        self._clock = clock
+        self._pending: dict[str, _Pending] = {}
+        self.dropped = 0  # events lost to MAX_PENDING since start
+        self._dropped_unreported = 0
+        self._overflow_reported_at = float("-inf")
         self._lock = threading.Lock()
+        # Held around every automatic action; stop() takes it to know that no
+        # action of this run is still in progress (RT-018).
+        self._action_lock = threading.Lock()
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="scan-queue", daemon=True)
@@ -46,59 +78,137 @@ class ScanQueue:
     def start(self) -> None:
         self._thread.start()
 
-    def stop(self) -> None:
-        self._stop.set()
+    def stop(self, timeout: float = ACTION_BARRIER_SECONDS) -> bool:
+        """Stops new work and waits for an automatic action in progress.
+
+        Returns False if an action was still running after `timeout`; it then
+        finishes on its own, but no later action of this run can start.
+        """
+        with self._lock:
+            self._stop.set()
+            self._pending.clear()
         self._wake.set()
+        if not self._action_lock.acquire(timeout=timeout):
+            return False
+        self._action_lock.release()
+        return True
 
     def submit(self, path: str) -> None:
         lowered = path.lower()
         if CLAIM_MARK in lowered and lowered.endswith(".claim"):
             return
-        settle = PARTIAL_SETTLE_SECONDS if lowered.endswith(PARTIAL_SUFFIXES) else SETTLE_SECONDS
+        partial = lowered.endswith(PARTIAL_SUFFIXES)
+        settle = PARTIAL_SETTLE_SECONDS if partial else SETTLE_SECONDS
+        max_age = PARTIAL_MAX_AGE_SECONDS if partial else MAX_AGE_SECONDS
+        now = self._clock()
         with self._lock:
-            # Stored as the moment the file becomes due; every new event pushes it back.
-            self._pending[path] = time.monotonic() + settle
+            if self._stop.is_set():
+                return
+            entry = self._pending.get(path)
+            if entry is None:
+                if len(self._pending) >= MAX_PENDING:
+                    self.dropped += 1
+                    self._dropped_unreported += 1
+                    return
+                self._pending[path] = _Pending(now, now + settle)
+            else:
+                # Every new event pushes the due time back, but never past max_age.
+                entry.due = min(now + settle, entry.first_seen + max_age)
         self._wake.set()
 
-    def _due(self) -> list[str]:
-        now = time.monotonic()
+    def _requeue(self, path: str, delay: float, attempts: int = 0) -> None:
+        # A fresh entry: the file was just looked at, so its age starts again.
+        now = self._clock()
         with self._lock:
-            ready = [p for p, due in self._pending.items() if now >= due]
-            for p in ready:
+            if self._stop.is_set() or path in self._pending:
+                return
+            if len(self._pending) >= MAX_PENDING:
+                self.dropped += 1
+                self._dropped_unreported += 1
+                return
+            self._pending[path] = _Pending(now, now + delay, attempts)
+        self._wake.set()
+
+    def _due(self) -> list[tuple[str, int]]:
+        now = self._clock()
+        with self._lock:
+            ready = [(p, e.attempts) for p, e in self._pending.items() if now >= e.due]
+            for p, _ in ready:
                 del self._pending[p]
             if not self._pending:
                 self._wake.clear()
         return ready
 
+    def _report_overflow(self) -> None:
+        now = self._clock()
+        with self._lock:
+            n = self._dropped_unreported
+            if not n or now - self._overflow_reported_at < OVERFLOW_REPORT_SECONDS:
+                return
+            self._dropped_unreported = 0
+            self._overflow_reported_at = now
+        self.db.add_event("watcher", "warning", "Quá nhiều tệp thay đổi cùng lúc",
+                          f"{n} thay đổi chưa được đưa vào hàng quét. Hãy chạy Quét ngay để kiểm tra lại.",
+                          {"dropped": n})
+
     def _run(self) -> None:
         while not self._stop.is_set():
             self._wake.wait(timeout=1.0)
-            for path in self._due():
+            self._report_overflow()
+            for path, attempts in self._due():
                 if self._stop.is_set():
                     return
-                self._scan_one(path)
+                try:
+                    self._scan_one(path, attempts)
+                except Exception:
+                    log.exception("scan of %s failed", path)
             time.sleep(0.2)
 
-    def _scan_one(self, path: str) -> None:
+    def _scan_one(self, path: str, attempts: int = 0) -> None:
         if not os.path.isfile(path):
             return
         try:
             size1 = os.path.getsize(path)
-            time.sleep(0.3)
-            if os.path.getsize(path) != size1:  # still being written
-                self.submit(path)
-                return
-            v = self.scanner.scan_file(path, use_cache=False)  # see db.cached_result
-            if v.skipped == "changed while scanning":
-                self.submit(path)
-                return
-            outcome = act_on(self.db, v, self.settings, "watcher")
-            if outcome["error"] and "changed after it was scanned" in outcome["error"]:
-                self.submit(path)
-            if self.on_result:
-                self.on_result({"verdict": v.to_dict(), **outcome})
-        except Exception:
-            log.exception("scan of %s failed", path)
+            time.sleep(SIZE_RECHECK_SECONDS)
+            size2 = os.path.getsize(path)
+        except OSError as e:
+            self._unreadable(path, attempts, f"unreadable: {e.strerror or e}")
+            return
+        if size2 != size1:  # still being written
+            self._requeue(path, SETTLE_SECONDS)
+            return
+        v = self.scanner.scan_file(path, use_cache=False)  # see db.cached_result
+        if v.skipped == "changed while scanning":
+            self._requeue(path, SETTLE_SECONDS)
+            return
+        if v.skipped and v.skipped.startswith("unreadable"):
+            self._unreadable(path, attempts, v.skipped)
+            return
+        outcome = self._act(v)
+        if outcome["error"] and "changed after it was scanned" in outcome["error"]:
+            self._requeue(path, SETTLE_SECONDS)
+        if self.on_result:
+            self.on_result({"verdict": v.to_dict(), **outcome})
+
+    def _unreadable(self, path: str, attempts: int, reason: str) -> None:
+        attempts += 1
+        if attempts <= len(RETRY_DELAYS):
+            self._requeue(path, RETRY_DELAYS[attempts - 1], attempts)
+            return
+        # Not scanned is not clean: say so instead of dropping the file.
+        self.db.add_event("watcher", "warning", "Chưa quét được tệp",
+                          f"{Path(path).name}: tệp đang bị chương trình khác giữ hoặc không đọc được "
+                          f"(đã thử {attempts} lần). Tệp sẽ được quét lại khi thay đổi; có thể chạy Quét ngay để thử lại.",
+                          {"path": path, "reason": reason[:300], "attempts": attempts})
+
+    def _act(self, v: Verdict) -> dict:
+        with self._action_lock:
+            settings = self.settings
+            if self._stop.is_set():
+                # Switched off while this file was being scanned: the finding is
+                # still recorded, but a stopped run must not quarantine (RT-018).
+                settings = dataclasses.replace(settings, auto_quarantine=False)
+            return act_on(self.db, v, settings, "watcher")
 
 
 class FileWatcher:
@@ -282,8 +392,11 @@ class RealtimeProtection:
         self.persistence.start()
         self.running = True
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = ACTION_BARRIER_SECONDS) -> bool:
+        """False if an automatic action was still finishing when stop gave up waiting."""
+        # Watchers first, so nothing new is submitted while the queue drains.
         self.files.stop()
         self.persistence.stop()
-        self.queue.stop()
+        closed = self.queue.stop(timeout)
         self.running = False
+        return closed

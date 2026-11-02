@@ -142,10 +142,15 @@ class App:
 
     def toggle_realtime(self) -> None:
         if self.realtime and self.realtime.running:
-            self.realtime.stop()
+            # Called on the Tk thread: wait briefly. A quarantine that already
+            # started finishes on its own; none can start after this.
+            closed = self.realtime.stop(timeout=2.0)
             self.realtime = None
             self.settings.realtime = False
-            self.db.add_event("system", "warning", "Bảo vệ thời gian thực đã TẮT", "Máy không được bảo vệ khi tải tệp mới.")
+            detail = "Máy không được bảo vệ khi tải tệp mới."
+            if not closed:
+                detail += " Một thao tác cách ly bắt đầu trước khi tắt vẫn đang chạy cho xong."
+            self.db.add_event("system", "warning", "Bảo vệ thời gian thực đã TẮT", detail)
         else:
             self.settings.realtime = True
             self.start_realtime()

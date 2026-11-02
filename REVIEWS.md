@@ -131,9 +131,9 @@ with a desired-behaviour test are in `tests/test_known_issues.py`
 | RT-013 | ClamAV unavailable/error, label still clean | code | Open → Gate v2 |
 | RT-014 | Encrypted content not shown as uninspected | not yet | Open → Gate v2 |
 | RT-015 | Unquoted paths in clamd.conf | ClamAV source | **Rejected**: `common/optparser.c:1094-1135` (ClamAV 1.5.4) takes the rest of the line as the value, so spaces work; quotes are optional |
-| RT-016 | Locked files not retried by the watcher | not yet | Open → phase 5 |
-| RT-017 | Unbounded debounce state | not yet | Open → phase 5 |
-| RT-018 | Stopping protection does not stop an in-flight action | not yet | Open → phase 5 |
+| RT-016 | Locked files not retried by the watcher | test | Fixed: an unreadable scan is retried after 0.5/2/8/30 s (5 attempts); after that a "Chưa quét được tệp" warning is recorded instead of silence (R12d §2) |
+| RT-017 | Unbounded debounce state | test | Fixed: at most 10,000 pending paths, overflow counted and reported ("Quá nhiều tệp thay đổi cùng lúc", at most once a minute); a file that keeps changing is scanned after 30 s (partial downloads 10 min) at the latest. Per-root caps and directory reconciliation after overflow are not done (Gate v2 scope) |
+| RT-018 | Stopping protection does not stop an in-flight action | test | Fixed: every automatic action runs under an action lock; stop sets the stop flag, drops pending work and waits for the lock (tray: 2 s, then says an action is still finishing). A scan that finishes after stop records its finding but cannot quarantine. Protection generations as in R11 invariant 11 come with Gate v2 milestone 7 |
 | RT-019 | Native host accepted a missing origin | code + test | Fixed `5af59ed` (C3j; `--diagnostic` for manual runs) |
 | RT-020 | page_signals: NaN scores, unbounded fields | test | Fixed `62ff720` (C3k) |
 | RT-021 | Allowlist silently truncated at 5,000 | not yet | Open → phase 5 |
