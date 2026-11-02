@@ -10,6 +10,7 @@ import ctypes
 import hashlib
 import os
 import stat
+import struct
 from dataclasses import dataclass
 from typing import BinaryIO, Callable
 
@@ -53,6 +54,30 @@ def _change_time(descriptor: int, info: os.stat_result) -> int:
     if not _get_file_information(msvcrt.get_osfhandle(descriptor), 0, ctypes.byref(basic), ctypes.sizeof(basic)):
         raise OSError("change time unavailable")
     return max(0, (basic.change - 116444736000000000) * 100)
+
+
+def named_streams(descriptor: int) -> tuple[tuple[str, int], ...]:
+    """(name, size) of each alternate data stream, read from the open handle."""
+    if os.name != "nt":
+        return ()
+    buffer = ctypes.create_string_buffer(64 * 1024)
+    if not _get_file_information(msvcrt.get_osfhandle(descriptor), 7, buffer, len(buffer)):  # FileStreamInfo
+        # A stream list longer than the buffer is itself not ordinary; the name
+        # marks it as content nobody read rather than as "no streams".
+        return () if ctypes.GetLastError() in (38, 87) else (("<unlisted>", 1),)
+    raw = buffer.raw
+    found: list[tuple[str, int]] = []
+    at = 0
+    while at + 24 <= len(raw):
+        step, length = struct.unpack_from("<II", raw, at)
+        size = struct.unpack_from("<q", raw, at + 8)[0]
+        name = raw[at + 24:at + 24 + length].decode("utf-16le", errors="replace")
+        if name != "::$DATA":
+            found.append((name.split(":")[1] if name.count(":") == 2 else name, size))
+        if not step:
+            break
+        at += step
+    return tuple(found)
 
 
 def _generation(info: os.stat_result, change_time_ns: int) -> tuple[int, int, int, int, int]:

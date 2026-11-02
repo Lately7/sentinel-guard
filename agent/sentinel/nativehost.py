@@ -223,7 +223,7 @@ def read_message(stream: BinaryIO) -> Any | None:
         return None  # the browser closed the pipe mid-message
     try:
         return json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
+    except (UnicodeDecodeError, ValueError, RecursionError):
         return {"type": "__bad_json__"}
 
 

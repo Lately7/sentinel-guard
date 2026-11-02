@@ -197,8 +197,11 @@ def scan(
                                   else adapter.scan(request, measured, token))
                     if not isinstance(result, EngineResult):
                         result = _synthetic(adapter, request, measured, StageStatus.ERROR, "INVALID_RESULT", start)
-                except Exception:
-                    # Engine exception text may contain paths or raw output.
+                except (KeyboardInterrupt, SystemExit):
+                    raise
+                except BaseException:
+                    # Engine exception text may contain paths or raw output. Rust
+                    # panics (YARA-X) arrive as a BaseException, on hostile input.
                     result = _synthetic(adapter, request, measured, StageStatus.ERROR, "ADAPTER_ERROR", start)
                 elapsed = max(0, (clock() - start) // 1_000_000)
                 if result.engine_id != adapter.engine_id or result.file_id != request.file_id:

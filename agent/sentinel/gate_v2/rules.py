@@ -171,7 +171,7 @@ class JsonRulesAdapter:
                                                  "member" if member_path else "outer", member_path, spans,
                                                  rule.name[:128], rule.digest, None, True, "JSON_RULE"))
             inspect(body)
-            if body.startswith(archive.ZIP_PREFIXES):
+            if archive.is_zip(body):
                 if len(body) == measured.size:
                     stopped = archive.walk(body, ledger, cancel, lambda path, payload: inspect(payload, path),
                                            request.deadline_monotonic_ns)
@@ -276,7 +276,7 @@ class YaraXAdapter:
                 finally:
                     del scanner
             inspect(body)
-            if body.startswith(archive.ZIP_PREFIXES):
+            if archive.is_zip(body):
                 if not partial:
                     stopped = archive.walk(body, ledger, cancel, lambda path, payload: inspect(payload, path),
                                            request.deadline_monotonic_ns)

@@ -19,6 +19,7 @@ from .evidence import select_evidence
 
 EICAR_SHA256 = "275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f"
 HashLookup = Callable[[str], bool]
+_ORDINARY_STREAMS = frozenset({"zone.identifier", "smartscreen", "com.dropbox.attrs", "com.dropbox.attributes"})
 
 
 def _entropy(data: bytes) -> float:
@@ -123,7 +124,12 @@ class CoreAdapter:
             if measured.size > len(body):
                 ledger.fixed_reduction = True
             inspect(PurePath(request.path or "").name, body)
-            if body.startswith(archive.ZIP_PREFIXES):
+            for name, size in reader.named_streams():
+                # Content in a named stream is on disk but outside every byte we
+                # read; the marks browsers and Windows leave are not content.
+                if size and name.casefold() not in _ORDINARY_STREAMS:
+                    ledger.child("opaque", "ALTERNATE_STREAM")
+            if archive.is_zip(body):
                 if measured.size == len(body):
                     stopped = archive.walk(body, ledger, cancel, lambda path, payload: inspect(path, payload, path),
                                            request.deadline_monotonic_ns)

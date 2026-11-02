@@ -30,9 +30,28 @@ def _headers_agree(payload: bytes, info: zipfile.ZipInfo) -> bool:
     if method != info.compress_type or (flags & 1) != (info.flag_bits & 1):
         return False
     if flags & 8:  # sizes live in the data descriptor after the member
-        return True
+        names, extra = struct.unpack_from("<HH", head, 26)
+        tail = payload[info.header_offset + 30 + names + extra + info.compress_size:][:24]
+        tail = tail[4:] if tail.startswith(b"PK\x07\x08") else tail
+        expected = (info.CRC, info.compress_size, info.file_size)
+        return ((len(tail) >= 12 and struct.unpack_from("<LLL", tail) == expected) or
+                (len(tail) >= 20 and struct.unpack_from("<LQQ", tail) == expected))
     sizes = struct.unpack_from("<II", head, 18)
     return 0xffffffff in sizes or sizes == (info.compress_size, info.file_size)
+
+
+def is_zip(payload: bytes) -> bool:
+    """Extractors locate the directory from the end, so data prepended to a ZIP
+    (a self-extractor, or a disguise) still unpacks and must still be walked."""
+    if payload.startswith(ZIP_PREFIXES):
+        return True
+    if b"PK\x05\x06" not in payload[-66_000:]:
+        return False
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)):
+            return True
+    except _PARSE_ERRORS:
+        return False
 
 
 def walk(data: bytes, ledger: CoverageLedger, cancel: CancellationToken,
@@ -84,7 +103,7 @@ def walk(data: bytes, ledger: CoverageLedger, cancel: CancellationToken,
                             continue
                         inspect(member_path, body)
                         ledger.child("inspected")
-                        if body.startswith(ZIP_PREFIXES):
+                        if is_zip(body):
                             reason = visit(body, depth + 1, member_path)
                             if reason:
                                 for _ in members[index + 1:]:

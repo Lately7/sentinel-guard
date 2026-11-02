@@ -128,6 +128,9 @@ class BoundReader:
     def begin_stage(self) -> None:
         self._reads.clear()
 
+    def named_streams(self) -> tuple[tuple[str, int], ...]:
+        return () if self._stream is None else identity.named_streams(self._stream.fileno())
+
     def os_handle(self) -> int | None:
         if self._stream is None or os.name != "nt":
             return None

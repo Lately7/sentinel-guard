@@ -44,13 +44,14 @@ def core_decision(data: bytes):
     return scan(request, adapters=[CoreAdapter()], gate_generation="edge", auto_quarantine=False)
 
 
-def test_prepended_zip_is_not_certified_clean() -> None:
+def test_prepended_zip_members_are_inspected() -> None:
     # R11 invariant 7: a valid ZIP with a prefix still has child objects to account for.
     data = b"harmless preamble" + zip_bytes([("child.txt", b"harmless child")])
     assert zipfile.is_zipfile(io.BytesIO(data))
     decision = core_decision(data)
-    assert decision.verdict is VerdictCode.UNKNOWN
-    assert not decision.trusted_clean
+    assert decision.engine_results[0].coverage.objects_inspected == 1
+    disguised = b"harmless preamble" + zip_bytes([("child.pdf.exe", b"harmless child")])
+    assert core_decision(disguised).verdict is VerdictCode.SUSPICIOUS
 
 
 def test_embedded_zip_at_nonzero_offset_is_not_certified_clean() -> None:
