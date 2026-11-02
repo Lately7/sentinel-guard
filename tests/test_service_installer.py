@@ -98,6 +98,43 @@ class FakeScm:
         self.calls.append(("stop_delete", name, timeout))
         return "PENDING_DELETE"
 
+    def verify_state(self, root):
+        self.calls.append(("verify_state", root))
+
+    def remove_code(self, root):
+        self.calls.append(("remove_code", root))
+
+
+def test_reinstall_reuses_verified_state_and_never_recreates_it(tmp_path):
+    # Quarantine outlives an uninstall, so an install after it finds the state tree.
+    source = source_tree(tmp_path / "source")
+    paths = installed_paths("v1", program_files=tmp_path / "pf", program_data=tmp_path / "pd")
+    paths.code_root.parent.mkdir()
+    paths.state_root.mkdir(parents=True)
+    fake = FakeScm()
+    installer.install(source, "v1", scm=fake, paths=paths)
+    assert ("verify_state", paths.state_root) in fake.calls
+    assert paths.state_root not in {c[1] for c in fake.calls if c[0] == "mkdir"}
+
+
+def test_uninstall_stops_first_and_keeps_state(tmp_path):
+    paths = installed_paths("v1", program_files=tmp_path / "pf", program_data=tmp_path / "pd")
+    fake = FakeScm()
+    assert installer.uninstall(scm=fake, paths=paths) == "PENDING_DELETE"
+    assert [c[0] for c in fake.calls] == ["elevated", "stop_delete", "remove_code"]
+    assert fake.calls[-1][1] == paths.code_root
+
+
+def test_snapshot_is_installable_and_has_no_checkout_in_it(tmp_path):
+    digest = installer.snapshot_runtime(tmp_path / "snapshot")
+    assert len(digest) == 64
+    plan = installer.plan_runtime(tmp_path / "snapshot")
+    names = {f.relative.as_posix() for f in plan}
+    assert "python.exe" in names and "app/sentinel/service/entry.py" in names
+    assert not any("site-packages" in name or name.endswith((".pth", ".pyc")) for name in names)
+    with pytest.raises(installer.InstallError, match="INSTALL_PATH_OCCUPIED"):
+        installer.snapshot_runtime(tmp_path / "snapshot")
+
 
 def test_install_stages_then_configures_and_starts(tmp_path):
     source = source_tree(tmp_path / "source")
@@ -159,7 +196,7 @@ def test_scm_layout_and_uninstall_delegation():
         installer.check_layout()
     fake = FakeScm()
     assert installer.uninstall(scm=fake, name="SentinelGuardTest-1") == "PENDING_DELETE"
-    assert fake.calls == [("elevated",), ("stop_delete", "SentinelGuardTest-1", 30.0)]
+    assert fake.calls[:2] == [("elevated",), ("stop_delete", "SentinelGuardTest-1", 30.0)]
 
 
 def test_service_configuration_values_and_layout():

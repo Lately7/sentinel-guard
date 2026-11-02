@@ -29,6 +29,8 @@ PIPE_NAME = r"\\.\pipe\SentinelGuard\v1"
 SERVICE_SDDL = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x0012008B;;;IU)"
 MAX_CONNECTIONS = 32
 BUFFER = 64 * 1024
+SE_KERNEL_OBJECT = 6
+OWNER_SECURITY_INFORMATION = 0x1
 
 if os.name == "nt":
     _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -73,10 +75,10 @@ if os.name == "nt":
     _k32.GetCurrentProcess.restype = wintypes.HANDLE
     _k32.LocalFree.argtypes = [ctypes.c_void_p]
     _k32.ProcessIdToSessionId.argtypes = [wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
-    _k32.GetNamedPipeServerProcessId.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
-    _k32.GetNamedPipeServerProcessId.restype = wintypes.BOOL
-    _k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    _k32.OpenProcess.restype = wintypes.HANDLE
+    _adv.GetSecurityInfo.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p),
+                                     ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+                                     ctypes.POINTER(ctypes.c_void_p)]
+    _adv.GetSecurityInfo.restype = wintypes.DWORD
     _adv.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
         wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p]
     _adv.ImpersonateNamedPipeClient.argtypes = [wintypes.HANDLE]
@@ -203,27 +205,25 @@ def current_process_caller() -> Caller:
         _k32.CloseHandle(token)
 
 
-def server_process_sid(stream: PipeStream) -> str:
-    """The server PID is obtained from this connected pipe handle."""
+def server_pipe_owner(stream: PipeStream) -> str:
+    """SID that owns this connected pipe instance.
+
+    A medium-integrity client cannot open a LocalSystem process or its token, so
+    asking who the server process is would fail against the real service. The
+    owner is readable from our own handle, and a same-user process squatting the
+    name can only make itself the owner.
+    """
     if os.name != "nt":
         raise PipeError(0, "named pipes need Windows")
-    pid = wintypes.DWORD()
-    if not _k32.GetNamedPipeServerProcessId(stream.handle, ctypes.byref(pid)):
-        raise _fail("GetNamedPipeServerProcessId")
-    process = _k32.OpenProcess(0x1000, False, pid)
-    if not process:
-        raise _fail("OpenProcess(pipe server)")
+    owner, descriptor = ctypes.c_void_p(), ctypes.c_void_p()
+    code = _adv.GetSecurityInfo(stream.handle, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION,
+                                ctypes.byref(owner), None, None, None, ctypes.byref(descriptor))
+    if code:
+        raise PipeError(code, f"GetSecurityInfo(pipe) failed (Windows error {code})")
     try:
-        token = wintypes.HANDLE()
-        if not _adv.OpenProcessToken(process, TOKEN_QUERY, ctypes.byref(token)):
-            raise _fail("OpenProcessToken(pipe server)")
-        try:
-            user = _token_info(token, TokenUser)
-            return _sid_string(ctypes.cast(user, ctypes.POINTER(ctypes.c_void_p))[0])
-        finally:
-            _k32.CloseHandle(token)
+        return _sid_string(owner.value)
     finally:
-        _k32.CloseHandle(process)
+        _k32.LocalFree(descriptor)
 
 
 def _identify_client(handle: int) -> Caller:

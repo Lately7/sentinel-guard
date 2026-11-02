@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 import time
 from ctypes import wintypes
@@ -21,6 +22,7 @@ STATE_SDDL = "O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
 CODE_SDDL = "O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;BU)(A;OICI;FRFX;;;{sid})"
 SERVICE_ACCESS = 0x2 | 0x4 | 0x10 | 0x20 | 0x10000 | 0x20000 | 0x40000
 SC_MANAGER_CREATE_SERVICE = 0x2
+_PYTHON_DLL = re.compile(r"python\d{2,}\.dll")  # python3.dll is the stable-ABI forwarder, not this
 ERROR_SERVICE_MARKED_FOR_DELETE = 1072
 
 
@@ -86,7 +88,7 @@ def check_layout() -> None:
 def _excluded(relative: Path) -> bool:
     parts = [p.lower() for p in relative.parts]
     name = parts[-1]
-    if any(p in {"__pycache__", "pip", "setuptools", "wheel", "pytest", "tests", "test",
+    if any(p in {"__pycache__", "site-packages", "pip", "setuptools", "wheel", "pytest", "tests", "test",
                  "include", "scripts", "idlelib", "tkinter", "ensurepip"} for p in parts):
         return True
     return (name in {"pyvenv.cfg", "sitecustomize.py", "usercustomize.py"}
@@ -116,12 +118,13 @@ def plan_runtime(source: Path) -> tuple[RuntimeFile, ...]:
         if not path.is_file():
             continue
         if relative.parts[0] not in allowed and not (len(relative.parts) == 1 and
-                (path.name.lower() in root_files or re.fullmatch(r"python\d+\.dll|vcruntime\d*\.dll", path.name.lower()))):
+                (path.name.lower() in root_files or _PYTHON_DLL.fullmatch(path.name.lower())
+                 or re.fullmatch(r"vcruntime[\d_]*\.dll", path.name.lower()))):
             continue
         result.append(RuntimeFile(path, relative))
     names = {str(item.relative).lower() for item in result}
     if "python.exe" not in names or "pythonw.exe" not in names or "python3.dll" not in names \
-            or not any(re.fullmatch(r"python\d+\.dll", n) for n in names):
+            or not any(_PYTHON_DLL.fullmatch(n) for n in names):
         raise InstallError("RUNTIME_INCOMPLETE", "Python executables and DLLs required")
     return tuple(sorted(result, key=lambda f: str(f.relative).lower()))
 
@@ -133,7 +136,7 @@ def write_runtime(plan: tuple[RuntimeFile, ...], target: Path) -> dict[str, str]
         raise InstallError("INSTALL_PATH_OCCUPIED", str(target))
     target.mkdir(parents=True)
     hashes: dict[str, str] = {}
-    dlls = [f.relative.name for f in plan if re.fullmatch(r"python\d+\.dll", f.relative.name.lower())]
+    dlls = [f.relative.name for f in plan if _PYTHON_DLL.fullmatch(f.relative.name.lower())]
     if len(dlls) != 1:
         raise InstallError("RUNTIME_INCOMPLETE", "one versioned Python DLL required")
     for item in plan:
@@ -208,6 +211,8 @@ class Scm(Protocol):
     def close(self, service: object) -> None: ...
     def create_protected_directory(self, path: Path, sddl: str) -> None: ...
     def protect_code(self, root: Path, sddl: str) -> None: ...
+    def verify_state(self, root: Path) -> None: ...
+    def remove_code(self, root: Path) -> None: ...
 
 
 def service_config() -> tuple[tuple[int, ctypes.Structure], ...]:
@@ -243,9 +248,13 @@ def install(source: Path, version_id: str, *, scm: Scm | None = None,
     if not manager.elevated():
         raise ElevationRequired()
     check_layout()
-    for path in (locations.code_root, locations.code_root / "versions", locations.version, locations.state_root):
+    for path in (locations.code_root, locations.code_root / "versions", locations.version):
         if classify_target(os, path) != "absent":
             raise InstallError("INSTALL_PATH_OCCUPIED", str(path))
+    # Quarantine and the repair journal outlive an uninstall (R13b P9), so state
+    # may already be here. It is reused only if it is still exactly what we made.
+    if classify_target(os, locations.state_root) != "absent":
+        manager.verify_state(locations.state_root)
     # A3 never registers a checkout path. Staging and verification finish first.
     manager.create_protected_directory(locations.code_root, STATE_SDDL)
     manager.create_protected_directory(locations.code_root / "versions", STATE_SDDL)
@@ -260,7 +269,8 @@ def install(source: Path, version_id: str, *, scm: Scm | None = None,
         sid = manager.service_sid(name)
         if not re.fullmatch(r"S-1-5-80-(?:\d+-){4}\d+", sid):
             raise InstallError("INSTALL_INTEGRITY", "service SID lookup")
-        create_state_tree(locations.state_root, manager)
+        if classify_target(os, locations.state_root) == "absent":
+            create_state_tree(locations.state_root, manager)
         manager.protect_code(locations.code_root, CODE_SDDL.format(sid=sid))
         manager.start(service)
     except BaseException:
@@ -283,12 +293,53 @@ def create_state_tree(root: Path, manager: object) -> None:
         manager.create_protected_directory(path, STATE_SDDL)
 
 
-def uninstall(*, scm: Scm | None = None, name: str = "SentinelGuard", timeout: float = 30.0) -> str:
+def uninstall(*, scm: Scm | None = None, name: str = "SentinelGuard", timeout: float = 30.0,
+              paths: InstalledPaths | None = None) -> str:
     manager = scm or WindowsScm()
     if not manager.elevated():
         raise ElevationRequired()
-    # State and quarantine deliberately survive uninstall.
-    return manager.stop_delete(name, timeout)
+    outcome = manager.stop_delete(name, timeout)
+    # Code goes only after the service stopped. State and quarantine deliberately
+    # survive: they hold the user's files and the record of what was done.
+    manager.remove_code((paths or installed_paths("uninstall")).code_root)
+    return outcome
+
+
+def snapshot_runtime(target: Path) -> str:
+    """Copy this interpreter, the package and yara_x into a folder for review.
+
+    Protected ACLs guard the bytes after installing; they cannot vouch for them
+    before (R16 "trust limit"). So install reads from a snapshot the owner has
+    looked at and whose digest is printed here, never from a live checkout.
+    """
+    target = Path(target)
+    if target.exists():
+        raise InstallError("INSTALL_PATH_OCCUPIED", str(target))
+    base = Path(sys.base_prefix)
+    target.mkdir(parents=True)
+    for path in base.iterdir():
+        name = path.name.lower()
+        if path.is_file() and (name in ("python.exe", "pythonw.exe", "python3.dll") or _PYTHON_DLL.fullmatch(name)
+                               or re.fullmatch(r"vcruntime[\d_]*\.dll", name)):
+            shutil.copy2(path, target / path.name)
+    ignored = shutil.ignore_patterns("__pycache__", "*.pyc", "site-packages", "test", "tests", "tkinter",
+                                     "idlelib", "ensurepip", "pip")
+    for folder in ("Lib", "DLLs"):
+        shutil.copytree(base / folder, target / folder, ignore=ignored)
+    import sentinel
+
+    shutil.copytree(Path(sentinel.__file__).parent, target / "app" / "sentinel", ignore=ignored)
+    try:
+        import yara_x
+    except ImportError:
+        (target / "vendor").mkdir()
+    else:
+        shutil.copytree(Path(yara_x.__file__).parent, target / "vendor" / "yara_x", ignore=ignored)
+    digest = hashlib.sha256()
+    for item in plan_runtime(target):
+        digest.update(item.relative.as_posix().encode())
+        digest.update(hashlib.sha256(item.source.read_bytes()).digest())
+    return digest.hexdigest()
 
 
 class WindowsScm:
@@ -495,6 +546,15 @@ class WindowsScm:
     def protect_code(self, root: Path, sddl: str) -> None:
         for path in walk_no_reparse(root):
             self._secure_path(path, sddl, directory=path.is_dir())
+
+    def verify_state(self, root: Path) -> None:
+        verify_protected_tree(root)
+
+    def remove_code(self, root: Path) -> None:
+        if classify_target(os, root) == "absent":
+            return
+        walk_no_reparse(root)  # refuses a tree with a reparse point inside
+        shutil.rmtree(root)
 
     def _secure_path(self, path: Path, sddl: str, *, directory: bool) -> None:
         # Operate on the object opened without following a reparse point.

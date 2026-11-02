@@ -55,7 +55,7 @@ def check_runtime(version: Path, *, path: list[str] | None = None, isolated: int
         file = getattr(mod, "__file__", None)
         if file and str(file).lower().endswith((".pyd", ".dll")) and not _inside(Path(file), version):
             raise IntegrityError("INSTALL_INTEGRITY", name)
-    dll = next(version.glob("python[0-9]*.dll"), None)
+    dll = next(version.glob("python[0-9][0-9]*.dll"), None)
     if dll is None or not _inside(dll, version):
         raise IntegrityError("INSTALL_INTEGRITY", "Python DLL")
     if os.name == "nt":

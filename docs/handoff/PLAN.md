@@ -15,7 +15,14 @@ này thay mục 3–5 của `NEXT_SESSION.md` về thứ tự công việc. Các
   khoảng 1 giờ chạy script admin; tự động dừng tiến trình ransomware cần thêm 30 ngày quan sát (R14).
   Là ước lượng, không phải số đo. "7/10" cũng là ước lượng: không có lab mẫu thật để đo tỉ lệ phát hiện.
 * Không làm được trong dự án này: ML tĩnh cho PE, vì cần bộ dữ liệu mẫu mà quy tắc không cho tải.
-* Xong tới giờ: bước 1 (M5), M6 phần 1, R15 trừ R15-2 (vào A3) và R15-8 (vào M7).
+* Xong tới giờ: bước 1 (M5), bước 2 (M6, sản phẩm đã chạy qua Gate v2, Helium e2e đạt), phần code của
+  bước 3 (A3: runtime bảo vệ, đăng ký dịch vụ, ACL, hộp xác nhận), R15 trừ R15-8 (vào M7), edge case E1–E6.
+* **Làm tiếp theo thứ tự:** M7 (`gate_v2/actions.py`, backend thật của `ServiceCore`, `entry.main`, chuyển
+  khay và native host sang IPC, R15-8, RT-002) → review và merge nhánh `codex/scope-a5` (bản nháp 1.050 dòng,
+  chưa có test) và `codex/reputation-etw` (1.543 dòng, chưa chạy) → fixture cho `tools/admin_acceptance.ps1`
+  → bước 8–9. Hai nhánh đó do Codex viết, dừng vì hết hạn mức lúc 21:09 và **chưa review**.
+* Việc cần chủ dự án: `sentinel service snapshot --source <thư mục>`, xem lại, rồi `sentinel service install
+  --source <thư mục>` trong cửa sổ admin; chỉ làm được sau M7 vì dịch vụ chưa có backend thật.
 
 ## 1. Nguyên tắc từ giờ
 
