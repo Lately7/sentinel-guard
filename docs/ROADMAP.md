@@ -19,15 +19,15 @@ Mọi phát hiện của Codex được Claude kiểm chứng rồi mới sửa 
 | Tính năng | Hiện có | Còn thiếu |
 |---|---|---|
 | **Quét / Quét sâu** | Quét tệp, thư mục, quét nhanh, toàn máy; 4 lớp (Lõi → Luật+YARA → ClamAV → Defender) | Kết quả "một phần" hoặc engine lỗi vẫn có thể hiện "sạch"; chưa có Quét sâu đúng nghĩa và nút Quét một chạm |
-| **Bảo vệ web trên Helium** | Extension MV3 chặn ~550.000 tên miền, trang cảnh báo, quét tệp tải về qua agent | Chờ Codex r6 đánh giá |
-| **Bảo vệ thời gian thực** | Theo dõi Downloads, Desktop, Documents, Startup, %TEMP%, khoá Run | Chỉ phát hiện sau khi tệp đã ghi xuống đĩa (không có driver); chưa loại trừ thư mục dữ liệu của chính Sentinel |
+| **Bảo vệ web trên Helium** | Extension MV3 chặn ~550.000 tên miền, trang cảnh báo, quét tệp tải về qua agent | "Vẫn tiếp tục" tin cậy tên miền vĩnh viễn; tải về lỗi vẫn đếm là đã quét; popup nói "không phát hiện" khi chưa kiểm tra |
+| **Bảo vệ thời gian thực** | Theo dõi Downloads, Desktop, Documents, Startup, %TEMP%, khoá Run | Chỉ phát hiện sau khi tệp đã ghi xuống đĩa (không có driver); tệp bị khoá không thử lại; báo "bật" dù không theo dõi thư mục nào |
 
 ## Các giai đoạn
 
 | # | Giai đoạn | Trạng thái |
 |---|---|---|
 | 0 | **Nền tảng**: C1 icon cũ, C2a cổng quét, C2b baseline, giao diện tối, bộ icon | ✅ xong (icon đang làm lại bản 2) |
-| 1 | **Sửa lỗi cổng quét** (C3a–C3f + RT-010, RT-011, RT-015) | ⏭ việc tiếp theo |
+| 1 | **Sửa lỗi cổng quét** (C3a–C3k: RT-006, 008–011, 015, 019, 020) | ⏭ việc tiếp theo |
 | 2 | **Red Team viết test** (Codex vòng 1a, 1b) | chờ giai đoạn 1 |
 | 3 | **Contract v1**: tách trạng thái quét khỏi kết luận; "một phần"/lỗi không bao giờ là "sạch" | chờ |
 | 4 | **Chính sách ClamAV + cách ly an toàn** | chờ |
@@ -48,7 +48,46 @@ Mọi phát hiện của Codex được Claude kiểm chứng rồi mới sửa 
 | C3g | Mã thoát CLI đúng thứ tự 2 > 3 > 1 > 0 | RT-011 |
 | C3h | Cập nhật chữ ký thất bại thì thử lại sớm | RT-010 |
 | C3i | Đặt đường dẫn trong `clamd.conf` vào ngoặc kép | RT-015 |
-| C4 | `CODEX_TASK_1a.md`, `CODEX_TASK_1b.md` ghim vào commit C3i | — |
+| C3j | Native host bắt buộc đúng origin của extension | RT-019 |
+| C3k | Extension kiểm tra số/độ dài trong thông điệp từ trang | RT-020 |
+| C4 | `CODEX_TASK_1a.md`, `CODEX_TASK_1b.md` ghim vào commit C3k | — |
+
+### Giai đoạn 5 — ba tính năng chính (theo Codex r6, đã chỉnh theo ý chủ dự án)
+
+**Quét**: nút chính **Quét ngay** = quét thông minh (thư mục theo dõi, Startup,
+khoá Run cả 32/64-bit, tác vụ theo lịch, tệp của tiến trình đang chạy).
+**Quét sâu…** ở menu phụ, cần xác nhận: thêm toàn bộ ổ cố định, giới hạn nén
+sâu hơn, ngân sách thời gian 2 giờ, tiếp tục được. Quét sâu không bao giờ hạ
+ngưỡng phát hiện. Kết quả luôn ghi rõ: đầy đủ / một phần / không đọc được /
+bỏ qua theo chính sách / engine không sẵn sàng. Sửa RT-024.
+
+**Thời gian thực**: thử lại tệp bị khoá, hàng đợi có giới hạn, tắt là dừng
+hẳn, trạng thái "Cần chú ý" khi không theo dõi được gì, đọc khoá Run cả hai
+view. Ghi rõ giới hạn: phát hiện sau khi tệp được ghi. Sửa RT-016, 017, 018,
+026, 027.
+
+**Web (Helium)**: "Vẫn tiếp tục" chỉ cho một lần, "Luôn tin cậy" là lựa chọn
+riêng; tải về lỗi thì giữ hàng chờ và thử lại; mỗi tab có trạng thái
+(đang kiểm tra / đã kiểm tra / hạn chế / agent offline / đã cho phép);
+đồng bộ allowlist theo trang. Sửa RT-021, 022, 023, 025.
+
+**Giao diện**: màn hình chính gồm 3 thẻ (Thời gian thực · Web · Quét) và
+"Hoạt động gần đây"; chi tiết từng engine đưa vào "Chi tiết kỹ thuật". Tab:
+Tổng quan, Quét, Lịch sử, Cách ly, Cài đặt. Chữ ~10 pt, tiêu đề 13–15 pt.
+Animation: giữ đèn trạng thái (167 ms), chấm "đang khởi động" dừng khi quá hạn,
+thanh tiến trình có phần trăm khi biết tổng, bỏ vệt quét trên logo, chỉ dòng
+cần xử lý mới sáng lên (333 ms); tắt hết khi Windows tắt hiệu ứng.
+
+### Giai đoạn 6 — tính năng bổ sung (xếp hạng của Codex r6)
+
+1. Lịch sử quét kèm độ phủ, quét lại, xuất báo cáo
+2. Quét thông minh theo lịch
+3. Tự kiểm tra sức khoẻ bảo vệ (feed cũ, clamd tắt, extension mất kết nối…)
+4. Giao diện loại trừ có phạm vi (đường dẫn + hash, có hạn)
+5. "Quét bằng Sentinel" trong menu chuột phải Explorer
+6. Quét USB khi cắm vào
+7. Xem lại chương trình khởi động cùng Windows
+8. Chữ ký số Authenticode và (tuỳ chọn) danh tiếng hash
 
 ## Sổ lỗi (RT)
 
@@ -69,6 +108,21 @@ Mọi phát hiện của Codex được Claude kiểm chứng rồi mới sửa 
 | RT-013 | ClamAV lỗi/không chạy mà kết luận chung vẫn "sạch" | Cao | GĐ 3 |
 | RT-014 | Lưu trữ/tài liệu mã hoá không được ghi là "chưa kiểm tra được" | TB | GĐ 3 |
 | RT-015 | Đường dẫn trong `clamd.conf` không có ngoặc kép | Thấp | C3i |
+| RT-016 | Thời gian thực không thử lại tệp đang bị khoá | Cao | GĐ 5 |
+| RT-017 | Hàng đợi chống dội không có giới hạn | TB | GĐ 5 |
+| RT-018 | Tắt bảo vệ không dừng lượt quét/cách ly đang chạy | TB | GĐ 5 |
+| RT-019 | Native host chấp nhận khi thiếu origin | Thấp | C3j |
+| RT-020 | Thông điệp từ trang thiếu kiểm tra số (NaN) và độ dài | Thấp | C3k |
+| RT-021 | Allowlist bị cắt im lặng sau 5.000 tên miền | TB | GĐ 5 |
+| RT-022 | "Vẫn tiếp tục" tạo ngoại lệ vĩnh viễn cho cả tên miền | TB | GĐ 5 |
+| RT-023 | Tải về không gửi được tới agent vẫn đếm là đã quét | TB | GĐ 5 |
+| RT-024 | Quét bỏ sót (junction, đường dẫn dài, thiếu quyền) không ghi vào độ phủ | TB | GĐ 5 |
+| RT-025 | Popup nói "Không phát hiện vấn đề" khi chưa kiểm tra | TB | GĐ 5 |
+| RT-026 | Thời gian thực báo "bật" dù không theo dõi thư mục nào | TB | GĐ 5 |
+| RT-027 | Chỉ đọc một view registry của khoá Run | TB | GĐ 5 |
+
+Đã kiểm chứng trong code: RT-008…013, 019, 022, 023, 026. Các mục còn lại
+được kiểm chứng bằng test khi sửa.
 
 ## Nghiên cứu của Codex
 
@@ -77,8 +131,8 @@ Mọi phát hiện của Codex được Claude kiểm chứng rồi mới sửa 
 | r1–r3 | Thiết kế cổng quét, kế hoạch commit, pipeline | ✅ | `docs/handoff/codex-review-r1..r3.md` |
 | r4 | Review trạng thái hiện tại (tài khoản mới) | ✅ RT-008…011 | `docs/handoff/codex-review-r4.md` |
 | r5 | Điểm yếu ClamAV, so với Bitdefender/Malwarebytes | ✅ RT-012…015 | `docs/handoff/codex-research-r5.md` |
-| r6 | Sản phẩm: 3 tính năng, so sánh, lỗ hổng, giao diện bớt "AI" | ⏳ đang chạy | — |
-| r7 | Tổng quan tài liệu khoa học về các loại mã độc và cách phát hiện | ⏳ chờ r6 xong | — |
+| r6 | Sản phẩm: 3 tính năng, so sánh, lỗ hổng, giao diện bớt "AI" | ✅ RT-016…027 | `docs/handoff/codex-product-r6.md` |
+| r7 | Tổng quan tài liệu khoa học về các loại mã độc và cách phát hiện | ⏳ đang chạy | — |
 | Icon | Bộ icon: v1 xong; v2 một màu, vuông nhỏ, viền xa | ⏳ đang làm v2 | `assets/brand/` |
 
 ## Kiểm thử gần nhất
