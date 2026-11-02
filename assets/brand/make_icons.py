@@ -1,11 +1,12 @@
-"""Generate Sentinel Guard icons from pixel-snapped geometry.
+"""Generate Sentinel Guard icons from pixel-snapped, flat-colour geometry.
 
-The SVG files are the vector references. Raster output is drawn directly so
-small icon sizes never depend on a generic SVG rasterizer or downscaling.
+Raster output is drawn directly at every target size. No target is produced by
+resampling another icon, which keeps the 16, 24, and 32 px frames crisp.
 """
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -14,12 +15,13 @@ from PIL import Image, ImageDraw, ImageFont
 ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "out"
 
-RGBA = tuple[int, int, int, int]
 RGB = tuple[int, int, int]
 
-CORE_TOP: RGB = (5, 5, 6)
-CORE_BOTTOM: RGB = (112, 112, 118)
-RINGS: dict[str, RGB] = {
+CORES: dict[str, RGB] = {
+    "black": (10, 10, 11),  # #0a0a0b
+    "grey": (110, 110, 116),  # #6e6e74
+}
+FRAMES: dict[str, RGB] = {
     "normal": (116, 116, 122),  # #74747a
     "warning": (212, 163, 42),  # #d4a32a
     "threat": (224, 82, 74),  # #e0524a
@@ -28,44 +30,53 @@ SIZES = (16, 24, 32, 48, 64, 128, 256)
 ICO_SIZES = (16, 24, 32, 48, 64, 256)
 
 
-def _mix(a: RGB, b: RGB, amount: float) -> RGB:
-    return tuple(round(x + (y - x) * amount) for x, y in zip(a, b))  # type: ignore[return-value]
+def _round_half_up(numerator: int, denominator: int) -> int:
+    """Round a positive rational without Python's round-to-even behaviour."""
+    return (2 * numerator + denominator) // (2 * denominator)
 
 
-def _geometry(size: int) -> tuple[int, int, int]:
-    """Return outer inset, stroke, and clear gap in whole device pixels."""
+def geometry(size: int) -> tuple[int, int, int]:
+    """Return outer inset, frame stroke, and core side in device pixels."""
     if size < 16:
         raise ValueError("icon size must be at least 16 pixels")
-    inset = round(size / 64)
-    stroke = max(1, round(size / 32))
-    gap = max(2, round(size * 5 / 64))
-    return inset, stroke, gap
+    inset = _round_half_up(3 * size, 32)
+    stroke = max(1, _round_half_up(size, 16))
+    core_side = 7 * size // 16
+    return inset, stroke, core_side
 
 
-def draw_icon(size: int, state: str = "normal") -> Image.Image:
+def draw_icon(
+    size: int,
+    state: str = "normal",
+    core: str = "black",
+) -> Image.Image:
     """Draw one icon at its final size, with no post-draw resampling."""
     try:
-        ring = RINGS[state]
+        frame_colour = FRAMES[state]
     except KeyError as exc:
         raise ValueError(f"unknown state: {state}") from exc
+    try:
+        core_colour = CORES[core]
+    except KeyError as exc:
+        raise ValueError(f"unknown core: {core}") from exc
 
     image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
-    inset, stroke, gap = _geometry(size)
-    outer_end = size - 1 - inset
+    inset, stroke, core_side = geometry(size)
+
+    frame_end = size - 1 - inset
     draw.rectangle(
-        (inset, inset, outer_end, outer_end),
-        outline=ring + (255,),
+        (inset, inset, frame_end, frame_end),
+        outline=frame_colour + (255,),
         width=stroke,
     )
 
-    core_start = inset + stroke + gap
-    core_end = size - 1 - core_start
-    height = core_end - core_start
-    for y in range(core_start, core_end + 1):
-        linear = (y - core_start) / max(1, height)
-        colour = _mix(CORE_TOP, CORE_BOTTOM, linear * linear)
-        draw.line((core_start, y, core_end, y), fill=colour + (255,))
+    core_start = (size - core_side) // 2
+    core_end = core_start + core_side - 1
+    draw.rectangle(
+        (core_start, core_start, core_end, core_end),
+        fill=core_colour + (255,),
+    )
     return image
 
 
@@ -75,15 +86,21 @@ def _save_png(image: Image.Image, path: Path) -> None:
 
 def _make_preview() -> Image.Image:
     margin = 24
-    label_width = 62
+    label_width = 58
     tile_pad = 6
     pair_gap = 8
-    state_gap = 18
+    state_gap = 16
+    variant_gap = 30
     row_gap = 16
-    label_height = 18
-    widest_pair = 2 * (max(SIZES) + 2 * tile_pad) + pair_gap
-    width = margin * 2 + label_width + 3 * widest_pair + 2 * state_gap
-    height = margin * 2 + sum(size + label_height + row_gap for size in SIZES)
+    row_header = 32
+
+    max_tile = max(SIZES) + 2 * tile_pad
+    max_pair = 2 * max_tile + pair_gap
+    max_group = 3 * max_pair + 2 * state_gap
+    width = margin * 2 + label_width + 2 * max_group + variant_gap
+    height = margin * 2 + sum(
+        row_header + size + 2 * tile_pad + row_gap for size in SIZES
+    )
 
     preview = Image.new("RGB", (width, height), (29, 29, 32))
     draw = ImageDraw.Draw(preview)
@@ -97,40 +114,77 @@ def _make_preview() -> Image.Image:
     for size in SIZES:
         tile = size + 2 * tile_pad
         pair_width = 2 * tile + pair_gap
-        draw.text((margin, y + label_height + tile_pad), f"{size}px", fill=ink, font=font)
+        group_width = 3 * pair_width + 2 * state_gap
+        tile_y = y + row_header
+        draw.text((margin, tile_y + tile_pad), f"{size}px", fill=ink, font=font)
+
         x = margin + label_width
-        for state in ("normal", "warning", "threat"):
-            draw.text((x, y), state.upper(), fill=quiet, font=font)
-            icon = draw_icon(size, state)
-            tile_y = y + label_height
-            draw.rectangle((x, tile_y, x + tile - 1, tile_y + tile - 1), fill=dark)
-            preview.paste(icon, (x + tile_pad, tile_y + tile_pad), icon)
-            light_x = x + tile + pair_gap
-            draw.rectangle((light_x, tile_y, light_x + tile - 1, tile_y + tile - 1), fill=light)
-            preview.paste(icon, (light_x + tile_pad, tile_y + tile_pad), icon)
-            x += pair_width + state_gap
-        y += label_height + tile + row_gap
+        for core in ("black", "grey"):
+            draw.text((x, y), f"{core.upper()} CORE", fill=ink, font=font)
+            state_x = x
+            for state in ("normal", "warning", "threat"):
+                draw.text(
+                    (state_x, y + 14),
+                    f"{state[0].upper()}  DARK / LIGHT",
+                    fill=quiet,
+                    font=font,
+                )
+                icon = draw_icon(size, state, core)
+                draw.rectangle(
+                    (state_x, tile_y, state_x + tile - 1, tile_y + tile - 1),
+                    fill=dark,
+                )
+                preview.paste(icon, (state_x + tile_pad, tile_y + tile_pad), icon)
+                light_x = state_x + tile + pair_gap
+                draw.rectangle(
+                    (light_x, tile_y, light_x + tile - 1, tile_y + tile - 1),
+                    fill=light,
+                )
+                preview.paste(icon, (light_x + tile_pad, tile_y + tile_pad), icon)
+                state_x += pair_width + state_gap
+            x += group_width + variant_gap
+
+        y += row_header + tile + row_gap
     return preview
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--core",
+        choices=tuple(CORES),
+        default="black",
+        help="flat core colour to generate (default: black)",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
-    OUT.mkdir(parents=True, exist_ok=True)
+    args = _parse_args()
+    destination = OUT if args.core == "black" else OUT / "grey"
+    destination.mkdir(parents=True, exist_ok=True)
 
     for size in (16, 48, 128):
-        _save_png(draw_icon(size), OUT / f"icon{size}.png")
+        _save_png(
+            draw_icon(size, core=args.core),
+            destination / f"icon{size}.png",
+        )
 
-    ico_frames = [draw_icon(size) for size in ICO_SIZES]
+    ico_frames = [draw_icon(size, core=args.core) for size in ICO_SIZES]
     ico_frames[-1].save(
-        OUT / "sentinel.ico",
+        destination / "sentinel.ico",
         format="ICO",
         sizes=[(size, size) for size in ICO_SIZES],
         append_images=ico_frames[:-1],
     )
 
-    for state in ("normal", "warning", "threat"):
-        _save_png(draw_icon(64, state), OUT / f"tray-{state}.png")
+    for state in FRAMES:
+        _save_png(
+            draw_icon(64, state, args.core),
+            destination / f"tray-{state}.png",
+        )
 
-    _save_png(_make_preview(), OUT / "preview.png")
+    _save_png(_make_preview(), destination / "preview.png")
 
 
 if __name__ == "__main__":
