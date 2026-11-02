@@ -3,13 +3,13 @@
 Prompt: `docs/handoff/PROMPT_CODEX.md` verbatim, `codex exec --sandbox read-only`.
 Run 2026-11-02 while C1 was staged but not yet committed (so its table is one step behind).
 Claude verified RT-010 and RT-011 against the code: both confirmed. RT-011 predates the gate
-(`__main__.py` at 01bc342); RT-010 is new gate code.
+(`__main__.py` at eb556b5); RT-010 is new gate code.
 
 ## Codex answer (verbatim)
 
 ## Review outcome
 
-No `CODEX_TASK_*.md` exists, so this is review mode. HEAD is still `01bc342`; none of C1–C4 has been committed.
+No `CODEX_TASK_*.md` exists, so this is review mode. HEAD is still `eb556b5`; none of C1–C4 has been committed.
 
 | Planned work | Current state |
 |---|---|

@@ -2,7 +2,7 @@
 
 ## Round 1
 
-The pinned start matched `fe2949d` on `codex/gate-v2-m3`. I made uncommitted changes only in the allowed paths:
+The pinned start matched `682ce56` on `codex/gate-v2-m3`. I made uncommitted changes only in the allowed paths:
 
 | File | Lines | Purpose |
 |---|---:|---|
@@ -26,7 +26,7 @@ Before M3 can be accepted, review and testing must also resolve same-size in-pla
 
 ## Round 2
 
-HEAD was `57b8aa1` on `codex/gate-v2-m3`; I did not commit.
+HEAD was `948e8a2` on `codex/gate-v2-m3`; I did not commit.
 
 I made unverified changes in the allowed paths:
 
@@ -45,7 +45,7 @@ It ended with **`167 errors in 51.22s`**. Every test failed at setup because pyt
 
 ## Round 3
 
-HEAD was **6f9618d** on `codex/gate-v2-m3`; the worktree was clean. I made changes only under the two allowed directories and did not commit.
+HEAD was **ea7574d** on `codex/gate-v2-m3`; the worktree was clean. I made changes only under the two allowed directories and did not commit.
 
 - **H7:** [evidence.py](</C:/Users/lately07/Desktop/Folder Group/sentinel-guard-gate-v2/agent/sentinel/gate_v2/evidence.py:1>) adds shared strength ordering, repeated weak-code counts, and `EVIDENCE_CAP` coverage. [core.py](</C:/Users/lately07/Desktop/Folder Group/sentinel-guard-gate-v2/agent/sentinel/gate_v2/core.py:16>) and [rules.py](</C:/Users/lately07/Desktop/Folder Group/sentinel-guard-gate-v2/agent/sentinel/gate_v2/rules.py:17>) use it. Tests: `test_late_eicar_survives_evidence_cap`, `test_late_user_rule_survives_evidence_cap`.
 - **H8:** [archive.py](</C:/Users/lately07/Desktop/Folder Group/sentinel-guard-gate-v2/agent/sentinel/gate_v2/archive.py:19>) checks the request deadline and cancellation between members, marks remaining members omitted, and returns a stop reason to the adapters. Tests: `test_archive_deadline_omits_remaining_members`, `test_member_deadline_returns_timeout`.
@@ -57,4 +57,4 @@ I ran exactly:
 ..\sentinel-guard\.venv\Scripts\python -m pytest -q tests/gate_v2 -p no:cacheprovider
 ```
 
-**Real output:** `177 errors in 20.28s`. Pytest could not access `C:\Users\lately07\AppData\Local\Temp\pytest-of-lately07` (`PermissionError: [WinError 5] Access is denied`). Per the task instruction, I stopped there and created no folders. The changes and new tests remain unverified; I cannot report them as passing or confirm the new tests fail on 6f9618d.
+**Real output:** `177 errors in 20.28s`. Pytest could not access `C:\Users\lately07\AppData\Local\Temp\pytest-of-lately07` (`PermissionError: [WinError 5] Access is denied`). Per the task instruction, I stopped there and created no folders. The changes and new tests remain unverified; I cannot report them as passing or confirm the new tests fail on ea7574d.

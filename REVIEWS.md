@@ -121,12 +121,12 @@ with a desired-behaviour test are in `tests/test_known_issues.py`
 | RT-003 | Watcher scans Sentinel's own data dir | code | Open → Gate v2 |
 | RT-004 | Partial coverage can read as clean | code | Open → Gate v2 (C3c moved there) |
 | RT-005 | Layers may see different file generations | code | Open → Gate v2 |
-| RT-006 | Native host single body read | test | Fixed `5af59ed` (C3e) |
+| RT-006 | Native host single body read | test | Fixed `d3c10cb` (C3e) |
 | RT-007 | CLI/scan-job self-data exclusion inconsistent | code | Open → Gate v2 |
-| RT-008 | Defender failure/timeout recorded as clean | test | Fixed for the layer `d77dea1` (C3a); top-level label → Gate v2 |
+| RT-008 | Defender failure/timeout recorded as clean | test | Fixed for the layer `2cfcf1e` (C3a); top-level label → Gate v2 |
 | RT-009 | Stale/incomplete results cacheable | code | Open → Gate v2 (C3b moved there) |
-| RT-010 | Failed engine update advanced the success time | test | Fixed `754b745`, `c3714fd` (C3h; retry 60 min) |
-| RT-011 | CLI exit precedence | reproduced (exit 1, expected 3) | Fixed `290f4a0` (C3g) |
+| RT-010 | Failed engine update advanced the success time | test | Fixed `6ff9802`, `a22d74d` (C3h; retry 60 min) |
+| RT-011 | CLI exit precedence | reproduced (exit 1, expected 3) | Fixed `d6ee116` (C3g) |
 | RT-012 | `AlertExceedsMax no` hides ClamAV limits | config read | Open → Gate v2 ClamAV adapter |
 | RT-013 | ClamAV unavailable/error, label still clean | code | Open → Gate v2 |
 | RT-014 | Encrypted content not shown as uninspected | not yet | Open → Gate v2 |
@@ -134,17 +134,17 @@ with a desired-behaviour test are in `tests/test_known_issues.py`
 | RT-016 | Locked files not retried by the watcher | test | Fixed: an unreadable scan is retried after 0.5/2/8/30 s (5 attempts); after that a "Chưa quét được tệp" warning is recorded instead of silence (R12d §2) |
 | RT-017 | Unbounded debounce state | test | Fixed: at most 10,000 pending paths, overflow counted and reported ("Quá nhiều tệp thay đổi cùng lúc", at most once a minute); a file that keeps changing is scanned after 30 s (partial downloads 10 min) at the latest. Per-root caps and directory reconciliation after overflow are not done (Gate v2 scope) |
 | RT-018 | Stopping protection does not stop an in-flight action | test | Fixed: every automatic action runs under an action lock; stop sets the stop flag, drops pending work and waits for the lock (tray: 2 s, then says an action is still finishing). A scan that finishes after stop records its finding but cannot quarantine. Protection generations as in R11 invariant 11 come with Gate v2 milestone 7 |
-| RT-019 | Native host accepted a missing origin | code + test | Fixed `5af59ed` (C3j; `--diagnostic` for manual runs) |
-| RT-020 | page_signals: NaN scores, unbounded fields | test | Fixed `62ff720` (C3k) |
+| RT-019 | Native host accepted a missing origin | code + test | Fixed `d3c10cb` (C3j; `--diagnostic` for manual runs) |
+| RT-020 | page_signals: NaN scores, unbounded fields | test | Fixed `72c7781` (C3k) |
 | RT-021 | Allowlist silently truncated at 5,000 | test | Fixed: `get_allowlist` is paged (`offset`, `total`, byte-bounded pages; no offset = first page for old callers); the extension fetches every page of one `allow_version` (restart on change, give up after 3 tries) and groups trusted hosts into allow rules of 5,000 domains, so the dynamic-rule budget is no limit; malformed hosts are dropped before they can reject the whole rule update. Browser e2e covers a small list only |
-| RT-022 | "Proceed" creates a permanent host exception | code + Helium e2e | Fixed: split into "Mở một lần" (session rule for one tab, no trust entry) and "Luôn tin cậy" (`d422f74`). Root cause of the pass not opening: a DNR condition without `resourceTypes` matches every type except `main_frame` (Chrome DNR docs, `RuleCondition.resourceTypes`), so neither the one-time rule nor the persistent trust rules ever applied to the page itself — "Luôn tin cậy" did not open a network-blocked host either (e2e against the old rules: `once_opened: false`, `always_opened_blocklisted: false`). Allow rules now list every resource type including `main_frame`; Helium 156 e2e: once opened, not trusted, dropped and re-blocked after leaving, always-trust opens the blocked host, no SW errors |
-| RT-023 | Failed download hand-off counted as scanned | test | Fixed `0a29a6e` (pending list + retry); that commit also broke background.js syntax, fixed in `d422f74` |
+| RT-022 | "Proceed" creates a permanent host exception | code + Helium e2e | Fixed: split into "Mở một lần" (session rule for one tab, no trust entry) and "Luôn tin cậy" (`ee65ca5`). Root cause of the pass not opening: a DNR condition without `resourceTypes` matches every type except `main_frame` (Chrome DNR docs, `RuleCondition.resourceTypes`), so neither the one-time rule nor the persistent trust rules ever applied to the page itself — "Luôn tin cậy" did not open a network-blocked host either (e2e against the old rules: `once_opened: false`, `always_opened_blocklisted: false`). Allow rules now list every resource type including `main_frame`; Helium 156 e2e: once opened, not trusted, dropped and re-blocked after leaving, always-trust opens the blocked host, no SW errors |
+| RT-023 | Failed download hand-off counted as scanned | test | Fixed `4045204` (pending list + retry); that commit also broke background.js syntax, fixed in `ee65ca5` |
 | RT-024 | Traversal omissions missing from coverage | not yet | Open → Gate v2 / phase 5 |
-| RT-025 | Popup "no issue" when nothing was checked | test | Fixed `fcb74d5` (`page_status.js`) |
+| RT-025 | Popup "no issue" when nothing was checked | test | Fixed `9f140bd` (`page_status.js`) |
 | RT-026 | Real-time "on" with nothing watched | test | Fixed: `start()` raises `NothingToWatch`, tray reports it |
 | RT-027 | Only one registry view of Run keys | fake-registry test | Fixed: HKLM read in 64- and 32-bit views (`HKLM32`) |
 | RT-028 | `BC.Heuristics.*` ClamAV names treated as conclusive (ClamAV itself classes them potentially unwanted) | ClamAV source `others.c:1730-1734` + `clamav.py:231` | Open → Gate v2 ClamAV policy (R8a) |
-| RT-029 | freshclam exit 1 accepted as a successful update | ClamAV source `freshclam.c:2198-2203` + test | Fixed `5454a46` |
+| RT-029 | freshclam exit 1 accepted as a successful update | ClamAV source `freshclam.c:2198-2203` + test | Fixed `6450b0d` |
 | RT-030 | `RELOAD` reply ignored; `RELOADING` is not activation, a failed reload keeps the old engine | R8c (not re-checked) | Open → Gate v2 |
 | RT-031 | Readiness = file presence + `PING`; no header/signature/bytecode/age check | R8c (not re-checked) | Open → Gate v2 |
 | RT-032 | Reply parser accepts `FOUND` without the `stream:` frame and EOF before NUL | code | Open → Gate v2 |
@@ -160,10 +160,10 @@ clamd), 3 xfailed (known issues); node --test 12 passed.
 ## Gate v2 milestone 1 (Codex writes, Claude reviews) — 2026-11-02 night
 
 Task files `docs/handoff/CODEX_TASK_GATE_V2_M1.md` (round 1, pinned to
-`682a495`) and `CODEX_TASK_GATE_V2_M1_R2.md` (round 2, review fixes); Codex
+`fdc3e99`) and `CODEX_TASK_GATE_V2_M1_R2.md` (round 2, review fixes); Codex
 answers in `docs/handoff/codex-gate-v2-m1.md`. Scope check clean in both
 rounds (only `agent/sentinel/gate_v2/`, `tests/gate_v2/`). Merged
-`9a101cb` (`--no-ff`). No caller uses `gate_v2` yet.
+`a168e6a` (`--no-ff`). No caller uses `gate_v2` yet.
 
 | # | Finding by Claude on round 1 | Outcome |
 |---|---|---|
@@ -192,11 +192,11 @@ node --test 39 passed.
 
 ## Gate v2 milestone 2 (Codex writes, Claude reviews) — 2026-11-02 night
 
-Task files `CODEX_TASK_GATE_V2_M2.md` (pinned to `8d95a1d`) and
+Task files `CODEX_TASK_GATE_V2_M2.md` (pinned to `95b3b72`) and
 `CODEX_TASK_GATE_V2_M2_R2.md`; answers in `docs/handoff/codex-gate-v2-m2.md`.
 New `gate_v2/identity.py`, `events.py`, `orchestrator.py`; one additive M1
 change (`FinalDecision.action_decision`, optional). Scope check clean in both
-rounds. Merged `e186184` (`--no-ff`). `engine/scanner.py` unchanged.
+rounds. Merged `b2ae29b` (`--no-ff`). `engine/scanner.py` unchanged.
 
 | # | Finding by Claude on round 1 | Outcome |
 |---|---|---|
@@ -219,12 +219,12 @@ merge — pytest 283 passed, 4 skipped (real clamd not running), 2 xfailed
 
 ## Gate v2 milestone 3 (Codex writes, Claude reviews) — 2026-11-02 night
 
-Task files `CODEX_TASK_GATE_V2_M3.md` (pinned `fe2949d`), `_R2.md`, `_R3.md`;
+Task files `CODEX_TASK_GATE_V2_M3.md` (pinned `682ce56`), `_R2.md`, `_R3.md`;
 answers in `docs/handoff/codex-gate-v2-m3.md`. New `gate_v2/content.py`
 (bound, deny-write reader), `archive.py` (one bounded ZIP walk),
 `evidence.py`, `core.py`, `rules.py` (JSON user rules, YARA-X); orchestrator
 passes the reader to `scan_bound` adapters. Scope check clean in all rounds.
-Merged `7226927`. Codex could not run pytest in its sandbox in any round
+Merged `4cedf02`. Codex could not run pytest in its sandbox in any round
 (temp folder denied) and said so each time.
 
 | # | Finding by Claude | Outcome |
@@ -239,18 +239,18 @@ Merged `7226927`. Codex could not run pytest in its sandbox in any round
 | H8 | No overall deadline across archive members (2,000 × per-call YARA timeout) | Fixed r3: walker stops at the request deadline/cancel, remaining members omitted `DEADLINE` |
 | H9 | (Claude, r3) the new dedupe key merged different rules with the same identifier from two namespaces and merged member-scope hits into outer hits — two YARA tests failed | Fixed by Claude on the branch: key `(evidence_id, scope)` |
 
-Checked by Claude: the new H7/H8 tests fail on `6f9618d` (6 failed) and pass
+Checked by Claude: the new H7/H8 tests fail on `ea7574d` (6 failed) and pass
 after. Tests after the merge on `gate-baseline`: pytest 347 passed,
 4 skipped (real clamd not running), 2 xfailed (RT-001, RT-002); node --test
 39 passed.
 
 ## Gate v2 milestone 4 (Codex writes, Claude reviews) — 2026-11-02 night
 
-Task files `CODEX_TASK_GATE_V2_M4.md` (pinned `18454a9`), `_R2.md`, `_R2B.md`;
+Task files `CODEX_TASK_GATE_V2_M4.md` (pinned `f9d034c`), `_R2.md`, `_R2B.md`;
 answers in `docs/handoff/codex-gate-v2-m4.md`. New `gate_v2/clamd.py`
 (strict INSTREAM client and adapter) and `winnet.py` (server PID of our TCP
 connection from `GetExtendedTcpTable`, then creation time and image path).
-Scope check clean. Merged `fe2880b`. Real clamd not run (no signature
+Scope check clean. Merged `92ae65f`. Real clamd not run (no signature
 database in a temporary `SENTINEL_HOME` without downloading one; the real
 data directory is off limits for tests).
 
@@ -273,18 +273,18 @@ clamd), 2 xfailed (RT-001, RT-002); node --test 39 passed.
 `test_identity_changed_and_cancelled_between_chunks` failed 6 of 12 runs, so the
 earlier "393 passed" was luck. A write in the same system-clock tick as file
 creation leaves NTFS timestamps equal (204 of 300 measured; 0 of 50 with 30 ms
-between the writes). Fixed in `31a7df4`: the test moves the timestamps itself.
+between the writes). Fixed in `2b43cc0`: the test moves the timestamps itself.
 Metadata cannot see a same-tick write; real scans close that window with the
 deny-write `BoundReader` handle (H2).
 
 ## Gate v2 milestone 5 (Codex rounds 1–2, Claude reviews and finishes)
 
 Round 1 was cut off when the previous session ended (no answer, committed as
-`3cdb0de`: 236 passed, 1 failed). Task files `CODEX_TASK_GATE_V2_M5.md`, `_R2.md`.
+`b66cb3f`: 236 passed, 1 failed). Task files `CODEX_TASK_GATE_V2_M5.md`, `_R2.md`.
 New `gate_v2/defender.py`, `gate_v2/analyzers/` (`lnk`, `signer`, `motw`). Scope
-clean in both rounds. Merged `86dd3e5`. Claude reproduced K1–K5, K7, K8, K10–K12
+clean in both rounds. Merged `b6f540b`. Claude reproduced K1–K5, K7, K8, K10–K12
 and K14 with synthetic input before round 2; 17 of the 19 round-2 tests fail on
-`3cdb0de` (the two job-kill tests pass there: that code was already right).
+`b66cb3f` (the two job-kill tests pass there: that code was already right).
 
 | # | Finding by Claude | Outcome |
 |---|---|---|
@@ -315,7 +315,7 @@ report `valid`). It is context only and cannot lower a detection.
 ## Gate v2 milestone 6 part 1 (Codex writes, Claude reviews)
 
 Task file `CODEX_TASK_GATE_V2_M6_P1.md`; `gate_v2/cache.py`, `gate_v2/legacy.py`.
-Scope clean. Merged `404447e`. New tests fail on `4771a9a`.
+Scope clean. Merged `09a1869`. New tests fail on `448e18e`.
 
 | # | Finding by Claude | Outcome |
 |---|---|---|
@@ -325,21 +325,64 @@ Scope clean. Merged `404447e`. New tests fail on `4771a9a`.
 | L4 | An unaccepted hit displayed as CRITICAL 100, structure as MEDIUM | Fixed: `_grade` |
 | L5 | A failing cache write failed the scan | Fixed |
 
+## Edge-case test round by Codex
+
+`tests/codex/`, 42 cases, written by Codex, run by Claude. Fixed in `a68236c`.
+
+| # | Finding | Outcome |
+|---|---|---|
+| E1 | ZIP with data prepended was never walked, so it was trusted clean | Fixed: `archive.is_zip` finds the directory from the end |
+| E2 | A data descriptor with false sizes was accepted | Fixed: `HEADER_MISMATCH` |
+| E3 | Content only in an alternate data stream was trusted clean | Fixed: `ALTERNATE_STREAM` opaque coverage; Zone.Identifier and SmartScreen ignored |
+| E4 | A `BaseException` from an adapter ended the scan: Rust panics in YARA-X arrive that way | Fixed: typed `ADAPTER_ERROR` |
+| E5 | A wall clock moved backwards revived an expired cache entry | Fixed: `stored_at` |
+| E6 | Very deep JSON could raise `RecursionError` out of the native-host and pipe parsers | Fixed |
+
+## Gate v2 milestone 6 part 2 (Claude)
+
+`engine/scanner.py` is now a facade over Gate v2. Closes RT-004, RT-009, RT-012, RT-013,
+RT-014, RT-033. RT-001 stays open by design until `evidence-v1`: the label improved, the
+action did not, because `legacy-v0` is a locked owner decision and `act_on` follows it.
+
+Found while wiring or measuring:
+
+| # | Finding | Outcome |
+|---|---|---|
+| N1 | Overlapping YARA match offsets broke the contract and lost the hit | Fixed: `normalize_ranges` |
+| N2 | Repeated evidence collapsed into a count raised `EVIDENCE_CAP`, so an ordinary archive became unknown | Fixed: only a dropped item is a limit |
+| N3 | `_entropy` used 256 passes of `bytes.count`: 76% of scan time (cProfile, 390 files) | Fixed: `Counter`; 15 → 42 files/s |
+| N4 | `Windows.Data.Pdf.dll` read as a double extension: the only false alarm in 4,000 files | Fixed: libraries excluded |
+| N5 | The tail sample read past a small resident limit | Fixed |
+
+Behaviour changes, each deliberate: a file that could not be fully checked is `unknown`,
+not `clean`, and the CLI exits 3 for it; a corrupt ZIP is `unknown`; a clamd that is
+configured but down makes files `unknown`, and passive Defender does not; Defender stays
+limited to risky file types; a database older than 7 days does not clear files; one YARA
+Forge match is `MEDIUM`, whatever its metadata says; old score sums no longer reach
+`malicious` (R11 §6: no arithmetic threshold).
+
+Measured with `tools/fp_sample.py` (read-only, disposable home, no ClamAV, no Defender, no
+rules installed) on 4,000 files from System32, ClamAV and Python: 3,997 clean, 0 suspicious,
+3 unknown (2 unreadable, 1 in use), 42 files/s. This is not an FP rate for the product: it
+ran without external engines and on one machine.
+
+Not run: Helium e2e against the new gate, and a real clamd.
+
 ## R15 — independent code review by Codex (read-only)
 
 Answer in `docs/research/R15-code-review-gate-service.md`. Claude checked each finding.
 
 | # | Finding | Verified | Outcome |
 |---|---|---|---|
-| R15-1 | Worker told the file's location | code; Claude found a second leak through `identity.canonical_path` | Fixed `aed0bb0` |
+| R15-1 | Worker told the file's location | code; Claude found a second leak through `identity.canonical_path` | Fixed `9b9d06e` |
 | R15-2 | A same-user process can squat the pipe and answer clients | code | Open → A3 (client must verify the server) |
-| R15-3 | ZIP local and central headers disagree: inspected, could be trusted clean | test | Fixed `aed0bb0` |
-| R15-4 | Clean stop reported with the action barrier open; a test locked it | code | Fixed `aed0bb0` |
+| R15-3 | ZIP local and central headers disagree: inspected, could be trusted clean | test | Fixed `9b9d06e` |
+| R15-4 | Clean stop reported with the action barrier open; a test locked it | code | Fixed `9b9d06e` |
 | R15-5 | `scan_many` pulled every request up front | test | Fixed: `scan_stream` |
 | R15-6 | A file needing more slots than capacity waited forever | test (hung pytest) | Fixed: `ADMISSION_FULL` |
-| R15-7 | A call waited past its deadline; worker start used its own 30 s | test | Fixed `aed0bb0` |
+| R15-7 | A call waited past its deadline; worker start used its own 30 s | test | Fixed `9b9d06e` |
 | R15-8 | Quarantining one hard link leaves the bytes reachable | code | Open → M7 |
-| R15-9 | Concurrent scan requests overshoot the job cap | test | Fixed `aed0bb0` |
+| R15-9 | Concurrent scan requests overshoot the job cap | test | Fixed `9b9d06e` |
 | R15-10 | A hit on an empty file lost its evidence | test | Fixed |
 | R15-11 | `decide` with no results gave trusted clean | test | Fixed |
 | R15-12 | In-memory bytes produced a quarantine action | test | Fixed; `test_m4_clamd` had locked it |

@@ -123,7 +123,7 @@ def test_skipped_reason_table_and_identity_failures():
 def test_finding_mapping_strengths_and_appended_critical():
     cases = (
         ("core", "EICAR", None, None, "signature", "eicar.test_file"),
-        ("core", "KNOWN_BAD_HASH", None, None, "signature", "hash.known_bad"),
+        ("core", "KNOWN_BAD_HASH", None, None, "signature", "hash.test"),  # the feed that listed it
         ("core", "RTLO", None, None, "filetype", "filetype.rtlo"),
         ("core", "DOUBLE_EXTENSION", None, None, "filetype", "filetype.double_extension"),
         ("core", "PADDED_NAME", None, None, "filetype", "filetype.padded_name"),

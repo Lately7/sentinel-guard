@@ -1,13 +1,13 @@
 # Codex task — Gate v2 milestone 3, round 3: two defects and the missing tests
 
 Same rules as `CODEX_TASK_GATE_V2_M3.md`. Worktree `..\sentinel-guard-gate-v2`,
-branch `codex/gate-v2-m3`; HEAD must be **6f9618d** (your round-2 files,
+branch `codex/gate-v2-m3`; HEAD must be **ea7574d** (your round-2 files,
 committed by Claude), else stop and report. Allowed paths:
 `agent/sentinel/gate_v2/`, `tests/gate_v2/`. Do not commit.
 
 Round 2 fixed H1–H5 correctly; Claude's run: `tests/gate_v2` **167 passed**.
 Reviewing the member scanning turned up two defects. Each fix needs a test
-that fails on 6f9618d.
+that fails on ea7574d.
 
 ## Must fix
 

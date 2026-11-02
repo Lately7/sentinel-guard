@@ -15,6 +15,10 @@ MAX_DEEP_SCAN_BYTES = 64 * 1024 * 1024
 MAX_ARCHIVE_TOTAL_BYTES = 256 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 2000
 MAX_ARCHIVE_DEPTH = 3
+# Above this a file is reported as not scanned; measuring it is a full read.
+# Provisional, like the deadline, until they are measured on the owner's machine.
+MAX_SCAN_BYTES = 4 * 1024 * 1024 * 1024
+SCAN_DEADLINE_SECONDS = 120.0
 
 
 def data_dir() -> Path:

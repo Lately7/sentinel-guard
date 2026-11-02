@@ -10,7 +10,7 @@ milestone 1") — read it, the same standards apply.
 
 * Working directory: the git worktree `..\sentinel-guard-gate-v2`, branch
   `codex/gate-v2-m2`.
-* Start commit: **8d95a1d** (`git log -1 --format=%h`); if it differs, stop
+* Start commit: **95b3b72** (`git log -1 --format=%h`); if it differs, stop
   and report. This task file is given to you as the prompt.
 
 ## Allowed paths
@@ -22,7 +22,7 @@ milestone 1") — read it, the same standards apply.
 * Nothing else changes: not `engine/scanner.py` (the adapter shell waits for
   milestone 6), no other production code, existing tests, docs or config.
   Do not commit. Claude runs
-  `tools/check_codex_scope.ps1 -Base 8d95a1d -Allow "agent/sentinel/gate_v2/,tests/gate_v2/"`.
+  `tools/check_codex_scope.ps1 -Base 95b3b72 -Allow "agent/sentinel/gate_v2/,tests/gate_v2/"`.
 
 ## Read first
 

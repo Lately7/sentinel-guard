@@ -10,6 +10,7 @@ from conftest import EICAR, MARKER
 from sentinel.engine import filetype
 from sentinel.engine.signatures import EICAR_SHA256
 from sentinel.engine.verdict import CLEAN, MALICIOUS, SUSPICIOUS, Finding, Severity, Verdict
+from sentinel.gate_v2.legacy import UNKNOWN
 
 
 def test_eicar_hash_constant_matches_the_test_file():
@@ -50,7 +51,7 @@ def test_nested_zip_depth_is_bounded(scanner):
 
 def test_corrupt_zip_does_not_raise(scanner):
     v = scanner.scan_bytes(b"PK\x03\x04" + os.urandom(500), "broken.zip")
-    assert v.label in (CLEAN, SUSPICIOUS)
+    assert v.label == UNKNOWN  # nobody could read inside it, so it is not clean
 
 
 def test_marker_rule_detects_file_on_disk(scanner, tmp_path):
@@ -83,7 +84,7 @@ def test_allowlisted_hash_is_clean(scanner, db, tmp_path):
 
 def test_unreadable_path_is_skipped_not_raised(scanner, tmp_path):
     v = scanner.scan_file(tmp_path / "missing.exe")
-    assert v.skipped and v.label == CLEAN
+    assert v.skipped.startswith("unreadable") and v.label == UNKNOWN
 
 
 def test_random_pe_like_bytes_never_raise(scanner):
@@ -135,7 +136,8 @@ def test_repeated_rule_counts_once(scanner):
                 doc.writestr("word/vbaProject.bin", b"\x00" * 64)
             zf.writestr(f"report{i}.docm", inner.getvalue())
     v = scanner.scan_bytes(buf.getvalue(), "reports.zip")
-    assert sum(1 for f in v.findings if f.rule == "office.macros") == 5
+    # One counted item now (H7): the count travels in the evidence detail code.
+    assert sum(1 for f in v.findings if f.rule == "office.macros") == 1
     assert v.label == CLEAN and v.score == 15
 
 

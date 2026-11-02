@@ -2,12 +2,12 @@
 
 Same rules as `CODEX_TASK_GATE_V2_M1.md` (round 1). Working directory: the
 worktree `..\sentinel-guard-gate-v2`, branch `codex/gate-v2-m1`. HEAD must be
-**7c82a9a** (your round-1 files, committed by Claude so this round has a clean
+**72517f7** (your round-1 files, committed by Claude so this round has a clean
 diff); if not, stop and report. Allowed paths unchanged:
 `agent/sentinel/gate_v2/`, `tests/gate_v2/`. Do not commit.
 
 Claude reviewed every line of round 1. Structure, validation and the test
-matrix are good. Fix these findings; each needs a test that fails on 7c82a9a
+matrix are good. Fix these findings; each needs a test that fails on 72517f7
 and passes after your change.
 
 ## Must fix

@@ -11,7 +11,7 @@ code and give your engineering opinion.
 
 Context: Sentinel Guard is the user's own Windows 11 anti-malware prototype
 (Python agent + MV3 browser extension). Read `AGENTS.md` and `README.md` first.
-The working tree contains uncommitted work (base commit `01bc342`) that adds a
+The working tree contains uncommitted work (base commit `eb556b5`) that adds a
 multi-layer scan gate: `agent/sentinel/engine/scanner.py` (layers: Sentinel core
 -> rule packs + YARA-X -> ClamAV via a private clamd, `engine/clamav.py` ->
 Microsoft Defender), `Verdict.engines` per-layer status (`engine/verdict.py`),
@@ -219,7 +219,7 @@ Claude should revise those before the characterization scope is frozen.
 The proposal is sound with these changes:
 
 - `xfail(strict=True)` tests must assert the **desired** behavior, carry a stable finding ID and reason, and be narrowly scoped. An unexpected pass should fail the round.
-- The scope comparison must use the new baseline commit created in step 1, not `01bc342`; otherwise all existing uncommitted gate work appears out of scope.
+- The scope comparison must use the new baseline commit created in step 1, not `eb556b5`; otherwise all existing uncommitted gate work appears out of scope.
 - Check committed, staged, and unstaged changes, including renames and binary files.
 - Record exact commit, Python/Node versions, commands, pass/skip/xfail counts, and whether optional integration suites were run.
 - Require every report finding to have a stable ID, severity, evidence, owner, and status: fixed, rejected with reason, or deferred with rationale and target milestone.

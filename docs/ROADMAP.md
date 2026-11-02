@@ -63,8 +63,8 @@ tiến trình bằng chụp danh sách 500 ms trước, ETW để sau.
 | Mốc | Việc | Ghi chú |
 |---|---|---|
 | G3–G6 | Gate v2 mốc 3–6 (core/luật, ClamAV, Defender, cache + adapter) | song song với A1 |
-| A1 | Giao thức pipe + phân quyền lệnh + `ServiceCore` + named pipe thật + client + vỏ dịch vụ | ✅ phần không cần admin: `1276db7`, `2b69586`, `d295c93`, `f5dad5a` (41 test); còn: hộp xác nhận UAC, cài dịch vụ, script kiểm thử admin |
-| A2 | Worker quét quyền thấp + Job Object | ✅ `194ae38`, `14249ad`: worker low integrity chạy adapter core/luật JSON/YARA-X trên handle được nhân bản; worker chết/treo/huỷ → lỗi có kiểu, không bao giờ sạch |
+| A1 | Giao thức pipe + phân quyền lệnh + `ServiceCore` + named pipe thật + client + vỏ dịch vụ | ✅ phần không cần admin: `c156366`, `57347f7`, `4de3072`, `ff4d283` (41 test); còn: hộp xác nhận UAC, cài dịch vụ, script kiểm thử admin |
+| A2 | Worker quét quyền thấp + Job Object | ✅ `2b7e569`, `76d0950`: worker low integrity chạy adapter core/luật JSON/YARA-X trên handle được nhân bản; worker chết/treo/huỷ → lỗi có kiểu, không bao giờ sạch |
 | A3 | Gate v2 mốc 7 qua dịch vụ: cách ly có kiểm lại, nhật ký hoàn tác, hộp xác nhận UAC | |
 | A4 | Gate v2 mốc 8 + nguồn quét admin (mọi user, dịch vụ, tác vụ, WMI…) | |
 | A5 | USN journal, chụp danh sách tiến trình 500 ms, quét lại tệp tải về | cần chủ dự án chạy thử với quyền admin |
@@ -107,7 +107,7 @@ không tải hay chạy mã độc).
 | 0 | **Nền tảng**: C1 icon cũ, C2a cổng quét, C2b baseline, giao diện tối, bộ icon v2 | ✅ xong |
 | 1 | **Sửa lỗi** (C3a, d, e, g, h, j, k ✅; C3b/c/f vào Gate v2; C3i bỏ) | ✅ xong |
 | R | **Nghiên cứu sâu cho Gate v2** (R8a–R12d, R11 đặc tả) | ✅ xong |
-| G | **Gate v2** do Codex viết theo đặc tả R11 (8 mốc), Claude review | mốc 1 ✅ `9a101cb` · mốc 2 ✅ `e186184` · mốc 3 ✅ `7226927` · mốc 4 ✅ `fe2880b` (ClamAV) · tiếp: mốc 5 (Defender + phân tích cấu trúc) |
+| G | **Gate v2** do Codex viết theo đặc tả R11 (8 mốc), Claude review | mốc 1 ✅ `a168e6a` · mốc 2 ✅ `b2ae29b` · mốc 3 ✅ `4cedf02` · mốc 4 ✅ `92ae65f` (ClamAV) · tiếp: mốc 5 (Defender + phân tích cấu trúc) |
 | 2 | **Red Team viết test** (Codex vòng 1a, 1b) | chờ giai đoạn 1 |
 | 3 | **Contract v1**: tách trạng thái quét khỏi kết luận; "một phần"/lỗi không bao giờ là "sạch" | chờ |
 | 4 | **Chính sách ClamAV + cách ly an toàn** | chờ |
@@ -119,17 +119,17 @@ không tải hay chạy mã độc).
 
 | Commit | Nội dung | Sửa | Trạng thái |
 |---|---|---|---|
-| C3a | Kết quả Defender có kiểu (sạch/độc/lỗi/hết giờ/không có) | RT-008 | ✅ `d77dea1` |
+| C3a | Kết quả Defender có kiểu (sạch/độc/lỗi/hết giờ/không có) | RT-008 | ✅ `2cfcf1e` |
 | C3b | Định danh cổng quét theo nội dung luật; không cache kết quả chưa đầy đủ | RT-009 | ⏸ chuyển vào Gate v2 |
 | C3c | Giữ trạng thái "bỏ qua"/"một phần" cho ZIP quá lớn | một phần RT-004 | ⏸ chuyển vào Gate v2 |
-| C3d | Sửa 2 test đang khoá quyết định sai; sổ RT; `tools/check_codex_scope.ps1`; vai trò Codex trong `AGENTS.md` | — | ✅ `ee2fb35` |
-| C3e | Native host đọc đủ thân thông điệp | RT-006 | ✅ `5af59ed` |
+| C3d | Sửa 2 test đang khoá quyết định sai; sổ RT; `tools/check_codex_scope.ps1`; vai trò Codex trong `AGENTS.md` | — | ✅ `798f0c2` |
+| C3e | Native host đọc đủ thân thông điệp | RT-006 | ✅ `d3c10cb` |
 | C3f | Chỗ cắm test cho ClamAV client | — | ⏸ chuyển vào Gate v2 |
-| C3g | Mã thoát CLI đúng thứ tự 2 > 3 > 1 > 0 | RT-011 | ✅ `290f4a0` |
-| C3h | Cập nhật chữ ký thất bại thì thử lại sau 60 phút | RT-010 | ✅ `754b745`, `c3714fd` |
+| C3g | Mã thoát CLI đúng thứ tự 2 > 3 > 1 > 0 | RT-011 | ✅ `d6ee116` |
+| C3h | Cập nhật chữ ký thất bại thì thử lại sau 60 phút | RT-010 | ✅ `6ff9802`, `a22d74d` |
 | C3i | Đặt đường dẫn trong `clamd.conf` vào ngoặc kép | RT-015 | ✖ bỏ: không phải lỗi |
-| C3j | Native host bắt buộc đúng origin của extension | RT-019 | ✅ `5af59ed` |
-| C3k | Extension kiểm tra số/độ dài trong thông điệp từ trang | RT-020 | ✅ `62ff720` |
+| C3j | Native host bắt buộc đúng origin của extension | RT-019 | ✅ `d3c10cb` |
+| C3k | Extension kiểm tra số/độ dài trong thông điệp từ trang | RT-020 | ✅ `72c7781` |
 | C4 | `CODEX_TASK_1a.md`, `CODEX_TASK_1b.md` ghim vào commit C3k | — | xem lại sau R11 |
 
 ### Giai đoạn 5 — ba tính năng chính (theo Codex r6, đã chỉnh theo ý chủ dự án)
@@ -188,20 +188,20 @@ cần xử lý mới sáng lên (333 ms); tắt hết khi Windows tắt hiệu �
 | RT-013 | ClamAV lỗi/không chạy mà kết luận chung vẫn "sạch" | Cao | GĐ 3 |
 | RT-014 | Lưu trữ/tài liệu mã hoá không được ghi là "chưa kiểm tra được" | TB | GĐ 3 |
 | RT-015 | Đường dẫn trong `clamd.conf` không có ngoặc kép | Thấp | ✖ từ chối: `common/optparser.c:1094-1135` của ClamAV lấy cả phần còn lại của dòng làm giá trị, dấu cách vẫn đúng |
-| RT-016 | Thời gian thực không thử lại tệp đang bị khoá | Cao | ✅ `d03ea88` (5 lần trong ~40 s, rồi báo "Chưa quét được tệp") |
-| RT-017 | Hàng đợi chống dội không có giới hạn | TB | ✅ `d03ea88` (tối đa 10.000 tệp, tệp thay đổi liên tục vẫn được quét sau 30 s) |
-| RT-018 | Tắt bảo vệ không dừng lượt quét/cách ly đang chạy | TB | ✅ `d03ea88` (sau khi tắt không cách ly thêm; phát hiện vẫn được ghi) |
+| RT-016 | Thời gian thực không thử lại tệp đang bị khoá | Cao | ✅ `0f348f3` (5 lần trong ~40 s, rồi báo "Chưa quét được tệp") |
+| RT-017 | Hàng đợi chống dội không có giới hạn | TB | ✅ `0f348f3` (tối đa 10.000 tệp, tệp thay đổi liên tục vẫn được quét sau 30 s) |
+| RT-018 | Tắt bảo vệ không dừng lượt quét/cách ly đang chạy | TB | ✅ `0f348f3` (sau khi tắt không cách ly thêm; phát hiện vẫn được ghi) |
 | RT-019 | Native host chấp nhận khi thiếu origin | Thấp | ✅ C3j |
 | RT-020 | Thông điệp từ trang thiếu kiểm tra số (NaN) và độ dài | Thấp | ✅ C3k |
-| RT-021 | Allowlist bị cắt im lặng sau 5.000 tên miền | TB | ✅ `8135706` |
-| RT-022 | "Vẫn tiếp tục" tạo ngoại lệ vĩnh viễn cho cả tên miền | TB | ✅ `597df57` — nguyên nhân thật: luật DNR không ghi `resourceTypes` thì bỏ qua `main_frame`, nên cả "Mở một lần" lẫn "Luôn tin cậy" đều không mở được trang bị chặn |
+| RT-021 | Allowlist bị cắt im lặng sau 5.000 tên miền | TB | ✅ `566c57d` |
+| RT-022 | "Vẫn tiếp tục" tạo ngoại lệ vĩnh viễn cho cả tên miền | TB | ✅ `75ba989` — nguyên nhân thật: luật DNR không ghi `resourceTypes` thì bỏ qua `main_frame`, nên cả "Mở một lần" lẫn "Luôn tin cậy" đều không mở được trang bị chặn |
 | RT-023 | Tải về không gửi được tới agent vẫn đếm là đã quét | TB | ✅ |
 | RT-024 | Quét bỏ sót (junction, đường dẫn dài, thiếu quyền) không ghi vào độ phủ | TB | GĐ 5 |
 | RT-025 | Popup nói "Không phát hiện vấn đề" khi chưa kiểm tra | TB | ✅ |
 | RT-026 | Thời gian thực báo "bật" dù không theo dõi thư mục nào | TB | ✅ |
 | RT-027 | Chỉ đọc một view registry của khoá Run | TB | ✅ |
 | RT-028 | Tên ClamAV `BC.Heuristics.*` bị coi là chắc chắn độc (ClamAV coi là "có thể không mong muốn") | TB | Gate v2 |
-| RT-029…036 | (RT-029 ✅ `5454a46`) Bộ chuyển ClamAV: cập nhật/RELOAD/độ sẵn sàng/định dạng trả lời/định danh cache/tuổi chữ ký (chi tiết trong `REVIEWS.md`, R8c) | TB–Cao | Gate v2 |
+| RT-029…036 | (RT-029 ✅ `6450b0d`) Bộ chuyển ClamAV: cập nhật/RELOAD/độ sẵn sàng/định dạng trả lời/định danh cache/tuổi chữ ký (chi tiết trong `REVIEWS.md`, R8c) | TB–Cao | Gate v2 |
 | RT-037…052 | Lớp YARA-X: nuốt lỗi/timeout, chép 64 MB, chia đầu/đuôi, mất nguồn gốc luật, cache chỉ theo số luật… (R12a) | TB–Cao | Gate v2 |
 
 Đã kiểm chứng trong code: RT-008…013, 019, 022, 023, 026. Các mục còn lại
@@ -220,5 +220,5 @@ cần xử lý mới sáng lên (333 ms); tắt hết khi Windows tắt hiệu �
 
 ## Kiểm thử gần nhất
 
-pytest **393 passed, 4 skipped, 2 xfailed** (không có clamd; 2 xfail = RT-001, RT-002; 209 test Gate v2, 55 test dịch vụ A1/A2) · extension **39 passed** (chạy lại 2026-11-02 ≈20:20, commit `31a7df4`) · Helium e2e: mọi kiểm tra đạt (lần cuối 2026-11-02 đêm, chưa chạy lại).
+pytest **393 passed, 4 skipped, 2 xfailed** (không có clamd; 2 xfail = RT-001, RT-002; 209 test Gate v2, 55 test dịch vụ A1/A2) · extension **39 passed** (chạy lại 2026-11-02 ≈20:20, commit `2b43cc0`) · Helium e2e: mọi kiểm tra đạt (lần cuối 2026-11-02 đêm, chưa chạy lại).
 Baseline tại C2a: `docs/baseline.md`.

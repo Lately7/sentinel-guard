@@ -103,6 +103,7 @@ def store(cache: CacheStore, decision: FinalDecision, now: float) -> None:
     payload = json.dumps({
         "contract_version": CONTRACT_VERSION,
         "key": key,
+        "stored_at": now,
         "expires_at": expires_at,
         "decision": scan_value,
     }, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
@@ -126,9 +127,11 @@ def lookup(
         if payload is None or len(payload.encode("utf-8")) > MAX_PAYLOAD_BYTES:
             return None
         value = json.loads(payload)
+        # A wall clock that went backwards must not revive an expired decision.
         if (type(value) is not dict or value.get("contract_version") != CONTRACT_VERSION
                 or value.get("key") != key or type(value.get("expires_at")) not in (int, float)
-                or value["expires_at"] <= now):
+                or type(value.get("stored_at")) not in (int, float)
+                or value["expires_at"] <= now or value["stored_at"] > now):
             return None
         scan_value = value["decision"]
         if type(scan_value) is not dict or "action_decision" in scan_value:

@@ -32,6 +32,7 @@ def select_evidence(items: list[Evidence], ledger: CoverageLedger) -> tuple[Evid
                     if item.strength is not Strength.CONCLUSIVE and
                     counts[(item.evidence_id, item.scope)] > 1 else item
                     for item in selected]
-    if len(selected) != len(items) or len(selected) > 64:
+    # Repeats collapsed into a count lost nothing; only dropping an item is a limit.
+    if len(selected) > 64:
         ledger.limit("EVIDENCE_CAP")
     return tuple(selected[:64])

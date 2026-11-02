@@ -9,7 +9,7 @@ not to repeat.
 ## Pinned start
 
 Worktree `..\sentinel-guard-gate-v2`, branch `codex/gate-v2-m3`, start
-commit **fe2949d** (`git log -1 --format=%h`); otherwise stop and report.
+commit **682ce56** (`git log -1 --format=%h`); otherwise stop and report.
 
 ## Allowed paths
 

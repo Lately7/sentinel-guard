@@ -329,6 +329,9 @@ async function scanDownload(d) {
     notify(res.quarantined ? "Đã cách ly tệp tải về nguy hiểm" : "Tệp tải về nguy hiểm", `${name}: ${res.reason}`);
   } else if (label === "suspicious") {
     notify("Tệp tải về đáng ngờ", `${name}: ${res.reason} (điểm ${res.verdict.score})`);
+  } else if (label === "unknown") {
+    // Not checked is not clean: a required engine did not finish.
+    notify("Chưa kiểm tra xong tệp tải về", `${name}: chưa nên mở tệp này. Hãy quét lại sau.`);
   }
 }
 

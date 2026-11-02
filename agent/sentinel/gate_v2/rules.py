@@ -14,8 +14,19 @@ from .content import BoundReader, ContentError
 from .contract import (CONTRACT_VERSION, ByteRange, CancellationToken, Category,
                        EngineResult, Evidence, FileIdentity, ScanError, ScanRequest,
                        StageStatus, Strength, VerdictCode)
-from .coverage import CoverageLedger
+from .coverage import CoverageLedger, normalize_ranges
 from .evidence import select_evidence
+
+
+# Past the resident limit rules still see the end, where appended payloads sit.
+TAIL_BYTES = 8 * 1024 * 1024
+
+
+def _tail(reader: BoundReader, measured: FileIdentity, cancel: CancellationToken) -> tuple[int, bytes]:
+    if measured.size <= reader.resident_limit:
+        return 0, b""
+    length = min(TAIL_BYTES, measured.size - reader.resident_limit, reader.resident_limit)
+    return measured.size - length, reader.read(measured.size - length, length, cancel)
 
 
 @dataclass(frozen=True)
@@ -158,20 +169,23 @@ class JsonRulesAdapter:
         ledger = CoverageLedger(measured.size, certainty="verified")
         try:
             body = reader.read(0, min(measured.size, reader.resident_limit), cancel)
-            def inspect(payload: bytes, member_path: str | None = None) -> None:
+            def inspect(payload: bytes, member_path: str | None = None, base: int = 0) -> None:
                 for rule in self.rules:
                     matches = [payload.find(p) for p in rule.patterns]
                     if (all(i >= 0 for i in matches) if rule.all_patterns else any(i >= 0 for i in matches)):
                         position = next(i for i in matches if i >= 0)
                         length = len(rule.patterns[matches.index(position)])
-                        spans = reader.ranges[:1] if member_path else (ByteRange(position, position + length),)
+                        spans = reader.ranges[:1] if member_path else (ByteRange(base + position, base + position + length),)
                         evidence.append(Evidence(f"json.{rule.digest[:12]}.{rule.rule_id}"[:128],
                                                  self.engine_id, rule.rule_id, None, Category.MALWARE,
                                                  Strength.CONCLUSIVE if rule.user and rule.critical else Strength.SUPPORTING,
                                                  "member" if member_path else "outer", member_path, spans,
                                                  rule.name[:128], rule.digest, None, True, "JSON_RULE"))
             inspect(body)
-            if body.startswith(archive.ZIP_PREFIXES):
+            start_of_tail, tail = _tail(reader, measured, cancel)
+            if tail:
+                inspect(tail, base=start_of_tail)
+            if archive.is_zip(body):
                 if len(body) == measured.size:
                     stopped = archive.walk(body, ledger, cancel, lambda path, payload: inspect(payload, path),
                                            request.deadline_monotonic_ns)
@@ -258,15 +272,20 @@ class YaraXAdapter:
             else:
                 body = reader.read(0, measured.size, cancel)
                 partial = False
-            def inspect(payload: bytes, member_path: str | None = None) -> None:
+            def inspect(payload: bytes, member_path: str | None = None, base: int = 0) -> None:
                 scanner = self._scanner()
                 try:
                     matches = scanner.scan(payload).matching_rules
                     for rule in matches:
                         offsets = [(match.offset, match.length) for pattern in rule.patterns
                                    for match in pattern.matches][:64]
-                        spans = (reader.ranges[:1] if member_path else tuple(
-                            ByteRange(offset, offset + length) for offset, length in offsets if length > 0))
+                        # A rule of pure conditions (a private helper) has no offsets;
+                        # it then points at what was scanned.
+                        # Patterns match out of order and can overlap; evidence
+                        # ranges must not, or the contract refuses the whole hit.
+                        spans = (reader.ranges[:1] if member_path else normalize_ranges(tuple(
+                            ByteRange(base + offset, base + offset + length)
+                            for offset, length in offsets if length > 0), measured.size) or reader.ranges[:1])
                         evidence.append(Evidence(f"yara.{rule.namespace}.{rule.identifier}"[:128], self.engine_id,
                                                  rule.identifier[:128], f"{rule.namespace}.{rule.identifier}"[:512],
                                                  Category.MALWARE, Strength.SUPPORTING,
@@ -276,7 +295,10 @@ class YaraXAdapter:
                 finally:
                     del scanner
             inspect(body)
-            if body.startswith(archive.ZIP_PREFIXES):
+            start_of_tail, tail = _tail(reader, measured, cancel)
+            if tail:
+                inspect(tail, base=start_of_tail)
+            if archive.is_zip(body):
                 if not partial:
                     stopped = archive.walk(body, ledger, cancel, lambda path, payload: inspect(payload, path),
                                            request.deadline_monotonic_ns)

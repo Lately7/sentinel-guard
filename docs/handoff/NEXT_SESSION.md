@@ -12,9 +12,9 @@ full autonomy, except what §7 forbids. `gate-baseline` is now `main`, pushed to
 order of work in §3–§5 below. Owner decision: Claude owns all the work; Codex only
 uses up its remaining quota on long background tasks, and no step may wait for it.
 §4 still describes how to run a Codex round. Five rounds started at 20:13: M5 round 2,
-M6 part 1, R14, R15, R16; results in `%TEMP%\sg-codex\`. The M5 draft is `3cdb0de` on
+M6 part 1, R14, R15, R16; results in `%TEMP%\sg-codex\`. The M5 draft is `b66cb3f` on
 `codex/gate-v2-m5`; M6 part 1 has its own worktree `..\sentinel-guard-gate-v2-m6`.
-§2's "393 passed" was luck: a test failed 6 of 12 runs until `31a7df4`.
+§2's "393 passed" was luck: a test failed 6 of 12 runs until `2b43cc0`.
 §7 stays in force.
 
 ## 1. Where things are
@@ -37,8 +37,8 @@ M6 part 1, R14, R15, R16; results in `%TEMP%\sg-codex\`. The M5 draft is `3cdb0d
 
 ## 2. State at handoff (verified by running the commands)
 
-* Last merge on `gate-baseline`: `fe2880b` (Gate v2 milestone 4), docs up to
-  `20cf9c7`.
+* Last merge on `gate-baseline`: `92ae65f` (Gate v2 milestone 4), docs up to
+  `1483da5`.
 * `.\.venv\Scripts\python -m pytest -q` → **393 passed, 4 skipped, 2 xfailed**
   (4 skips = real-clamd tests, clamd not running; 2 xfails = RT-001, RT-002,
   intended). `node --test "extension/test/*.test.mjs"` → **39 passed**.
@@ -68,7 +68,7 @@ M6 part 1, R14, R15, R16; results in `%TEMP%\sg-codex\`. The M5 draft is `3cdb0d
 
 ## 3. In flight: Codex Gate v2 milestone 5 (Defender + structural context)
 
-Task file `docs/handoff/CODEX_TASK_GATE_V2_M5.md`, pinned start `8aefd3d`,
+Task file `docs/handoff/CODEX_TASK_GATE_V2_M5.md`, pinned start `7ba3e74`,
 branch `codex/gate-v2-m5` in the worktree. At handoff Codex was still
 running; it had already created (uncommitted) `gate_v2/defender.py`,
 `gate_v2/analyzers/`, `tests/gate_v2/test_m5_defender.py`,
@@ -184,7 +184,9 @@ tests because an earlier brief said "report it and stop".)
   each finished step to `origin` (`github.com/Lately7/sentinel-guard`, owner
   decision 2026-11-02; this replaces the old "never push"). Only `main` is
   pushed. Never force, never rewrite history, and check for secrets first:
-  everything pushed is published.
+  everything pushed is published. (One exception so far, asked for by the owner
+  on 2026-11-02: author and committer of all commits were rewritten to `Lately7`
+  because `.git/config` carried another account's email. Commit as `Lately7`.)
 * Claude never elevates, never changes system/security settings, never
   touches Defender settings, never downloads anything, never writes outside
   the repo except the `..\sentinel-guard-*` worktrees and `%TEMP%`. Anything

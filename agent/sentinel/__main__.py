@@ -32,6 +32,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
     settings.auto_quarantine = args.quarantine
     scanner = Scanner(db, use_defender=not args.no_defender and settings.use_defender,
                       use_clamav=not args.no_clamav and settings.use_clamav)
+    # clamd takes about 20 s to load; without this wait every file would be unknown.
+    if scanner.clamav is not None:
+        scanner.clamav.start(wait=60)
     malicious = suspicious = False
     results = []
     missing = [p for p in args.paths if not os.path.exists(p)]
@@ -49,6 +52,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
         if broken:
             failures.append(f"{f}: {'; '.join(broken)}")
             print(f"ERROR      {f}: {'; '.join(broken)}", file=sys.stderr)
+        # Not checked must never read as clean to a script (exit 3).
+        if v.label == "unknown":
+            failures.append(f"{f}: {v.skipped or 'not fully checked'}")
         malicious |= v.label == "malicious"
         suspicious |= v.label == "suspicious"
         if args.json:

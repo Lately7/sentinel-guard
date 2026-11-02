@@ -60,7 +60,7 @@ def read_frame(stream: BinaryIO) -> dict[str, Any] | None:
         raise ProtocolError("BAD_FRAME", "stream ended inside a frame")
     try:
         obj = json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as e:
+    except (UnicodeDecodeError, ValueError, RecursionError) as e:
         raise ProtocolError("BAD_FRAME", "frame is not UTF-8 JSON") from e
     if not isinstance(obj, dict):
         raise ProtocolError("BAD_FRAME", "frame is not a JSON object")

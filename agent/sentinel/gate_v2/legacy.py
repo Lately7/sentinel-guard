@@ -30,9 +30,17 @@ class GateVerdict(Verdict):
     @property
     def label(self) -> str:
         # The native host still appends a critical URL blocklist finding after projection.
-        if any(item.severity >= Severity.CRITICAL for item in self.findings[self._projected_findings:]):
+        if self.escalated:
             return MALICIOUS
         return self.decision.verdict.value if self.decision is not None else super().label
+
+    @property
+    def escalated(self) -> bool:
+        """A caller added a conclusive finding the gate did not see."""
+        return any(item.severity >= Severity.CRITICAL for item in self.findings[self._projected_findings:])
+
+    def reset_projection(self) -> None:
+        self._projected_findings = len(self.findings)
 
     def to_dict(self, max_findings: int = 200) -> dict[str, Any]:
         value = super().to_dict(max_findings)
@@ -91,7 +99,13 @@ def _stage_worst(texts: list[str]) -> str:
     return max(texts, key=lambda text: rank.get(text.split(":", 1)[0], 0))
 
 
+_ARCHIVE = {"ENCRYPTED_EXECUTABLE": "archive.encrypted_executable", "ARCHIVE_BOMB": "archive.bomb",
+            "DIRECTORY_TOO_LARGE": "archive.directory_too_large"}
+
+
 def _grade(item: Evidence, accepted: bool, rule: str) -> tuple[Severity, int]:
+    if rule == "office.macros":  # one signal, however many documents carry it
+        return Severity.LOW, 15
     if item.strength not in _SIGNALS:
         return Severity.INFO, 0
     if not accepted:
@@ -105,13 +119,19 @@ def _grade(item: Evidence, accepted: bool, rule: str) -> tuple[Severity, int]:
 
 
 def _finding(item: Evidence, accepted: bool) -> Finding:
-    code = item.detail_code.upper()
     engine = item.engine_id
+    # detail_code gains a _COUNT_n suffix when a rule repeats across members.
+    code = (item.signature_id if engine == "core" and item.signature_id else item.detail_code).upper()
     if engine == "core":
         if code == "EICAR":
             kind, rule, detail = "signature", "eicar.test_file", "EICAR anti-malware test file (harmless)"
         elif code == "KNOWN_BAD_HASH":
-            kind, rule, detail = "signature", "hash.known_bad", "SHA-256 listed as known malware"
+            source = "known_bad" if item.source_id == "sentinel-core" else item.source_id
+            kind, rule, detail = "signature", f"hash.{source}", f"SHA-256 listed by {source}"
+        elif code == "OFFICE_MACROS":
+            kind, rule, detail = "office", "office.macros", "Office document contains VBA macros"
+        elif code in _ARCHIVE:
+            kind, rule, detail = "archive", _ARCHIVE[code], f"Archive signal: {code.lower()}"
         elif code in ("RTLO", "DOUBLE_EXTENSION", "PADDED_NAME", "MISMATCH"):
             kind, rule, detail = "filetype", f"filetype.{code.lower()}", f"Deceptive file name: {code.lower()}"
         elif code.startswith("PE_"):
@@ -133,6 +153,8 @@ def _finding(item: Evidence, accepted: bool) -> Finding:
         detail = f"ClamAV: {item.raw_name or 'detection'}"
     elif engine == "defender":
         kind, rule, detail = "defender", "defender.detection", f"Microsoft Defender: {item.raw_name or 'detection'}"
+    elif code == "ORIGIN_BLOCKLISTED":
+        kind, rule, detail = "origin", "origin.blocklisted_source", "downloaded from a blocklisted source"
     else:
         kind, rule, detail = engine, f"{engine}.{code.lower()}", f"{engine}: {code.lower()}"
     if item.member_path:

@@ -14,6 +14,7 @@ from .config import Settings
 from .db import Database
 from .engine.scanner import Scanner
 from .engine.verdict import Verdict
+from .gate_v2.legacy import UNKNOWN
 from .protection import act_on
 
 log = logging.getLogger(__name__)
@@ -67,6 +68,8 @@ class ScanQueue:
         self.dropped = 0  # events lost to MAX_PENDING since start
         self._dropped_unreported = 0
         self._overflow_reported_at = float("-inf")
+        self._incomplete_unreported = 0
+        self._incomplete_reported_at = float("-inf")
         self._lock = threading.Lock()
         # Held around every automatic action; stop() takes it to know that no
         # action of this run is still in progress (RT-018).
@@ -155,6 +158,7 @@ class ScanQueue:
         while not self._stop.is_set():
             self._wake.wait(timeout=1.0)
             self._report_overflow()
+            self._report_incomplete()
             for path, attempts in self._due():
                 if self._stop.is_set():
                     return
@@ -184,11 +188,36 @@ class ScanQueue:
         if v.skipped and v.skipped.startswith("unreadable"):
             self._unreadable(path, attempts, v.skipped)
             return
+        if v.label == UNKNOWN:
+            self._incomplete(path, attempts)
         outcome = self._act(v)
         if outcome["error"] and "changed after it was scanned" in outcome["error"]:
             self._requeue(path, SETTLE_SECONDS)
         if self.on_result:
             self.on_result({"verdict": v.to_dict(), **outcome})
+
+    def _incomplete(self, path: str, attempts: int) -> None:
+        # A required engine did not finish (clamd restarting, a timeout): worth a
+        # few more tries, and reported as a count, because when an engine is down
+        # every file lands here.
+        attempts += 1
+        if attempts <= len(RETRY_DELAYS):
+            self._requeue(path, RETRY_DELAYS[attempts - 1], attempts)
+            return
+        with self._lock:
+            self._incomplete_unreported += 1
+
+    def _report_incomplete(self) -> None:
+        now = self._clock()
+        with self._lock:
+            n = self._incomplete_unreported
+            if not n or now - self._incomplete_reported_at < OVERFLOW_REPORT_SECONDS:
+                return
+            self._incomplete_unreported = 0
+            self._incomplete_reported_at = now
+        self.db.add_event("watcher", "warning", "Có tệp chưa kiểm tra xong",
+                          f"{n} tệp chưa được kiểm tra đủ vì một lớp quét chưa sẵn sàng. "
+                          "Hãy chạy Quét ngay khi các lớp đã sẵn sàng.", {"files": n})
 
     def _unreadable(self, path: str, attempts: int, reason: str) -> None:
         attempts += 1

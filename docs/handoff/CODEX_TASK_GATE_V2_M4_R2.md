@@ -1,14 +1,14 @@
 # Codex task — Gate v2 milestone 4, round 2: review fixes
 
 Same rules as `CODEX_TASK_GATE_V2_M4.md`. Worktree `..\sentinel-guard-gate-v2`,
-branch `codex/gate-v2-m4`; HEAD must be **877fd4d** (your round-1 files,
+branch `codex/gate-v2-m4`; HEAD must be **648e85f** (your round-1 files,
 committed by Claude), else stop and report. Allowed paths:
 `agent/sentinel/gate_v2/`, `tests/gate_v2/`. Do not commit.
 
 Claude ran `tests/gate_v2` outside the sandbox: **1 failed, 202 passed**, and
 read every line. The strict reply parser, the readiness fields, the reload
 target and the TCP-owner lookup (`winnet.py`) are good. Fix these; each needs
-a test that fails on 877fd4d and passes after.
+a test that fails on 648e85f and passes after.
 
 ## Must fix
 

@@ -16,7 +16,7 @@ Milestone 6 still needs to supply and validate database inventory, configuration
 
 ## Round 2
 
-HEAD was `877fd4d` on `codex/gate-v2-m4`, and the worktree was clean. I added six regression tests in [test_m4_clamd.py](C:/Users/lately07/Desktop/Folder%20Group/sentinel-guard-gate-v2/tests/gate_v2/test_m4_clamd.py), but **stopped before changing the adapter** because the sandbox denied pytest access to its temp folder. None of J1–J4 is fixed or verified yet. No commit was made.
+HEAD was `648e85f` on `codex/gate-v2-m4`, and the worktree was clean. I added six regression tests in [test_m4_clamd.py](C:/Users/lately07/Desktop/Folder%20Group/sentinel-guard-gate-v2/tests/gate_v2/test_m4_clamd.py), but **stopped before changing the adapter** because the sandbox denied pytest access to its temp folder. None of J1–J4 is fixed or verified yet. No commit was made.
 
 Command run:
 `..\sentinel-guard\.venv\Scripts\python -m pytest -q tests/gate_v2/test_m4_clamd.py -k 'delayed_instream or instream_waits or cancel_during or readiness_cache or failed_reload or reload_activation' -p no:cacheprovider`

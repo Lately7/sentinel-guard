@@ -45,16 +45,11 @@ CREATE TABLE IF NOT EXISTS allow_hashes (
     sha256 TEXT PRIMARY KEY,
     added  REAL NOT NULL
 );
-CREATE TABLE IF NOT EXISTS scan_cache (
-    path   TEXT PRIMARY KEY,   -- resolved absolute path
-    size   INTEGER NOT NULL,
-    mtime  REAL NOT NULL,
-    ino    INTEGER NOT NULL,   -- file id: a different file moved into place doesn't inherit the verdict
-    sha256 TEXT NOT NULL,
-    label  TEXT NOT NULL,
-    result TEXT NOT NULL,      -- Verdict.to_dict() as JSON
-    db_gen INTEGER NOT NULL,   -- signatures generation the result was computed with
-    ts     REAL NOT NULL       -- when stored, for pruning
+CREATE TABLE IF NOT EXISTS gate_cache (
+    key     TEXT PRIMARY KEY,  -- file generation + gate generation, see gate_v2/cache.py
+    payload TEXT NOT NULL,     -- the decision as JSON, revalidated on every read
+    expires REAL NOT NULL,
+    ts      REAL NOT NULL      -- when stored, for pruning
 );
 CREATE TABLE IF NOT EXISTS events (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -113,7 +108,7 @@ SALVAGE: dict[str, str] = {
     "bad_hosts": "WHERE source='user'", "bad_urls": "WHERE source='user'", "bad_hashes": "WHERE source='user'",
 }
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 SCAN_CACHE_MAX_ROWS = 50_000
 SCAN_CACHE_MAX_AGE = 30 * 86400
 
@@ -213,11 +208,10 @@ class Database:
             return
         if version < 2:
             self._migrate_v2()
-        # v3: scan_cache gained file id and timestamp columns; it is only a
-        # cache, so it is recreated rather than altered.
+        # v4: Gate v2 decisions replaced scan_cache; old verdicts carry no
+        # coverage, so nothing in that table can be reused.
         with self.transaction():
             self._exec("DROP TABLE IF EXISTS scan_cache")
-            self._exec(SCHEMA[SCHEMA.index("CREATE TABLE IF NOT EXISTS scan_cache"):SCHEMA.index(");", SCHEMA.index("CREATE TABLE IF NOT EXISTS scan_cache")) + 2])
             self.set_meta("schema_version", str(SCHEMA_VERSION))
         if version < 2:
             try:
@@ -443,30 +437,25 @@ class Database:
 
     # -- scan cache --------------------------------------------------------
 
-    # Callers pass os.path.realpath() paths: "x.exe" from two different working
-    # directories must not share an entry. The cache only serves on-demand
-    # scans; real-time protection always re-reads changed files.
+    # The gate_v2.cache.CacheStore interface. What may be stored and reused is
+    # decided there; this is only storage. The cache serves on-demand scans;
+    # real-time protection always re-reads changed files.
 
-    def cached_result(self, path: str, size: int, mtime: float, ino: int) -> dict[str, Any] | None:
-        row = self._exec("SELECT * FROM scan_cache WHERE path=?", (path,)).fetchone()
-        if (not row or row["size"] != size or abs(row["mtime"] - mtime) > 1e-3 or row["ino"] != ino
-                or row["db_gen"] != self.generation()):
-            return None
-        return json.loads(row["result"])
+    def get(self, key: str) -> str | None:
+        row = self._exec("SELECT payload FROM gate_cache WHERE key=?", (key,)).fetchone()
+        return row["payload"] if row else None
 
-    def store_result(self, path: str, size: int, mtime: float, ino: int, result: dict[str, Any]) -> None:
+    def put(self, key: str, payload: str, expires_at: float) -> None:
         self._exec(
-            "INSERT INTO scan_cache(path,size,mtime,ino,sha256,label,result,db_gen,ts) VALUES(?,?,?,?,?,?,?,?,?) "
-            "ON CONFLICT(path) DO UPDATE SET size=excluded.size, mtime=excluded.mtime, ino=excluded.ino, "
-            "sha256=excluded.sha256, label=excluded.label, result=excluded.result, db_gen=excluded.db_gen, ts=excluded.ts",
-            (path, size, mtime, ino, result["sha256"], result["label"], json.dumps(result), self.generation(), time.time()),
-        )
+            "INSERT INTO gate_cache(key,payload,expires,ts) VALUES(?,?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET payload=excluded.payload, expires=excluded.expires, ts=excluded.ts",
+            (key, payload, expires_at, time.time()))
 
     def prune_cache(self, max_rows: int = SCAN_CACHE_MAX_ROWS, max_age: float = SCAN_CACHE_MAX_AGE) -> int:
-        """Drop old entries and keep the newest `max_rows`; Temp churn would otherwise grow it forever."""
-        n = self._exec_count("DELETE FROM scan_cache WHERE ts < ?", (time.time() - max_age,))
+        """Drop expired entries and keep the newest `max_rows`; Temp churn would otherwise grow it forever."""
+        n = self._exec_count("DELETE FROM gate_cache WHERE expires < ? OR ts < ?", (time.time(), time.time() - max_age))
         n += self._exec_count(
-            "DELETE FROM scan_cache WHERE path NOT IN (SELECT path FROM scan_cache ORDER BY ts DESC LIMIT ?)", (max_rows,))
+            "DELETE FROM gate_cache WHERE key NOT IN (SELECT key FROM gate_cache ORDER BY ts DESC LIMIT ?)", (max_rows,))
         return n
 
     # -- events ------------------------------------------------------------
