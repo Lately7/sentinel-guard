@@ -132,8 +132,8 @@ cần xử lý mới sáng lên (333 ms); tắt hết khi Windows tắt hiệu �
 | RT-023 | Tải về không gửi được tới agent vẫn đếm là đã quét | TB | GĐ 5 |
 | RT-024 | Quét bỏ sót (junction, đường dẫn dài, thiếu quyền) không ghi vào độ phủ | TB | GĐ 5 |
 | RT-025 | Popup nói "Không phát hiện vấn đề" khi chưa kiểm tra | TB | GĐ 5 |
-| RT-026 | Thời gian thực báo "bật" dù không theo dõi thư mục nào | TB | GĐ 5 |
-| RT-027 | Chỉ đọc một view registry của khoá Run | TB | GĐ 5 |
+| RT-026 | Thời gian thực báo "bật" dù không theo dõi thư mục nào | TB | ✅ |
+| RT-027 | Chỉ đọc một view registry của khoá Run | TB | ✅ |
 | RT-028 | Tên ClamAV `BC.Heuristics.*` bị coi là chắc chắn độc (ClamAV coi là "có thể không mong muốn") | TB | Gate v2 |
 
 Đã kiểm chứng trong code: RT-008…013, 019, 022, 023, 026. Các mục còn lại

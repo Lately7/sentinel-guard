@@ -143,20 +143,31 @@ RUN_KEYS = [
 ]
 
 
-def read_run_entries() -> dict[str, str]:
-    if os.name != "nt":
-        return {}
-    import winreg
+def read_run_entries(reg=None) -> dict[str, str]:
+    """Run/RunOnce values, keyed "HIVE\\key\\name".
 
+    HKLM\\Software is split by WOW64: 32-bit installers register under the
+    32-bit view (Wow6432Node), which a 64-bit process does not see by default,
+    so both views are read ("HKLM" and "HKLM32"). HKCU\\Software is shared.
+    `reg` is the winreg module, injectable for tests.
+    """
+    if reg is None:
+        if os.name != "nt":
+            return {}
+        import winreg as reg
+
+    views = (("HKCU", reg.HKEY_CURRENT_USER, 0),
+             ("HKLM", reg.HKEY_LOCAL_MACHINE, reg.KEY_WOW64_64KEY),
+             ("HKLM32", reg.HKEY_LOCAL_MACHINE, reg.KEY_WOW64_32KEY))
     out: dict[str, str] = {}
-    for hive_name, hive in (("HKCU", winreg.HKEY_CURRENT_USER), ("HKLM", winreg.HKEY_LOCAL_MACHINE)):
+    for hive_name, hive, view in views:
         for key in RUN_KEYS:
             try:
-                with winreg.OpenKey(hive, key) as k:
+                with reg.OpenKey(hive, key, 0, reg.KEY_READ | view) as k:
                     i = 0
                     while True:
                         try:
-                            name, value, _ = winreg.EnumValue(k, i)
+                            name, value, _ = reg.EnumValue(k, i)
                         except OSError:
                             break
                         out[f"{hive_name}\\{key}\\{name}"] = str(value)
@@ -249,6 +260,10 @@ class PersistenceMonitor:
             self._known = current
 
 
+class NothingToWatch(RuntimeError):
+    """None of the configured folders exists; real-time protection would watch nothing."""
+
+
 class RealtimeProtection:
     def __init__(self, db: Database, settings: Settings, scanner: Scanner,
                  on_result: Callable[[dict], None] | None = None) -> None:
@@ -258,6 +273,10 @@ class RealtimeProtection:
         self.running = False
 
     def start(self) -> None:
+        # Reporting "on" while no folder is watched would be a false sense of
+        # protection; the caller shows the error instead.
+        if not self.files.dirs:
+            raise NothingToWatch("không có thư mục nào để theo dõi (các thư mục đã cấu hình không tồn tại)")
         self.queue.start()
         self.files.start()
         self.persistence.start()

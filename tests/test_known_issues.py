@@ -34,16 +34,3 @@ def test_restore_creates_a_path_and_hash_exception_only(db, scanner, tmp_path):
     copy.write_bytes(restored.read_bytes())
     # Restoring one file is not "trust these bytes everywhere".
     assert scanner.scan_file(copy).label == "malicious"
-
-
-@pytest.mark.xfail(strict=True, reason="RT-026: real-time reports running with nothing watched")
-def test_realtime_with_no_watchable_folder_is_not_running(db, scanner, tmp_path):
-    from sentinel.watcher import RealtimeProtection
-
-    s = config.Settings(watch_dirs=[str(tmp_path / "does-not-exist")], use_defender=False)
-    rt = RealtimeProtection(db, s, scanner)
-    rt.start()
-    try:
-        assert not rt.running
-    finally:
-        rt.stop()
