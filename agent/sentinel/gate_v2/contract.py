@@ -12,7 +12,7 @@ import re
 import types
 from dataclasses import dataclass, fields, is_dataclass
 from enum import StrEnum
-from typing import Any, Literal, Protocol, get_args, get_origin, get_type_hints
+from typing import Any, Literal, Protocol, Union, get_args, get_origin, get_type_hints
 
 CONTRACT_VERSION = 2
 EVENT_VERSION = 1
@@ -78,7 +78,7 @@ def _encode(value: Any) -> Any:
 def _decode(hint: Any, value: Any) -> Any:
     origin = get_origin(hint)
     args = get_args(hint)
-    if origin in (types.UnionType, __import__("typing").Union):
+    if origin in (types.UnionType, Union):
         if value is None and type(None) in args:
             return None
         for candidate in args:

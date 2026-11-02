@@ -9,8 +9,10 @@ and 15 smart-scan and runtime scope reporting.
 
 from __future__ import annotations
 
+import os
 from dataclasses import fields, replace
 from enum import StrEnum
+from pathlib import Path
 
 import pytest
 
@@ -22,6 +24,12 @@ from sentinel.gate_v2.contract import (
 )
 from sentinel.gate_v2.coverage import CoverageLedger, contains_range, normalize_ranges
 from sentinel.gate_v2.policy import RequiredStages, classify_clamav_name, decide, should_auto_quarantine
+
+
+def test_sentinel_home_is_temporary_outside_repository() -> None:
+    home = Path(os.environ["SENTINEL_HOME"]).resolve()
+    repository = Path(__file__).resolve().parents[2]
+    assert not home.is_relative_to(repository)
 
 
 def identity() -> FileIdentity:
@@ -78,6 +86,8 @@ def test_verdict_cartesian_matrix(status: StageStatus, kind: str, required: bool
             expected = (VerdictCode.SUSPICIOUS, False, "PUA_DETECTION")
         elif status in (StageStatus.COMPLETED, StageStatus.PARTIAL) and kind == "weak":
             expected = (VerdictCode.SUSPICIOUS, False, "WEAK_DETECTION")
+        elif kind in ("weak", "pua", "conclusive"):
+            expected = (VerdictCode.UNKNOWN, False, "UNACCEPTED_DETECTION")
         else:
             expected = (VerdictCode.CLEAN, True, "COMPLETE_NO_DETECTION")
     elif status in (StageStatus.COMPLETED, StageStatus.PARTIAL):
@@ -104,6 +114,69 @@ def test_verdict_cartesian_matrix(status: StageStatus, kind: str, required: bool
     else:
         expected = (VerdictCode.UNKNOWN, False, "ENGINE_INCOMPLETE")
     assert (value.verdict, value.trusted_clean, value.reason_codes[0]) == expected
+
+
+@pytest.mark.parametrize("case", ["unverified", "bad_status", "unbound", "identity_mismatch", "disabled"])
+def test_unaccepted_detection_prevents_optional_trusted_clean(case: str) -> None:
+    item = result(kind="conclusive", engine="core")
+    companion: tuple[EngineResult, ...] = ()
+    disabled = frozenset()
+    if case == "unverified":
+        item = replace(item, evidence=(replace(item.evidence[0], strength=Strength.SUPPORTING, verified=False),))
+    elif case == "bad_status":
+        item = replace(item, status=StageStatus.UNVERIFIED)
+    elif case == "unbound":
+        item = replace(item, coverage=coverage(mode="fixed_partial"), evidence=(replace(item.evidence[0], ranges=(ByteRange(8, 9),)),))
+    elif case == "identity_mismatch":
+        companion = (result(engine="clamav", identity_value=replace(identity(), sha256="c" * 64)),)
+    else:
+        disabled = frozenset({"core"})
+    stages = RequiredStages(disabled, disabled)
+    value = decide((item, *companion), request(), "generation", stages=stages)
+    assert (value.verdict, value.trusted_clean, value.cacheable) == (VerdictCode.UNKNOWN, False, False)
+    assert value.accepted_evidence_ids == ()
+    assert value.reason_codes[-1] == "UNACCEPTED_DETECTION"
+    if case == "identity_mismatch":
+        assert value.reason_codes == ("CHANGED", "UNACCEPTED_DETECTION")
+
+
+def test_unverified_clamav_lead_notifies_without_trusted_clean() -> None:
+    item = result(StageStatus.UNVERIFIED, "conclusive")
+    value = decision((item,), required=False)
+    assert (value.verdict, value.trusted_clean, value.cacheable) == (VerdictCode.UNKNOWN, False, False)
+    assert value.reason_codes == ("UNACCEPTED_DETECTION",)
+    assert (action(value).action, action(value).reason_code) == (ActionCode.NOTIFY, "UNVERIFIED_CLAMD")
+    required_value = decision((item,), required=True)
+    assert required_value.reason_codes == ("UNVERIFIED_ENGINE", "UNACCEPTED_DETECTION")
+
+
+def test_accepted_detection_keeps_precedence_over_unaccepted_lead() -> None:
+    dropped = result(StageStatus.UNVERIFIED, "conclusive")
+    for kind, expected in (("conclusive", VerdictCode.MALICIOUS), ("weak", VerdictCode.SUSPICIOUS)):
+        accepted = result(kind=kind, engine="core")
+        value = decision((accepted, dropped), required=False)
+        assert value.verdict is expected
+        assert value.reason_codes[-1] == "UNACCEPTED_DETECTION"
+        assert value.accepted_evidence_ids == (f"core:{kind}",)
+        assert not value.cacheable
+
+
+@pytest.mark.parametrize("category,reason", [(Category.PUA, "PUA_DETECTION"), (Category.RISKWARE, "WEAK_DETECTION")])
+def test_conclusive_pua_and_riskware_are_suspicious(category: Category, reason: str) -> None:
+    item = result(kind="conclusive", engine="core")
+    item = replace(item, evidence=(replace(item.evidence[0], category=category),))
+    value = decision((item,))
+    assert (value.verdict, value.reason_codes, value.accepted_evidence_ids) == (
+        VerdictCode.SUSPICIOUS, (reason,), ("core:conclusive",)
+    )
+
+
+@pytest.mark.parametrize("category", [Category.STRUCTURE, Category.ORIGIN, Category.HEALTH])
+def test_conclusive_context_does_not_change_verdict(category: Category) -> None:
+    item = result(kind="conclusive", engine="core")
+    item = replace(item, evidence=(replace(item.evidence[0], category=category),))
+    value = decision((item,))
+    assert (value.verdict, value.trusted_clean) == (VerdictCode.CLEAN, True)
 
 
 def test_invariant_1_no_false_clean_on_missing_or_failed_required_stage() -> None:
@@ -151,6 +224,13 @@ def test_invariant_7_coverage_children_and_stage_debt() -> None:
     assert value.mode == "runtime_partial"
     assert value.object_reasons == ("ENCRYPTED_MEMBER", "UNSUPPORTED_METHOD")
     assert decision((result(cov=value),)).reason_codes == ("INCOMPLETE_COVERAGE",)
+
+
+def test_unlisted_parser_state_marks_enumeration_incomplete() -> None:
+    ledger = CoverageLedger(10, (ByteRange(0, 10),), certainty="verified")
+    ledger.parser("archive", "timeout")
+    assert not ledger.enumeration_complete
+    assert ledger.finish().mode == "runtime_partial"
 
 
 def test_invariant_8_bounded_reasons_and_explicit_limit() -> None:
@@ -325,3 +405,24 @@ def test_action_table_unknown_pua_and_conclusive() -> None:
     assert action(decision((result(kind="conclusive"),)), auto_quarantine=False).reason_code == "AUTO_DISABLED"
     with pytest.raises(ContractError, match="UNKNOWN_ACTION_POLICY"):
         action(decision((result(),)), "future-v9")
+
+
+@pytest.mark.parametrize("generation,current,expected", [
+    (None, None, (ActionCode.QUARANTINE, "AUTO_CONCLUSIVE")),
+    (7, 8, (ActionCode.NONE, "PROTECTION_STOPPED")),
+    (7, None, (ActionCode.NONE, "PROTECTION_STOPPED")),
+])
+def test_action_stop_barrier_applies_only_to_bound_generation(
+    generation: int | None, current: int | None, expected: tuple[ActionCode, str],
+) -> None:
+    value = decision((result(kind="conclusive", engine="core"),))
+    selected = action(value, protection_generation=generation, current_protection_generation=current)
+    assert (selected.action, selected.reason_code) == expected
+
+
+def test_final_duration_spans_first_start_to_last_end() -> None:
+    first = replace(result(engine="core"), started_monotonic_ns=1_000_000_000, duration_ms=300)
+    second = replace(result(engine="clamav"), started_monotonic_ns=1_500_000_000, duration_ms=50)
+    value = decision((first, second))
+    assert value.duration_ms == 550
+    assert decide((), request(), "generation", stages=RequiredStages(frozenset())).duration_ms == 0

@@ -90,27 +90,32 @@ def decide(
     weak: list[tuple[Category, Strength]] = []
     coverage_name = False
     unbound_evidence = False
+    unaccepted_detection = False
     for result in results:
-        if result.engine_id in stages.disabled_by_policy:
-            continue
         for evidence in result.evidence:
             category, strength = _effective_evidence(result, evidence)
             if strength is Strength.COVERAGE:
-                if result.engine_id in stages.required:
+                if result.engine_id in stages.required and result.engine_id not in stages.disabled_by_policy:
                     coverage_name = True
                 continue
-            if not evidence.verified or result.status is StageStatus.UNVERIFIED:
+            # Structure, origin, and health evidence provide context, even at conclusive strength.
+            if category not in (Category.MALWARE, Category.PUA, Category.RISKWARE) or strength not in (
+                Strength.CONCLUSIVE, Strength.STRONG, Strength.SUPPORTING,
+            ):
                 continue
-            if result.status in _BAD_STATUSES or identity_mismatch:
+            if (result.engine_id in stages.disabled_by_policy or not evidence.verified or
+                result.status in _BAD_STATUSES or identity_mismatch):
+                unaccepted_detection = True
                 continue
             if not evidence.ranges or any(not contains_range(result.coverage.inspected, span) for span in evidence.ranges):
                 if result.engine_id in stages.required:
                     unbound_evidence = True
+                unaccepted_detection = True
                 continue
             if strength is Strength.CONCLUSIVE and category is Category.MALWARE:
                 accepted.append(evidence.evidence_id)
                 conclusive.append(_reason_for_hit(result))
-            elif strength in (Strength.STRONG, Strength.SUPPORTING):
+            else:
                 accepted.append(evidence.evidence_id)
                 weak.append((category, strength))
 
@@ -147,16 +152,22 @@ def decide(
         elif result.coverage.mode == "fixed_partial":
             reduced = True
         if result.coverage.certainty != "verified" and status is StageStatus.COMPLETED:
+            # Milestone 4 must resolve verified-daemon ClamAV OK with declared outer-byte coverage.
             incomplete.append("UNCERTAIN_COVERAGE")
     if coverage_name:
         incomplete.append("INCOMPLETE_COVERAGE")
+    if unaccepted_detection:
+        incomplete.append("UNACCEPTED_DETECTION")
 
     if conclusive:
         verdict = VerdictCode.MALICIOUS
         reasons = tuple(dict.fromkeys(conclusive))
+        if unaccepted_detection:
+            reasons += ("UNACCEPTED_DETECTION",)
     elif weak:
         verdict = VerdictCode.SUSPICIOUS
-        reasons = ("PUA_DETECTION",) if any(category is Category.PUA for category, _ in weak) else ("WEAK_DETECTION",)
+        lead = "PUA_DETECTION" if any(category is Category.PUA for category, _ in weak) else "WEAK_DETECTION"
+        reasons = (lead, "UNACCEPTED_DETECTION") if unaccepted_detection else (lead,)
     elif incomplete:
         verdict = VerdictCode.UNKNOWN
         reasons = tuple(dict.fromkeys(incomplete))
@@ -179,7 +190,8 @@ def decide(
         CONTRACT_VERSION, request.scan_id, request.file_id, identity,
         verdict, trusted, "reduced" if reduced else "full", reasons,
         tuple(dict.fromkeys(accepted)), results, cacheable, gate_generation,
-        max((item.started_monotonic_ns + item.duration_ms * 1_000_000 for item in results), default=0) // 1_000_000,
+        ((max(item.started_monotonic_ns + item.duration_ms * 1_000_000 for item in results) -
+          min(item.started_monotonic_ns for item in results)) // 1_000_000) if results else 0,
     )
 
 
@@ -207,7 +219,7 @@ def should_auto_quarantine(
     has_hit = decision.verdict is VerdictCode.MALICIOUS and bool(decision.accepted_evidence_ids)
     wants_action = has_hit or bool(legacy_ids)
     evidence_ids = tuple(dict.fromkeys((*decision.accepted_evidence_ids, *legacy_ids)))
-    if protection_generation != current_protection_generation or protection_generation is None:
+    if protection_generation is not None and protection_generation != current_protection_generation:
         action, reason = ActionCode.NONE, "PROTECTION_STOPPED"
     elif wants_action and not identity_reverified:
         action, reason = ActionCode.NONE, "CHANGED_BEFORE_ACTION"

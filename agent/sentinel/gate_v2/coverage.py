@@ -99,7 +99,7 @@ class CoverageLedger:
         if max(len(parser_id), len(state)) > 128:
             raise ContractError("INVALID_PARSER_STATE")
         self.parser_states.append((parser_id, state))
-        if state in ("opaque", "partial", "error", "unavailable"):
+        if state != "complete":
             self.enumeration_complete = False
 
     def finish(self) -> Coverage:
