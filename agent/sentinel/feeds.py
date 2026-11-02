@@ -1,19 +1,22 @@
-"""Download free public threat-intelligence feeds into the local DB.
+"""Download free public threat-intelligence feeds into a new indicator snapshot.
 
 Each feed is independent: a network error or format change in one is recorded
-in the `feeds` table and the rest still update.
+in the `feeds` table and that feed keeps its previous entries.
 """
 
 from __future__ import annotations
 
 import logging
 import re
+import time
 import urllib.request
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 from . import __version__, urlintel
 from .db import Database
+from .indicators import SnapshotBuilder, publish
+from .singleton import FEEDS_MUTEX, NamedLock
 
 log = logging.getLogger(__name__)
 
@@ -80,27 +83,39 @@ FEEDS: list[Feed] = [
 ]
 
 TRANCO_URL = "https://tranco-list.eu/top-1m.csv.zip"
-POPULAR_TOP = 10_000
+# Benchmark (reports/web-eval.json): with the top 10k protected, 0.2% of
+# Tranco ranks 10k-20k were still host-blocked by aggregate feeds.
+POPULAR_TOP = 100_000
+MAX_TRANCO_CSV_BYTES = 64 * 1024 * 1024
 
 
-def update_popular(db: Database, fetch_bytes: Callable[[str], bytes] | None = None) -> int:
-    """Load Tranco's most popular registrable domains: never blocked at host level."""
+def parse_tranco(raw: bytes, top: int = POPULAR_TOP) -> list[str]:
     import io
     import zipfile
 
-    raw = (fetch_bytes or _fetch_bytes)(TRANCO_URL)
     with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-        text = zf.read(zf.namelist()[0]).decode("utf-8", errors="replace")
+        csvs = [i for i in zf.infolist() if i.filename.lower().endswith(".csv")]
+        if not csvs:
+            raise ValueError("Tranco archive has no CSV")
+        info = csvs[0]
+        if info.file_size > MAX_TRANCO_CSV_BYTES:
+            raise ValueError("Tranco CSV larger than limit")
+        with zf.open(info) as fh:
+            # Bounded read: a lying header can't make us decompress more than the limit.
+            text = fh.read(MAX_TRANCO_CSV_BYTES + 1)
+    if len(text) > MAX_TRANCO_CSV_BYTES:
+        raise ValueError("Tranco CSV larger than limit")
     domains = []
-    for line in text.splitlines()[:POPULAR_TOP]:
+    for line in text.decode("utf-8", errors="replace").splitlines():
         _rank, _, dom = line.partition(",")
         dom = dom.strip().lower()
         if dom:
             domains.append(dom)
-    if len(domains) < POPULAR_TOP // 2:
+            if len(domains) >= top:
+                break
+    if len(domains) < top // 2:
         raise ValueError("Tranco list looks truncated")
-    db.set_popular(domains)
-    return len(domains)
+    return domains
 
 
 def _fetch_bytes(url: str, timeout: float = 120.0) -> bytes:
@@ -116,54 +131,107 @@ def fetch(url: str) -> str:
     return _fetch_bytes(url).decode("utf-8", errors="replace")
 
 
-def apply_feed(db: Database, feed: Feed, text: str) -> int:
+_TABLE = {"bad_hosts": "hosts", "bad_urls": "urls", "bad_hashes": "hashes"}
+
+
+def apply_feed(builder: SnapshotBuilder, feed: Feed, text: str, popular: frozenset[str]) -> int:
+    """Parse one feed into the snapshot being built. Raises if nothing usable was parsed."""
     items = list(dict.fromkeys(feed.parse(text)))
     if feed.table == "bad_hosts":
         # Feeds occasionally list a hugely popular domain by mistake; blocking
         # it wholesale would break the web, so such entries are dropped.
-        popular = db.popular_domains()
         items = [h for h in items if urlintel.registrable_domain(h) not in popular]
     if not items:
         # An empty parse usually means the format changed or an error page was
-        # served; keeping yesterday's data is safer than wiping it.
+        # served; the caller keeps the previous data instead.
         raise ValueError("no indicators parsed")
-    db.replace_source(feed.table, feed.name)
     if feed.table == "bad_hashes":
-        db.add_hashes((h, feed.name, None) for h in items)
+        builder.add_hashes((h, feed.name, None) for h in items)
     elif feed.table == "bad_hosts":
-        db.add_hosts((h, feed.kind, feed.name) for h in items)
+        builder.add_hosts((h, feed.kind, feed.name) for h in items)
     else:
-        db.add_urls((u, feed.kind, feed.name) for u in items)
+        builder.add_urls((u, feed.kind, feed.name) for u in items)
         # Phishing URLs on dedicated hosts also block the host, so variants
         # of the same lure page are caught; shared platforms stay URL-only.
         if feed.kind == "phishing":
-            db.replace_source("bad_hosts", feed.name)
-            popular = db.popular_domains()
             hosts = {h for u in items if (h := urlintel.host_of(u)) and not urlintel.is_shared_platform(h)
                      and urlintel.registrable_domain(h) not in popular}
-            db.add_hosts((h, feed.kind, feed.name) for h in hosts)
+            builder.add_hosts((h, feed.kind, feed.name) for h in hosts)
     return len(items)
 
 
-def update_all(db: Database, feeds: list[Feed] | None = None, fetcher: Callable[[str], str] = fetch) -> dict[str, str]:
+def _carry_over(db: Database, builder: SnapshotBuilder, feed: Feed) -> int:
+    table = _TABLE[feed.table]
+    rows = db.indicators.rows_for_source(table, feed.name)
+    if table == "hosts":
+        builder.add_hosts(rows)
+    elif table == "urls":
+        builder.add_urls(rows)
+        builder.add_hosts(db.indicators.rows_for_source("hosts", feed.name))
+    else:
+        builder.add_hashes(rows)
+    return len(rows)
+
+
+def last_update(db: Database) -> float:
+    """Time of the last successful update of any feed (0 if never)."""
+    return max((f["updated"] or 0 for f in db.feed_status() if str(f["status"]).startswith("ok")), default=0.0)
+
+
+def is_due(db: Database, interval_hours: float, now: float | None = None) -> bool:
+    return (now if now is not None else time.time()) - last_update(db) > interval_hours * 3600
+
+
+def update_all(db: Database, feeds: list[Feed] | None = None, fetcher: Callable[[str], str] = fetch,
+               fetch_bytes: Callable[[str], bytes] | None = None) -> dict[str, str]:
+    """Build and publish a new snapshot. One process at a time: a second caller gets {"skipped": ...}."""
+    lock = NamedLock(FEEDS_MUTEX)
+    if not lock.acquire():
+        return {"skipped": "another feed update is already running"}
+    try:
+        return _update_all(db, FEEDS if feeds is None else feeds, fetcher, fetch_bytes or _fetch_bytes,
+                           with_tranco=feeds is None)
+    finally:
+        lock.release()
+
+
+def _update_all(db: Database, feeds: list[Feed], fetcher: Callable[[str], str],
+                fetch_bytes: Callable[[str], bytes], with_tranco: bool) -> dict[str, str]:
     results: dict[str, str] = {}
-    if feeds is None:
-        try:
-            n = update_popular(db)
-            db.set_feed("tranco_top", n, "ok")
-            results["tranco_top"] = f"ok ({n})"
-        except Exception as e:
-            db.set_feed("tranco_top", None, f"error: {e}")
-            results["tranco_top"] = f"error: {e}"
-    for feed in feeds or FEEDS:
-        try:
-            n = apply_feed(db, feed, fetcher(feed.url))
-            db.set_feed(feed.name, n, "ok")
-            results[feed.name] = f"ok ({n})"
-        except Exception as e:  # one broken feed must not stop the others
-            log.warning("feed %s failed: %s", feed.name, e)
-            db.set_feed(feed.name, None, f"error: {e}")
-            results[feed.name] = f"error: {e}"
-    db.bump_generation()
-    db.set_meta("blocklist_version", str(db.generation()))
+    statuses: list[tuple[str, int | None, str]] = []
+    builder = SnapshotBuilder()
+    try:
+        popular: frozenset[str]
+        if with_tranco:
+            try:
+                domains = parse_tranco(fetch_bytes(TRANCO_URL))
+                popular = frozenset(domains)
+                statuses.append(("tranco_top", len(domains), "ok"))
+                results["tranco_top"] = f"ok ({len(domains)})"
+            except Exception as e:
+                popular = db.indicators.popular()
+                statuses.append(("tranco_top", None, f"error: {e}"))
+                results["tranco_top"] = f"error: {e} (kept previous list)"
+        else:
+            popular = db.indicators.popular()
+        popular = popular | db.popular_domains()
+        builder.set_popular(popular)
+
+        for feed in feeds:
+            try:
+                n = apply_feed(builder, feed, fetcher(feed.url), popular)
+                statuses.append((feed.name, n, "ok"))
+                results[feed.name] = f"ok ({n})"
+            except Exception as e:  # one broken feed must not stop the others
+                log.warning("feed %s failed: %s", feed.name, e)
+                kept = _carry_over(db, builder, feed)
+                statuses.append((feed.name, None, f"error: {e}"))
+                results[feed.name] = f"error: {e} (kept {kept} previous entries)"
+        path = builder.finish()
+    except BaseException:
+        builder.discard()
+        raise
+    publish(db, path)
+    for name, n, status in statuses:
+        db.set_feed(name, n, status)
     return results

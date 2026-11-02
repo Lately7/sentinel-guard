@@ -44,9 +44,45 @@ def user_rules_dir() -> Path:
     return p
 
 
+_KNOWN_FOLDERS = {
+    # FOLDERID GUIDs; resolving them follows OneDrive Known Folder Move and
+    # other redirection, unlike Path.home() / "Desktop".
+    "Downloads": "{374DE290-123F-4565-9164-39C4925E467B}",
+    "Desktop": "{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}",
+    "Documents": "{FDD39AD0-238F-46AF-ADB4-6C85480369C7}",
+}
+
+
+def known_folder(name: str) -> Path:
+    fallback = Path.home() / name
+    if os.name != "nt":
+        return fallback
+    try:
+        import ctypes
+        import uuid
+        from ctypes import wintypes
+
+        class GUID(ctypes.Structure):
+            _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD), ("Data3", wintypes.WORD),
+                        ("Data4", ctypes.c_ubyte * 8)]
+
+        u = uuid.UUID(_KNOWN_FOLDERS[name])
+        g = GUID(u.time_low, u.time_mid, u.time_hi_version, (ctypes.c_ubyte * 8)(*u.bytes[8:]))
+        out = ctypes.c_wchar_p()
+        shell32 = ctypes.WinDLL("shell32")
+        ole32 = ctypes.WinDLL("ole32")
+        if shell32.SHGetKnownFolderPath(ctypes.byref(g), 0, None, ctypes.byref(out)) != 0:
+            return fallback
+        try:
+            return Path(out.value) if out.value else fallback
+        finally:
+            ole32.CoTaskMemFree(out)
+    except (OSError, AttributeError, KeyError, ValueError):
+        return fallback
+
+
 def _default_watch_dirs() -> list[str]:
-    home = Path.home()
-    dirs = [home / "Downloads", home / "Desktop", home / "Documents"]
+    dirs = [known_folder("Downloads"), known_folder("Desktop"), known_folder("Documents")]
     appdata = os.environ.get("APPDATA")
     if appdata:
         dirs.append(Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup")
@@ -75,11 +111,21 @@ class Settings:
             raw = json.loads(cls.path().read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return cls()
-        known = {k: v for k, v in raw.items() if k in cls.__dataclass_fields__}
-        try:
-            return cls(**known)
-        except TypeError:
-            return cls()
+        s = cls()
+        if not isinstance(raw, dict):
+            return s
+        # Each field is type-checked on its own: one bad value falls back to
+        # its default instead of crashing the agent at start-up.
+        for name in ("realtime", "auto_quarantine", "use_defender", "web_block_suspicious"):
+            if isinstance(raw.get(name), bool):
+                setattr(s, name, raw[name])
+        dirs = raw.get("watch_dirs")
+        if isinstance(dirs, list) and all(isinstance(d, str) and d for d in dirs):
+            s.watch_dirs = dirs
+        hours = raw.get("feed_interval_hours")
+        if isinstance(hours, (int, float)) and not isinstance(hours, bool) and 0.25 <= hours <= 24 * 30:
+            s.feed_interval_hours = float(hours)
+        return s
 
     def save(self) -> None:
         self.path().write_text(json.dumps(asdict(self), indent=2, ensure_ascii=False), encoding="utf-8")

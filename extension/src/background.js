@@ -7,26 +7,39 @@ const NOTE_AT = 40; // heuristic score shown in the popup / in-page banner
 const SYNC_MINUTES = 360;
 const BLOCKED_PAGE = chrome.runtime.getURL("src/blocked.html");
 
-const DEFAULTS = { enabled: true, blocklistVersion: "", blocklistSize: 0, allowHosts: [], stats: { blocked: 0, warned: 0, downloads: 0 } };
+const DEFAULTS = { enabled: true, blocklistVersion: "", allowVersion: "", blocklistSize: 0, allowHosts: [], stats: { blocked: 0, warned: 0, downloads: 0 } };
 
 async function getState() {
   const s = await chrome.storage.local.get(DEFAULTS);
   return { ...DEFAULTS, ...s };
 }
 
-async function bumpStat(key) {
-  const s = await getState();
-  s.stats[key] = (s.stats[key] || 0) + 1;
-  await chrome.storage.local.set({ stats: s.stats });
+// Read-modify-write of counters is serialised through one promise chain;
+// concurrent blocked requests would otherwise overwrite each other's increments.
+let statsChain = Promise.resolve();
+function bumpStat(key) {
+  statsChain = statsChain.then(async () => {
+    const { stats } = await getState();
+    stats[key] = (stats[key] || 0) + 1;
+    await chrome.storage.local.set({ stats });
+  }).catch(() => {});
+  return statsChain;
 }
 
-// Per-tab context survives service-worker restarts via storage.session.
+// Latest navigation per tab, kept in memory synchronously so a network-rule
+// redirect that happens before any await still finds its context.
+const navs = new Map(); // tabId -> { url, seq }
+let navSeq = 0;
+
 async function setTabInfo(tabId, info) {
   await chrome.storage.session.set({ ["tab:" + tabId]: { ...info, ts: Date.now() } });
 }
 async function getTabInfo(tabId) {
+  const mem = navs.get(tabId);
   const k = "tab:" + tabId;
-  return (await chrome.storage.session.get(k))[k] || null;
+  const stored = (await chrome.storage.session.get(k))[k] || null;
+  if (mem && (!stored || stored.url !== mem.url)) return { url: mem.url, pending: true };
+  return stored;
 }
 
 function hostOf(url) {
@@ -48,16 +61,35 @@ function report(action, url, reason) {
 
 // ---------------------------------------------------------------- blocklist
 
-async function syncBlocklist(force = false) {
+let syncing = null;
+function syncBlocklist(force = false) {
+  // One sync at a time; alarms, start-up and the popup can all ask at once.
+  if (!syncing) syncing = doSync(force).finally(() => (syncing = null));
+  return syncing;
+}
+
+async function doSync(force) {
+  const state = await getState();
+  if (!state.enabled) return { ok: false, error: "protection is off" };
   let hello;
   try {
     hello = await native.request("hello");
   } catch {
     return { ok: false, error: "agent not connected" };
   }
-  const state = await getState();
-  if (!force && hello.blocklist_version === state.blocklistVersion) return { ok: true, unchanged: true };
-
+  let allowHosts = state.allowHosts;
+  if (force || hello.allow_version !== state.allowVersion) {
+    // The agent's list is authoritative: a site un-trusted in the dashboard
+    // must lose its exemption here too.
+    const res = await native.request("get_allowlist");
+    allowHosts = res.hosts.filter((h) => typeof h === "string");
+    await chrome.storage.local.set({ allowHosts, allowVersion: res.allow_version });
+  }
+  const blocklistChanged = force || hello.blocklist_version !== state.blocklistVersion;
+  if (!blocklistChanged) {
+    await refreshAllowRules();
+    return { ok: true, unchanged: true };
+  }
   const hosts = [];
   let offset = 0;
   for (;;) {
@@ -66,7 +98,8 @@ async function syncBlocklist(force = false) {
     offset += page.hosts.length;
     if (!page.hosts.length || offset >= page.total) break;
   }
-  const rules = [...buildBlockRules(hosts), ...buildAllowRules(state.allowHosts)];
+  if (!(await getState()).enabled) return { ok: false, error: "protection is off" }; // switched off mid-sync
+  const rules = [...buildBlockRules(hosts), ...buildAllowRules(allowHosts)];
   const existing = await chrome.declarativeNetRequest.getDynamicRules();
   await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: existing.map((r) => r.id), addRules: rules });
   await chrome.storage.local.set({ blocklistVersion: hello.blocklist_version, blocklistSize: hosts.length });
@@ -74,7 +107,8 @@ async function syncBlocklist(force = false) {
 }
 
 async function refreshAllowRules() {
-  const { allowHosts } = await getState();
+  const { allowHosts, enabled } = await getState();
+  if (!enabled) return;
   const existing = await chrome.declarativeNetRequest.getDynamicRules();
   await chrome.declarativeNetRequest.updateDynamicRules({
     removeRuleIds: existing.filter((r) => r.id >= ALLOW_BASE_ID).map((r) => r.id),
@@ -84,8 +118,6 @@ async function refreshAllowRules() {
 
 async function setEnabled(enabled) {
   await chrome.storage.local.set({ enabled });
-  // Disabling keeps the rules but turns off matching by removing them; the next
-  // sync (forced) rebuilds them when protection is switched back on.
   if (!enabled) {
     const existing = await chrome.declarativeNetRequest.getDynamicRules();
     await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: existing.map((r) => r.id) });
@@ -104,13 +136,14 @@ function warnUrl(params) {
 
 chrome.webNavigation.onBeforeNavigate.addListener(async (d) => {
   if (d.frameId !== 0 || !/^https?:/i.test(d.url)) return;
+  const seq = ++navSeq;
+  navs.set(d.tabId, { url: d.url, seq }); // before any await (see navs)
+  const current = () => navs.get(d.tabId)?.seq === seq;
+
   const { enabled } = await getState();
-  if (!enabled) return;
-  // Remember the target first: if a blocklist rule redirects this request,
-  // the warning page asks us what was blocked.
+  if (!enabled || !current()) return;
   await setTabInfo(d.tabId, { url: d.url, pending: true });
-  const host = hostOf(d.url);
-  if (await isAllowed(host)) return;
+  if (await isAllowed(hostOf(d.url))) return;
 
   const h = scoreUrl(d.url);
   let rep = null;
@@ -119,6 +152,8 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (d) => {
   } catch {
     /* agent offline: heuristics only */
   }
+  // The user may have navigated elsewhere while we waited: never apply a stale verdict.
+  if (!current()) return;
   await setTabInfo(d.tabId, { url: d.url, heuristic: h, reputation: rep });
 
   if (rep && rep.verdict === "malicious") {
@@ -126,7 +161,7 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (d) => {
     chrome.tabs.update(d.tabId, { url: warnUrl({ k: kind, u: d.url, src: rep.source || "" }) });
     bumpStat("blocked");
     report("blocked", d.url, `${KIND_LABELS[kind]} (${rep.source})`);
-  } else if (h.score >= WARN_AT) {
+  } else if (h.score >= WARN_AT && rep?.verdict !== "allowed") {
     chrome.tabs.update(d.tabId, { url: warnUrl({ k: "h", u: d.url, s: String(h.score), r: h.reasons.map((r) => r.detail).join(" · ") }) });
     bumpStat("warned");
     report("warned", d.url, h.reasons.map((r) => r.id).join(","));
@@ -137,7 +172,7 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (d) => {
 if (chrome.declarativeNetRequest.onRuleMatchedDebug) {
   // Available for unpacked installs: count blocks of sub-resources too.
   chrome.declarativeNetRequest.onRuleMatchedDebug.addListener((info) => {
-    if (info.request.type !== "main_frame") bumpStat("blocked");
+    if (info.request.type !== "main_frame" && info.rule.ruleId < ALLOW_BASE_ID) bumpStat("blocked");
   });
 }
 
@@ -155,6 +190,8 @@ chrome.downloads.onCreated.addListener(async (item) => {
     return;
   }
   if (rep && rep.verdict === "malicious") {
+    // May lose the race against a small download; the completed-file scan
+    // below then quarantines it because of the same URL verdict.
     chrome.downloads.cancel(item.id).catch(() => {});
     notify("Đã chặn tải xuống nguy hiểm", `${hostOf(url)} — ${rep.kind || "độc hại"} (${rep.source})`);
     report("download_blocked", url, rep.source);
@@ -193,15 +230,21 @@ function notify(title, message) {
 const VALID = {
   blocked_context: () => true,
   proceed: (m) => typeof m.url === "string" && m.url.length < 8000,
-  page_signals: (m) => Array.isArray(m.signals) && m.signals.length <= 20 && m.signals.every((s) => typeof s?.id === "string" && typeof s?.score === "number"),
+  page_signals: (m) => Array.isArray(m.signals) && m.signals.length <= 20 && m.signals.every((s) => typeof s?.id === "string" && typeof s?.score === "number" && typeof s?.detail === "string"),
   popup_state: () => true,
   set_enabled: (m) => typeof m.enabled === "boolean",
   sync_now: () => true,
   trust_site: (m) => typeof m.host === "string" && /^[a-z0-9.-]{1,253}$/.test(m.host),
 };
 
+// Messages that only our own extension pages (popup, warning page) may send;
+// content scripts run inside arbitrary websites.
+const EXTENSION_PAGE_ONLY = new Set(["blocked_context", "proceed", "popup_state", "set_enabled", "sync_now", "trust_site"]);
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (sender.id !== chrome.runtime.id || !msg || typeof msg.type !== "string" || !VALID[msg.type]?.(msg)) {
+  const fromExtensionPage = typeof sender.url === "string" && sender.url.startsWith(chrome.runtime.getURL(""));
+  if (sender.id !== chrome.runtime.id || !msg || typeof msg.type !== "string" || !VALID[msg.type]?.(msg)
+      || (EXTENSION_PAGE_ONLY.has(msg.type) && !fromExtensionPage)) {
     sendResponse({ ok: false, error: "invalid message" });
     return false;
   }
@@ -215,6 +258,13 @@ async function handle(msg, sender) {
     case "blocked_context":
       return { ok: true, info: tabId != null ? await getTabInfo(tabId) : null };
     case "proceed": {
+      // Only the top-level warning page, and only for the URL this tab was
+      // actually stopped on: a site framing blocked.html can't trick a click
+      // into trusting a host of its choice.
+      if (tabId == null || sender.frameId !== 0 || !sender.url.startsWith(BLOCKED_PAGE)) return { ok: false };
+      const info = await getTabInfo(tabId);
+      const fromQuery = new URL(sender.url).searchParams.get("u");
+      if (msg.url !== info?.url && msg.url !== fromQuery) return { ok: false };
       const host = hostOf(msg.url);
       if (!host) return { ok: false };
       // Trust only the exact host the user chose to open, not its whole domain.
@@ -226,17 +276,18 @@ async function handle(msg, sender) {
       await trust(msg.host);
       return { ok: true };
     case "page_signals": {
-      // Only content scripts in a tab may report; pages are never trusted with the score.
-      if (tabId == null || !sender.url) return { ok: false };
+      if (tabId == null || !sender.url || sender.frameId !== 0) return { ok: false };
+      const { enabled } = await getState();
+      if (!enabled || (await isAllowed(hostOf(sender.url)))) return { ok: true, warn: false };
       const info = (await getTabInfo(tabId)) || {};
       const h = scoreUrl(sender.url);
       const pageScore = msg.signals.reduce((s, x) => s + Math.max(0, Math.min(40, x.score)), 0);
       const total = Math.min(100, h.score + pageScore);
-      await setTabInfo(tabId, { ...info, url: sender.url, heuristic: h, page: msg.signals, total });
+      await setTabInfo(tabId, { ...info, url: sender.url, heuristic: h, page: msg.signals.map((s) => ({ id: s.id.slice(0, 64), score: s.score, detail: s.detail.slice(0, 300) })), total });
       updateBadge(tabId);
-      if (total >= NOTE_AT && !(await isAllowed(hostOf(sender.url)))) {
+      if (total >= NOTE_AT) {
         report("page_threat", sender.url, msg.signals.map((s) => s.id).join(","));
-        return { ok: true, warn: true, score: total, reasons: [...h.reasons.map((r) => r.detail), ...msg.signals.map((s) => s.detail)] };
+        return { ok: true, warn: true, score: total, reasons: [...h.reasons.map((r) => r.detail), ...msg.signals.map((s) => s.detail.slice(0, 300))] };
       }
       return { ok: true, warn: false };
     }
@@ -267,7 +318,15 @@ async function trust(host) {
     await chrome.storage.local.set({ allowHosts: state.allowHosts });
   }
   await refreshAllowRules();
-  native.request("allow_host", { host }).catch(() => {});
+  try {
+    await native.request("allow_host", { host });
+    // Our own change: remember the agent's new version so the next sync
+    // doesn't treat it as a dashboard edit.
+    const hello = await native.request("hello", {}, 3000);
+    await chrome.storage.local.set({ allowVersion: hello.allow_version });
+  } catch {
+    /* agent offline: kept locally, merged on next sync */
+  }
 }
 
 // --------------------------------------------------------------------- badge
@@ -279,10 +338,8 @@ async function updateBadge(tabId) {
     chrome.action.setBadgeBackgroundColor({ color: "#888" });
     return;
   }
-  if (tabId == null) {
-    chrome.action.setBadgeText({ text: "" });
-    return;
-  }
+  chrome.action.setBadgeText({ text: "" });
+  if (tabId == null) return;
   const info = await getTabInfo(tabId);
   const score = info?.total ?? info?.heuristic?.score ?? 0;
   const bad = info?.reputation?.verdict === "malicious";
@@ -291,7 +348,10 @@ async function updateBadge(tabId) {
   chrome.action.setBadgeBackgroundColor({ tabId, color: bad || score >= WARN_AT ? "#c62828" : "#b7791f" });
 }
 
-chrome.tabs.onRemoved.addListener((tabId) => chrome.storage.session.remove("tab:" + tabId));
+chrome.tabs.onRemoved.addListener((tabId) => {
+  navs.delete(tabId);
+  chrome.storage.session.remove("tab:" + tabId);
+});
 
 // ------------------------------------------------------------------ schedule
 

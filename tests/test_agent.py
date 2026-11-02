@@ -90,17 +90,25 @@ def test_parse_hosts_skips_shared_platforms_and_junk():
     assert hosts == ["bad-one.example", "bad-two.example"]
 
 
+def _run(db, feeds_list, texts, fail=()):
+    def fetcher(url):
+        if url in fail:
+            raise OSError("network down")
+        return texts[url]
+    return feeds.update_all(db, feeds_list, fetcher=fetcher)
+
+
 def test_popular_domains_are_never_host_blocked(db):
     db.set_popular(["wikipedia.org", "example-popular.com"])
-    feed = feeds.Feed("t", "u", "bad_hosts", "phishing", feeds.parse_hosts)
-    feeds.apply_feed(db, feed, "sub.example-popular.com\nreal-bad.example\n")
+    f = feeds.Feed("t", "u", "bad_hosts", "phishing", feeds.parse_hosts)
+    _run(db, [f], {"u": "sub.example-popular.com\nreal-bad.example\n"})
     assert db.host_info("sub.example-popular.com") is None
     assert db.host_info("real-bad.example") is not None
 
 
 def test_phishing_url_feed_also_blocks_dedicated_hosts(db):
-    feed = feeds.Feed("op", "u", "bad_urls", "phishing", feeds.parse_urls)
-    feeds.apply_feed(db, feed, "https://paypa1-login.example/signin\nhttps://sites.google.com/view/lure\n")
+    f = feeds.Feed("op", "u", "bad_urls", "phishing", feeds.parse_urls)
+    _run(db, [f], {"u": "https://paypa1-login.example/signin\nhttps://sites.google.com/view/lure\n"})
     assert db.host_info("paypa1-login.example") is not None
     assert db.host_info("sites.google.com") is None
     assert db.url_info("https://sites.google.com/view/lure") is not None
@@ -109,24 +117,48 @@ def test_phishing_url_feed_also_blocks_dedicated_hosts(db):
 def test_feed_failure_is_isolated_and_keeps_old_data(db):
     good = feeds.Feed("good", "u-good", "bad_hosts", "malware", feeds.parse_hosts)
     bad = feeds.Feed("bad", "u-bad", "bad_hosts", "malware", feeds.parse_hosts)
-    feeds.update_all(db, [good, bad], fetcher=lambda u: "kept.example\n" if u == "u-good" else "kept-bad.example\n")
-
-    def fetcher(url):
-        if url == "u-bad":
-            raise OSError("network down")
-        return "<html>error page</html>"  # parses to nothing
-
-    res = feeds.update_all(db, [good, bad], fetcher=fetcher)
-    assert res["bad"].startswith("error") and res["good"].startswith("error")
-    assert db.host_info("kept.example") is not None  # empty parse must not wipe a feed
+    urls = feeds.Feed("op", "u-urls", "bad_urls", "phishing", feeds.parse_urls)
+    _run(db, [good, bad, urls], {"u-good": "kept.example\n", "u-bad": "kept-bad.example\n",
+                                 "u-urls": "https://lure.example/x\n"})
+    # Next run: one feed is offline, one serves an error page, one parses nothing.
+    res = _run(db, [good, bad, urls], {"u-good": "<html>error page</html>", "u-urls": ""}, fail={"u-bad"})
+    assert all(v.startswith("error") for v in res.values())
+    assert db.host_info("kept.example") is not None
     assert db.host_info("kept-bad.example") is not None
+    assert db.url_info("https://lure.example/x") is not None
+    assert db.host_info("lure.example") is not None
+    assert {f["name"]: f["status"][:5] for f in db.feed_status()} == {"good": "error", "bad": "error", "op": "error"}
 
 
 def test_feed_replace_drops_delisted(db):
     f = feeds.Feed("rot", "u", "bad_hosts", "malware", feeds.parse_hosts)
-    feeds.apply_feed(db, f, "old.example\nstays.example\n")
-    feeds.apply_feed(db, f, "stays.example\n")
+    _run(db, [f], {"u": "old.example\nstays.example\n"})
+    _run(db, [f], {"u": "stays.example\n"})
     assert db.host_info("old.example") is None and db.host_info("stays.example") is not None
+
+
+def test_snapshot_swap_and_cleanup(db):
+    from sentinel import indicators
+
+    f = feeds.Feed("s", "u", "bad_hosts", "malware", feeds.parse_hosts)
+    for i in range(3):
+        _run(db, [f], {"u": f"gen{i}.example\n"})
+    files = list(indicators.snapshot_dir().glob("indicators-*.db"))
+    assert len(files) <= 2  # superseded snapshots are deleted once closed
+    assert db.host_info("gen2.example") is not None and db.host_info("gen0.example") is None
+    assert db.counts()["bad_hosts"] == 1
+
+
+def test_tranco_parsing_limits():
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("top-1m.csv", "".join(f"{i},site{i}.example\n" for i in range(1, 2001)))
+    assert feeds.parse_tranco(buf.getvalue(), top=1000)[:2] == ["site1.example", "site2.example"]
+    with pytest.raises(ValueError):
+        feeds.parse_tranco(buf.getvalue(), top=100_000)  # truncated list is rejected
 
 
 def test_blocked_hosts_priority_order(db):
@@ -201,6 +233,18 @@ def test_watcher_quarantines_new_file(db, scanner, tmp_path):
     assert (watched / "clean.txt").exists()
     assert any(r["quarantined"] for r in results)
     assert all(not r["verdict"]["path"].endswith(".crdownload") for r in results)
+
+
+def test_run_key_command_files(tmp_path):
+    from sentinel.watcher import command_files
+
+    script = tmp_path / "payload.ps1"
+    script.write_text("x")
+    dll = tmp_path / "lib.dll"
+    dll.write_text("x")
+    cmd = f'powershell.exe -NoProfile -File "{script}"'
+    assert str(script) in command_files(cmd)
+    assert str(dll) in command_files(f"rundll32.exe {dll},Entry")
 
 
 def test_run_key_command_target():

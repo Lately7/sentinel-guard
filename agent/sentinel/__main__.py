@@ -32,7 +32,10 @@ def cmd_scan(args: argparse.Namespace) -> int:
     scanner = Scanner(db, use_defender=not args.no_defender and settings.use_defender)
     worst = 0
     results = []
-    for f in _walk(args.paths):
+    missing = [p for p in args.paths if not os.path.exists(p)]
+    for p in missing:
+        print(f"ERROR      cannot access {p}", file=sys.stderr)
+    for f in _walk([p for p in args.paths if p not in missing]):
         v = scanner.scan_file(f, use_cache=not args.no_cache)
         rank = {"clean": 0, "suspicious": 1, "malicious": 2}[v.label]
         worst = max(worst, rank)
@@ -47,14 +50,19 @@ def cmd_scan(args: argparse.Namespace) -> int:
                 print(f"           -> quarantined as {out['quarantine_id']}")
     if args.json:
         print(json.dumps(results, indent=2, ensure_ascii=False))
-    return worst
+    # A target that couldn't be scanned must not look like a clean result to scripts.
+    return 3 if missing and worst == 0 else worst
 
 
 def cmd_update(args: argparse.Namespace) -> int:
     from . import feeds
     from .db import Database
 
-    res = feeds.update_all(Database())
+    db = Database()
+    moved = db.check_and_repair()
+    if moved:
+        print(f"database was damaged; moved to {moved} and rebuilt")
+    res = feeds.update_all(db)
     for name, status in res.items():
         print(f"{name:20} {status}")
     return 0 if all(s.startswith("ok") for s in res.values()) else 1
@@ -146,11 +154,12 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    # Browsers launch the host with the caller origin as a bare argument.
-    if argv and argv[0] == "native-host":
+    # Browsers launch the host executable directly with the caller origin
+    # (and on Windows a --parent-window flag) as its arguments.
+    if argv and (argv[0] == "native-host" or argv[0].startswith("chrome-extension://")):
         from . import nativehost
 
-        return nativehost.main(argv[1:])
+        return nativehost.main([a for a in argv if a != "native-host"])
 
     ap = argparse.ArgumentParser(prog="sentinel", description="Sentinel Guard — bảo vệ mã độc và web thời gian thực")
     sub = ap.add_subparsers(dest="cmd", required=True)

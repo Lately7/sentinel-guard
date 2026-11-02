@@ -37,21 +37,30 @@ def _pythonw() -> str:
     return str(w if w.is_file() else exe)
 
 
+def host_executable() -> Path:
+    """The console-script launcher pip created next to this interpreter.
+
+    Browsers launch the host by path with the caller origin as argument, and
+    `sentinel.exe` handles that directly (see __main__.main). Unlike a .cmd
+    wrapper it has no code-page problems with non-ASCII user folders.
+    """
+    exe = Path(sys.executable).with_name("sentinel.exe")
+    if not exe.is_file():
+        raise FileNotFoundError(f"{exe} not found; install the package with pip first")
+    return exe
+
+
 def write_host_files() -> Path:
     d = config.data_dir() / "native"
     d.mkdir(parents=True, exist_ok=True)
-    launcher = d / "sentinel-host.cmd"
-    # Browsers can only launch an executable path, not "python -m"; the .cmd
-    # pins the interpreter that has this package installed.
-    launcher.write_text(f'@echo off\r\n"{sys.executable}" -m sentinel native-host %*\r\n', encoding="ascii")
     manifest = d / f"{config.HOST_NAME}.json"
     manifest.write_text(json.dumps({
         "name": config.HOST_NAME,
         "description": "Sentinel Guard local protection engine",
-        "path": str(launcher),
+        "path": str(host_executable()),
         "type": "stdio",
         "allowed_origins": [f"chrome-extension://{config.EXTENSION_ID}/"],
-    }, indent=2), encoding="utf-8")
+    }, indent=2, ensure_ascii=False), encoding="utf-8")
     return manifest
 
 

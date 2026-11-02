@@ -18,6 +18,7 @@ from .db import Database
 from .engine import defender
 from .engine.scanner import Scanner
 from .protection import act_on
+from .singleton import AppInstance
 from .watcher import RealtimeProtection
 
 log = logging.getLogger(__name__)
@@ -44,6 +45,10 @@ class App:
     def __init__(self) -> None:
         self.settings = config.Settings.load()
         self.db = Database()
+        moved = self.db.check_and_repair()
+        if moved:
+            self.db.add_event("system", "warning", "Cơ sở dữ liệu bị hỏng và đã được tạo lại",
+                              f"Bản hỏng được giữ tại {moved}. Danh sách mối đe dọa sẽ được tải lại.")
         self.scanner = Scanner(self.db, use_defender=self.settings.use_defender)
         self.realtime: RealtimeProtection | None = None
         self.ui_queue: queue.Queue = queue.Queue()
@@ -139,14 +144,21 @@ class App:
                 log.exception("notifier failed")
 
     def _feed_scheduler(self) -> None:
+        # Let start-up (watcher, icon) settle before a long download.
+        if self._stop.wait(30):
+            return
         while not self._stop.is_set():
-            last = max((f["updated"] or 0 for f in self.db.feed_status()), default=0)
-            if time.time() - last > self.settings.feed_interval_hours * 3600:
-                self.update_feeds()
+            try:
+                if feeds.is_due(self.db, self.settings.feed_interval_hours):
+                    self.update_feeds()
+            except Exception:
+                log.exception("scheduled feed update failed")
             self._stop.wait(600)
 
     def update_feeds(self) -> dict[str, str]:
         res = feeds.update_all(self.db)
+        if "skipped" in res:
+            return res
         ok = sum(1 for v in res.values() if v.startswith("ok"))
         level = "info" if ok == len(res) else "warning"
         self.db.add_event("feeds", level, "Đã cập nhật dữ liệu mối đe dọa", f"{ok}/{len(res)} nguồn thành công", res)
@@ -315,4 +327,11 @@ def _walk(base: str):
 
 
 def main() -> None:
-    App().run()
+    instance = AppInstance()
+    if not instance.claim():
+        # Already running (e.g. autostart + desktop shortcut): bring it forward.
+        instance.signal_existing()
+        return
+    app = App()
+    instance.on_show_request(lambda: app.ui(app.show))
+    app.run()

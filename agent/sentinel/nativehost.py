@@ -12,19 +12,25 @@ import logging
 import os
 import struct
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, BinaryIO
 
 from . import __version__, config, urlintel
 from .db import Database
 from .engine.scanner import Scanner
+from .engine.verdict import MALICIOUS, Finding, Severity
 from .protection import act_on, top_reason
 
 log = logging.getLogger("sentinel.nativehost")
 
 MAX_IN = 1024 * 1024
+MAX_OUT = 1024 * 1024  # Chromium's limit for host -> browser messages
 PAGE_LIMIT = 20_000
+PAGE_BYTES = 600_000
 _MAX_STR = 8192
+SLOW_TYPES = {"scan_download"}
 
 
 class BadRequest(Exception):
@@ -52,6 +58,7 @@ class Host:
         self.db = db
         self.settings = settings
         self._scanner: Scanner | None = None
+        self._bl_cache: tuple[str, list[tuple[str, str]]] | None = None
 
     @property
     def scanner(self) -> Scanner:
@@ -83,20 +90,38 @@ class Host:
 
     def on_hello(self, msg: dict[str, Any]) -> dict[str, Any]:
         return {"version": __version__, "blocklist_version": self.db.get_meta("blocklist_version", "0"),
-                "counts": self.db.counts()}
+                "allow_version": self.db.allow_version(), "counts": self.db.counts()}
 
     def on_check_url(self, msg: dict[str, Any]) -> dict[str, Any]:
         url = _str(msg, "url")
         assert url is not None
         return {"result": urlintel.check(self.db, url)}
 
+    def _blocklist(self) -> tuple[str, list[tuple[str, str]]]:
+        # One snapshot per (blocklist, allowlist) version: paging through
+        # 400k hosts must not re-run the full query for every page.
+        key = f"{self.db.get_meta('blocklist_version', '0')}/{self.db.allow_version()}"
+        if self._bl_cache is None or self._bl_cache[0] != key:
+            self._bl_cache = (key, self.db.blocked_hosts())
+        return self._bl_cache
+
     def on_get_blocklist(self, msg: dict[str, Any]) -> dict[str, Any]:
         offset = _int(msg, "offset", 0, 0, 10_000_000)
         limit = _int(msg, "limit", PAGE_LIMIT, 1, PAGE_LIMIT)
-        all_hosts = self.db.blocked_hosts()
-        page = all_hosts[offset:offset + limit]
-        return {"version": self.db.get_meta("blocklist_version", "0"), "total": len(all_hosts),
-                "offset": offset, "hosts": [[h, k] for h, k in page]}
+        version, hosts = self._blocklist()
+        page: list[list[str]] = []
+        size = 0
+        # Bounded by encoded size, not count: the browser drops the whole
+        # connection on any message over 1 MB.
+        for host, kind in hosts[offset:offset + limit]:
+            size += len(host) + len(kind) + 8
+            if size > PAGE_BYTES and page:
+                break
+            page.append([host, kind])
+        return {"version": version, "total": len(hosts), "offset": offset, "hosts": page}
+
+    def on_get_allowlist(self, msg: dict[str, Any]) -> dict[str, Any]:
+        return {"allow_version": self.db.allow_version(), "hosts": self.db.allowed_hosts()[:5000]}
 
     def on_scan_download(self, msg: dict[str, Any]) -> dict[str, Any]:
         path = _str(msg, "path", max_len=4096)
@@ -105,10 +130,17 @@ class Host:
         p = Path(path)
         if not p.is_absolute() or not p.is_file():
             raise BadRequest("path must be an existing absolute file path")
-        v = self.scanner.scan_file(p, use_cache=False)
-        outcome = act_on(self.db, v, self.settings, "download")
         rep = urlintel.check(self.db, url) if url else None
-        return {"verdict": v.to_dict(), "reason": top_reason(v), "url_reputation": rep, **outcome}
+        v = self.scanner.scan_file(p, use_cache=False)
+        if rep and rep["verdict"] == "malicious" and v.label != MALICIOUS:
+            # The download may have finished before the browser could cancel
+            # it; a file served from a listed malware URL is treated as such.
+            conclusive = rep["kind"] == "malware"
+            v.findings.append(Finding(
+                "origin", "origin.blocklisted_download", Severity.CRITICAL if conclusive else Severity.HIGH,
+                f"downloaded from {rep['matched']} ({rep['kind']}, {rep['source']})", 100 if conclusive else 50))
+        outcome = act_on(self.db, v, self.settings, "download")
+        return {"verdict": v.to_dict(max_findings=30), "reason": top_reason(v), "url_reputation": rep, **outcome}
 
     def on_report(self, msg: dict[str, Any]) -> dict[str, Any]:
         action = _str(msg, "action", max_len=32)
@@ -152,11 +184,19 @@ def read_message(stream: BinaryIO) -> Any | None:
         return {"type": "__bad_json__"}
 
 
+_write_lock = threading.Lock()
+
+
 def write_message(stream: BinaryIO, obj: dict[str, Any]) -> None:
     data = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    stream.write(struct.pack("<I", len(data)))
-    stream.write(data)
-    stream.flush()
+    if len(data) > MAX_OUT:
+        # Sending it would make the browser kill the connection; answer with
+        # an error the extension can handle instead.
+        data = json.dumps({"id": obj.get("id"), "ok": False, "error": "response too large"}).encode("utf-8")
+    with _write_lock:  # scan workers and the main loop share stdout
+        stream.write(struct.pack("<I", len(data)))
+        stream.write(data)
+        stream.flush()
 
 
 def main(argv: list[str]) -> int:
@@ -174,8 +214,15 @@ def main(argv: list[str]) -> int:
         msvcrt.setmode(sys.stdout.fileno(), os.O_BINARY)  # type: ignore[attr-defined]
     host = Host(Database(), config.Settings.load())
     stdin, stdout = sys.stdin.buffer, sys.stdout.buffer
+    # File scans can take a minute (Defender); they run on workers so URL
+    # lookups for the next navigation are answered immediately.
+    workers = ThreadPoolExecutor(max_workers=2, thread_name_prefix="scan")
     while True:
         msg = read_message(stdin)
         if msg is None:
+            workers.shutdown(wait=True)
             return 0
-        write_message(stdout, host.handle(msg))
+        if isinstance(msg, dict) and msg.get("type") in SLOW_TYPES:
+            workers.submit(lambda m=msg: write_message(stdout, host.handle(m)))
+        else:
+            write_message(stdout, host.handle(msg))

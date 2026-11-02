@@ -98,8 +98,8 @@ def test_random_pe_like_bytes_never_raise(scanner):
 def test_verdict_labels():
     def v(*scores, critical=False):
         out = Verdict("n", "h", 1)
-        for s in scores:
-            out.findings.append(Finding("t", "r", Severity.MEDIUM, "d", s))
+        for i, s in enumerate(scores):
+            out.findings.append(Finding("t", f"r{i}", Severity.MEDIUM, "d", s))
         if critical:
             out.findings.append(Finding("t", "c", Severity.CRITICAL, "d", 0))
         return out
@@ -109,6 +109,20 @@ def test_verdict_labels():
     assert v(40, 40).label == MALICIOUS
     assert v(critical=True).label == MALICIOUS
     assert v(90, 90).score == 100
+
+
+def test_repeated_rule_counts_once(scanner):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for i in range(5):
+            inner = io.BytesIO()
+            with zipfile.ZipFile(inner, "w") as doc:
+                doc.writestr("[Content_Types].xml", "<Types/>")
+                doc.writestr("word/vbaProject.bin", b"\x00" * 64)
+            zf.writestr(f"report{i}.docm", inner.getvalue())
+    v = scanner.scan_bytes(buf.getvalue(), "reports.zip")
+    assert sum(1 for f in v.findings if f.rule == "office.macros") == 5
+    assert v.label == CLEAN and v.score == 15
 
 
 # -- file type ---------------------------------------------------------------

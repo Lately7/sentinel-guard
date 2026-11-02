@@ -17,10 +17,15 @@ from .protection import act_on
 
 log = logging.getLogger(__name__)
 
-# Browsers and downloaders write to a temp name and rename when finished;
-# scanning the partial file is wasted work and races the writer.
+# Browsers and downloaders write to a temp name and rename when finished.
+# Such files are scanned only after they have been quiet for a long while, so
+# the normal case (renamed on completion) costs nothing, but a payload that
+# keeps a temp-looking name still gets scanned eventually.
 PARTIAL_SUFFIXES = (".crdownload", ".part", ".partial", ".download", ".tmp", ".opdownload", ".!ut")
 SETTLE_SECONDS = 1.5
+PARTIAL_SETTLE_SECONDS = 90.0
+# Our own in-flight quarantine claims (see quarantine.py) must not be rescanned.
+CLAIM_MARK = ".sentinel-"
 
 
 class ScanQueue:
@@ -46,16 +51,19 @@ class ScanQueue:
         self._wake.set()
 
     def submit(self, path: str) -> None:
-        if path.lower().endswith(PARTIAL_SUFFIXES):
+        lowered = path.lower()
+        if CLAIM_MARK in lowered and lowered.endswith(".claim"):
             return
+        settle = PARTIAL_SETTLE_SECONDS if lowered.endswith(PARTIAL_SUFFIXES) else SETTLE_SECONDS
         with self._lock:
-            self._pending[path] = time.monotonic()
+            # Stored as the moment the file becomes due; every new event pushes it back.
+            self._pending[path] = time.monotonic() + settle
         self._wake.set()
 
     def _due(self) -> list[str]:
         now = time.monotonic()
         with self._lock:
-            ready = [p for p, t in self._pending.items() if now - t >= SETTLE_SECONDS]
+            ready = [p for p, due in self._pending.items() if now >= due]
             for p in ready:
                 del self._pending[p]
             if not self._pending:
@@ -81,7 +89,12 @@ class ScanQueue:
                 self.submit(path)
                 return
             v = self.scanner.scan_file(path)
+            if v.skipped == "changed while scanning":
+                self.submit(path)
+                return
             outcome = act_on(self.db, v, self.settings, "watcher")
+            if outcome["error"] and "changed after it was scanned" in outcome["error"]:
+                self.submit(path)
             if self.on_result:
                 self.on_result({"verdict": v.to_dict(), **outcome})
         except Exception:
@@ -167,6 +180,41 @@ def command_target(command: str) -> str | None:
     return command.split(" ", 1)[0] or None
 
 
+def split_command_line(command: str) -> list[str]:
+    """Windows argv splitting rules (CommandLineToArgvW), with a simple fallback."""
+    if os.name == "nt" and command.strip():
+        import ctypes
+        from ctypes import wintypes
+
+        shell32 = ctypes.WinDLL("shell32")
+        shell32.CommandLineToArgvW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_int)]
+        shell32.CommandLineToArgvW.restype = ctypes.POINTER(wintypes.LPWSTR)
+        argc = ctypes.c_int(0)
+        argv = shell32.CommandLineToArgvW(command, ctypes.byref(argc))
+        if argv:
+            try:
+                return [argv[i] for i in range(argc.value)]
+            finally:
+                ctypes.windll.kernel32.LocalFree(argv)
+    return command.split()
+
+
+def command_files(command: str) -> list[str]:
+    """Every existing local file a Run-key command refers to: the program and
+    any script/library passed to it (an interpreter is rarely the payload)."""
+    expanded = os.path.expandvars(command.strip())
+    files: list[str] = []
+    first = command_target(expanded)
+    if first and os.path.isfile(first):
+        files.append(first)
+    for tok in split_command_line(expanded):
+        for cand in (tok, tok.split(",", 1)[0], tok.partition("=")[2], tok.partition(":")[2] if tok.startswith("/") else ""):
+            cand = cand.strip().strip('"')
+            if cand and len(cand) > 3 and os.path.isfile(cand) and cand not in files:
+                files.append(cand)
+    return files
+
+
 class PersistenceMonitor:
     """Polls autostart registry keys; new entries are reported and their targets scanned."""
 
@@ -196,8 +244,7 @@ class PersistenceMonitor:
                     continue
                 self.db.add_event("persistence", "warning", "Chương trình mới tự khởi động cùng Windows",
                                   f"{name.rsplit(chr(92), 1)[-1]}: {cmd}", {"key": name, "command": cmd})
-                target = command_target(cmd)
-                if target and os.path.isfile(target):
+                for target in command_files(cmd):
                     self.q.submit(target)
             self._known = current
 

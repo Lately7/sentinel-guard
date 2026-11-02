@@ -7,10 +7,12 @@ browser-spawned host from blocking on the agent (and vice versa).
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -87,29 +89,114 @@ CREATE TABLE IF NOT EXISTS meta (
 """
 
 
+class _Rows:
+    """Already-fetched result: the subset of the Cursor API callers use."""
+
+    def __init__(self, rows: list[sqlite3.Row], lastrowid: int | None) -> None:
+        self._rows = rows
+        self.lastrowid = lastrowid
+
+    def fetchone(self) -> sqlite3.Row | None:
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self) -> list[sqlite3.Row]:
+        return self._rows
+
+
+# Tables worth carrying over from a damaged database; indicator tables are
+# rebuilt by the next feed update instead.
+SALVAGE_TABLES = ("allow_hosts", "allow_hashes", "quarantine", "events", "meta",
+                  "bad_hosts", "bad_urls", "bad_hashes", "popular")
+
+
 class Database:
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or config.db_path()
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(self.path, timeout=15, check_same_thread=False, isolation_level=None)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
-        self._conn.executescript(SCHEMA)
+        self._popular: frozenset[str] | None = None
+        self._conn = self._open()
+        from .indicators import Indicators
+
+        self.indicators = Indicators(self)
+
+    def _open(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.path, timeout=30, check_same_thread=False, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.executescript(SCHEMA)
+        return conn
+
+    def check_and_repair(self) -> str | None:
+        """Run at agent start. Returns the path the damaged DB was moved to, or None if healthy."""
+        if not self.indicators.healthy():
+            # A damaged snapshot is just dropped; the next feed update rebuilds it.
+            self.set_meta("indicators_file", "")
+            self.indicators.refresh()
+        try:
+            ok = self._conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+        except sqlite3.DatabaseError:
+            ok = False
+        if ok:
+            return None
+        with self._lock:
+            salvaged: dict[str, tuple[list[str], list[tuple[Any, ...]]]] = {}
+            for t in SALVAGE_TABLES:
+                try:
+                    cur = self._conn.execute(f"SELECT * FROM {t}")
+                    salvaged[t] = ([d[0] for d in cur.description], [tuple(r) for r in cur.fetchall()])
+                except sqlite3.DatabaseError:
+                    continue
+            self._conn.close()
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            moved = self.path.with_name(f"{self.path.name}.corrupt-{stamp}")
+            os.replace(self.path, moved)
+            for suffix in ("-wal", "-shm"):
+                side = Path(str(self.path) + suffix)
+                if side.exists():
+                    os.replace(side, Path(str(moved) + suffix))
+            self._conn = self._open()
+            for t, (cols, rows) in salvaged.items():
+                if rows:
+                    marks = ",".join("?" * len(cols))
+                    self._conn.executemany(f"INSERT OR IGNORE INTO {t}({','.join(cols)}) VALUES({marks})", rows)
+            self._popular = None
+        return str(moved)
 
     def close(self) -> None:
         with self._lock:
             self._conn.close()
 
-    def _exec(self, sql: str, args: Iterable[Any] = ()) -> sqlite3.Cursor:
+    def _exec(self, sql: str, args: Iterable[Any] = ()) -> _Rows:
+        # Rows are fetched while holding the lock: iterating a cursor after
+        # another thread has reused the connection returns mixed-up results.
         with self._lock:
-            return self._conn.execute(sql, tuple(args))
+            cur = self._conn.execute(sql, tuple(args))
+            return _Rows(cur.fetchall(), cur.lastrowid)
 
     def _many(self, sql: str, rows: Iterable[tuple[Any, ...]]) -> None:
         with self._lock:
-            self._conn.execute("BEGIN")
+            if self._conn.in_transaction:  # part of a caller's transaction()
+                self._conn.executemany(sql, rows)
+                return
+            self._conn.execute("BEGIN IMMEDIATE")
             try:
                 self._conn.executemany(sql, rows)
+                self._conn.execute("COMMIT")
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """One atomic write transaction; the lock keeps other threads of this process out of it."""
+        with self._lock:
+            # IMMEDIATE takes the write lock up front, so two processes queue
+            # instead of both reading and then failing to upgrade.
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield
                 self._conn.execute("COMMIT")
             except BaseException:
                 self._conn.execute("ROLLBACK")
@@ -134,6 +221,10 @@ class Database:
         return g
 
     # -- indicators --------------------------------------------------------
+    #
+    # Feed data lives in immutable snapshot files (indicators.py). The small
+    # bad_* tables here hold local entries only: the user's own reports and
+    # test fixtures. Lookups consult both.
 
     def add_hashes(self, rows: Iterable[tuple[str, str, str | None]]) -> None:
         now = time.time()
@@ -141,9 +232,6 @@ class Database:
             "INSERT OR IGNORE INTO bad_hashes(sha256,source,name,added) VALUES(?,?,?,?)",
             ((h.lower(), src, name, now) for h, src, name in rows),
         )
-
-    def hash_info(self, sha256: str) -> sqlite3.Row | None:
-        return self._exec("SELECT * FROM bad_hashes WHERE sha256=?", (sha256.lower(),)).fetchone()
 
     def add_hosts(self, rows: Iterable[tuple[str, str, str]]) -> None:
         now = time.time()
@@ -159,17 +247,16 @@ class Database:
             ((u, kind, src, now) for u, kind, src in rows),
         )
 
-    def replace_source(self, table: str, source: str) -> None:
-        """Drop a feed's old rows before re-importing it, so delisted entries disappear."""
-        if table not in ("bad_hashes", "bad_hosts", "bad_urls"):
-            raise ValueError(table)
-        self._exec(f"DELETE FROM {table} WHERE source=?", (source,))
+    def hash_info(self, sha256: str) -> sqlite3.Row | None:
+        sha256 = sha256.lower()
+        return self._exec("SELECT * FROM bad_hashes WHERE sha256=?", (sha256,)).fetchone() or self.indicators.hash(sha256)
 
     def host_info(self, host: str) -> sqlite3.Row | None:
-        return self._exec("SELECT * FROM bad_hosts WHERE host=?", (host.lower(),)).fetchone()
+        host = host.lower()
+        return self._exec("SELECT * FROM bad_hosts WHERE host=?", (host,)).fetchone() or self.indicators.host(host)
 
     def url_info(self, url: str) -> sqlite3.Row | None:
-        return self._exec("SELECT * FROM bad_urls WHERE url=?", (url,)).fetchone()
+        return self._exec("SELECT * FROM bad_urls WHERE url=?", (url,)).fetchone() or self.indicators.url(url)
 
     def blocked_hosts(self, limit: int = 400_000) -> list[tuple[str, str]]:
         """Hosts for the browser's network rules, most specific threat kinds first.
@@ -178,40 +265,56 @@ class Database:
         the curated malware/phishing lists win over the broad aggregate list.
         Everything beyond the limit is still caught by per-navigation lookups.
         """
-        rows = self._exec(
-            "SELECT host, kind FROM bad_hosts WHERE host NOT IN (SELECT host FROM allow_hosts) ORDER BY"
-            " CASE kind WHEN 'malware' THEN 0 WHEN 'phishing' THEN 1 WHEN 'scam' THEN 2"
-            " WHEN 'miner' THEN 3 WHEN 'pup' THEN 4 ELSE 5 END, host LIMIT ?", (limit,)
-        ).fetchall()
-        return [(r["host"], r["kind"]) for r in rows]
+        allowed = set(self.allowed_hosts())
+        out: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        from .indicators import KIND_RANK
+
+        local = sorted(((r["host"], r["kind"]) for r in self._exec("SELECT host, kind FROM bad_hosts").fetchall()),
+                       key=lambda hk: (KIND_RANK.get(hk[1], 5), hk[0]))
+        for host, kind in local + self.indicators.hosts_ranked(limit + len(allowed)):
+            if host in seen or host in allowed:
+                continue
+            seen.add(host)
+            out.append((host, kind))
+            if len(out) >= limit:
+                break
+        return out
 
     def set_popular(self, domains: Iterable[str]) -> None:
-        with self._lock:
-            self._conn.execute("BEGIN")
-            try:
-                self._conn.execute("DELETE FROM popular")
-                self._conn.executemany("INSERT OR IGNORE INTO popular(domain) VALUES(?)", ((d,) for d in domains))
-                self._conn.execute("COMMIT")
-            except BaseException:
-                self._conn.execute("ROLLBACK")
-                raise
+        """Local additions to the never-host-block list (feeds bring Tranco in the snapshot)."""
+        self._many("INSERT OR IGNORE INTO popular(domain) VALUES(?)", ((d,) for d in domains))
         self._popular = None
 
     def popular_domains(self) -> frozenset[str]:
-        if getattr(self, "_popular", None) is None:
+        if self._popular is None:
             self._popular = frozenset(r["domain"] for r in self._exec("SELECT domain FROM popular").fetchall())
-        return self._popular
+        return self._popular | self.indicators.popular()
 
     def counts(self) -> dict[str, int]:
         out = {}
         for t in ("bad_hashes", "bad_hosts", "bad_urls", "quarantine", "events"):
             out[t] = self._exec(f"SELECT COUNT(*) AS n FROM {t}").fetchone()["n"]
+        snap = self.indicators.counts()
+        out["bad_hosts"] += snap["hosts"]
+        out["bad_urls"] += snap["urls"]
+        out["bad_hashes"] += snap["hashes"]
         return out
 
     # -- allow lists -------------------------------------------------------
+    #
+    # allow_version lets the browser extension notice changes made in the
+    # dashboard and resynchronise its exemption rules.
+
+    def allow_version(self) -> str:
+        return self.get_meta("allow_version", "0") or "0"
+
+    def _bump_allow(self) -> None:
+        self.set_meta("allow_version", str(int(self.allow_version()) + 1))
 
     def allow_host(self, host: str) -> None:
         self._exec("INSERT OR IGNORE INTO allow_hosts(host,added) VALUES(?,?)", (host.lower(), time.time()))
+        self._bump_allow()
 
     def is_host_allowed(self, host: str) -> bool:
         return self._exec("SELECT 1 FROM allow_hosts WHERE host=?", (host.lower(),)).fetchone() is not None
@@ -221,6 +324,7 @@ class Database:
 
     def remove_allowed_host(self, host: str) -> None:
         self._exec("DELETE FROM allow_hosts WHERE host=?", (host.lower(),))
+        self._bump_allow()
 
     def allow_hash(self, sha256: str) -> None:
         self._exec("INSERT OR IGNORE INTO allow_hashes(sha256,added) VALUES(?,?)", (sha256.lower(), time.time()))

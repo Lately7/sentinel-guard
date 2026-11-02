@@ -3,7 +3,6 @@
 
 export const CHUNK = 5000;
 export const ALLOW_BASE_ID = 900000;
-const SUB_RESOURCES = ["sub_frame", "script", "xmlhttprequest", "image", "media", "object", "font", "stylesheet", "websocket", "ping", "other"];
 export const KIND_CODES = { malware: "m", phishing: "p", scam: "s", miner: "c", pup: "u", threat: "t", custom: "x" };
 
 // hosts: [[host, kind], ...]
@@ -34,7 +33,9 @@ export function buildBlockRules(hosts) {
         id: id++,
         priority: 1,
         action: { type: "block" },
-        condition: { requestDomains: domains, resourceTypes: SUB_RESOURCES },
+        // Exclusion instead of a list, so resource types added to Chromium
+        // later (webtransport, webbundle, csp_report ...) are blocked too.
+        condition: { requestDomains: domains, excludedResourceTypes: ["main_frame"] },
       });
     }
   }
@@ -48,8 +49,11 @@ export function buildAllowRules(hosts) {
     .map((h, i) => ({
       id: ALLOW_BASE_ID + i,
       priority: 10,
-      action: { type: "allowAllRequests" },
-      condition: { requestDomains: [h], resourceTypes: ["main_frame", "sub_frame"] },
+      // "allow" exempts only requests *to* the trusted host. allowAllRequests
+      // would also exempt everything a trusted page loads, so a compromised
+      // trusted site could pull scripts from blocklisted malware hosts.
+      action: { type: "allow" },
+      condition: { requestDomains: [h] },
     }));
 }
 

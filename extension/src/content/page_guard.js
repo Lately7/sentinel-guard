@@ -65,21 +65,28 @@
     document.documentElement.append(host);
   }
 
-  let sent = false;
+  // Re-sent whenever the set of signals grows: a single-page app may render
+  // a plain password box first and point its form somewhere else later.
+  let sentIds = new Set();
   function check() {
-    if (sent) return;
     const signals = collect();
-    if (!signals.length) return;
-    sent = true;
+    const ids = new Set(signals.map((s) => s.id));
+    const grew = [...ids].some((id) => !sentIds.has(id));
+    if (!grew) return;
+    sentIds = new Set([...sentIds, ...ids]);
     chrome.runtime.sendMessage({ type: "page_signals", signals }, (res) => {
       if (chrome.runtime.lastError) return;
       if (res && res.warn) banner(res.reasons || [], res.score);
     });
   }
 
+  let timer = 0;
+  const schedule = () => {
+    clearTimeout(timer);
+    timer = setTimeout(check, 400);
+  };
   check();
-  // Login forms on single-page apps often render after load.
-  const obs = new MutationObserver(() => check());
-  obs.observe(document.documentElement, { childList: true, subtree: true });
-  setTimeout(() => obs.disconnect(), 15000);
+  const obs = new MutationObserver(schedule);
+  obs.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["action", "type"] });
+  setTimeout(() => obs.disconnect(), 30000);
 })();

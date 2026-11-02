@@ -54,12 +54,23 @@ class Scanner:
                 return _from_dict(cached)
 
         try:
-            sha256, head, body = _read(p, st.st_size)
+            sha256, head, body = _read(p, st.st_size, st.st_mtime)
+        except FileChanged:
+            return Verdict(name=name, sha256="", size=st.st_size, path=str(p), skipped="changed while scanning")
         except OSError as e:
             return Verdict(name=name, sha256="", size=st.st_size, path=str(p), skipped=f"unreadable: {e.strerror or e}")
 
         v = self._scan_content(name, sha256, st.st_size, head, body, depth=0)
         v.path = str(p)
+        if body is None and filetype.sniff(head) == "zip":
+            # Too big to hold in memory, but each member can still be inspected
+            # straight from disk.
+            try:
+                with zipfile.ZipFile(p) as zf:
+                    v.findings.extend(self._scan_zip_members(name, zf, depth=0))
+                v.skipped = None
+            except (zipfile.BadZipFile, OSError, ValueError, RuntimeError, EOFError, NotImplementedError):
+                pass
         if self.db.is_hash_allowed(sha256):
             v.findings = [Finding("allowlist", "allow.user", Severity.INFO, "trusted by the user", 0)]
             self.db.store_result(str(p), st.st_size, st.st_mtime, v.to_dict())
@@ -114,14 +125,25 @@ class Scanner:
         return out
 
     def _scan_zip(self, name: str, data: bytes, depth: int) -> list[Finding]:
-        out: list[Finding] = []
         if depth >= config.MAX_ARCHIVE_DEPTH:
-            return out
+            return [Finding("archive", "archive.depth_limit", Severity.INFO,
+                            f"nested archives deeper than {config.MAX_ARCHIVE_DEPTH} levels were not opened", 0)]
         try:
             zf = zipfile.ZipFile(io.BytesIO(data))
+        except (zipfile.BadZipFile, OSError, ValueError, RuntimeError, EOFError, NotImplementedError):
+            return []
+        return self._scan_zip_members(name, zf, depth)
+
+    def _scan_zip_members(self, name: str, zf: zipfile.ZipFile, depth: int) -> list[Finding]:
+        out: list[Finding] = []
+        try:
             infos = zf.infolist()
         except (zipfile.BadZipFile, OSError, ValueError, RuntimeError, EOFError, NotImplementedError):
             return out
+        # Executables and scripts first, so the member limit never hides them
+        # behind thousands of harmless entries.
+        infos = sorted(infos, key=lambda i: filetype.extension(i.filename) not in filetype.EXECUTABLE_EXTS
+                       and filetype.extension(i.filename) not in filetype.ARCHIVE_EXTS)
 
         names = {i.filename.lower() for i in infos}
         if any(n.endswith("vbaproject.bin") for n in names):
@@ -154,6 +176,8 @@ class Scanner:
             except (zipfile.BadZipFile, OSError, ValueError, RuntimeError, EOFError, NotImplementedError):
                 continue
             if len(content) > config.MAX_DEEP_SCAN_BYTES:
+                out.append(Finding("archive", "archive.member_too_large", Severity.INFO,
+                                   f"'{info.filename}' is larger than the inspection limit", 0))
                 continue
             sub = self._scan_content(member, hashlib.sha256(content).hexdigest(), len(content),
                                      content[:HEAD_BYTES], content, depth + 1)
@@ -206,21 +230,30 @@ def _pe_structure(data: bytes) -> list[Finding]:
     return out
 
 
-def _read(p: Path, size: int) -> tuple[str, bytes, bytes | None]:
+class FileChanged(Exception):
+    """The file was modified while being read; the watcher will rescan it."""
+
+
+def _read(p: Path, size: int, mtime: float) -> tuple[str, bytes, bytes | None]:
     h = hashlib.sha256()
     deep = size <= config.MAX_DEEP_SCAN_BYTES
     chunks: list[bytes] = []
     head = b""
+    remaining = size  # never read past the size we stat'ed, even if the file keeps growing
     with p.open("rb") as f:
-        while True:
-            chunk = f.read(1024 * 1024)
+        while remaining > 0:
+            chunk = f.read(min(1024 * 1024, remaining))
             if not chunk:
                 break
+            remaining -= len(chunk)
             h.update(chunk)
             if not head:
                 head = chunk[:HEAD_BYTES]
             if deep:
                 chunks.append(chunk)
+    st = p.stat()
+    if remaining or st.st_size != size or st.st_mtime != mtime:
+        raise FileChanged(str(p))
     return h.hexdigest(), head, b"".join(chunks) if deep else None
 
 

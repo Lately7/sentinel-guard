@@ -21,11 +21,13 @@ function render(url, reasons) {
 
 async function init() {
   let reasons = (params.get("r") || "").split(" · ").filter(Boolean);
-  if (!target) {
-    // Blocked by a network rule: the URL is not in our query string, so ask
-    // the service worker what this tab was navigating to.
+  // Blocked by a network rule: the URL is not in our query string, so ask
+  // the service worker what this tab was navigating to. A service worker that
+  // was asleep may need a moment, hence the short retry.
+  for (let i = 0; !target && i < 10; i++) {
     const res = await chrome.runtime.sendMessage({ type: "blocked_context" }).catch(() => null);
     target = res?.info?.url || null;
+    if (!target) await new Promise((r) => setTimeout(r, 200));
   }
   render(target, reasons);
   $("proceed").disabled = !target || !/^https?:/i.test(target);

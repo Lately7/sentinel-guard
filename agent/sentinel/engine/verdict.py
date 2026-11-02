@@ -48,7 +48,12 @@ class Verdict:
 
     @property
     def score(self) -> int:
-        return min(100, sum(max(0, f.score) for f in self.findings))
+        # Each rule counts once (its strongest hit): five macro documents in one
+        # archive are one signal, not five, and must not add up to "malicious".
+        best: dict[str, int] = {}
+        for f in self.findings:
+            best[f.rule] = max(best.get(f.rule, 0), max(0, f.score))
+        return min(100, sum(best.values()))
 
     @property
     def label(self) -> str:
@@ -63,7 +68,8 @@ class Verdict:
             return SUSPICIOUS
         return CLEAN
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, max_findings: int = 200) -> dict[str, Any]:
+        ranked = sorted(self.findings, key=lambda f: (f.severity, f.score), reverse=True)
         return {
             "name": self.name,
             "path": self.path,
@@ -72,5 +78,6 @@ class Verdict:
             "score": self.score,
             "label": self.label,
             "skipped": self.skipped,
-            "findings": [f.to_dict() for f in self.findings],
+            "findings": [f.to_dict() for f in ranked[:max_findings]],
+            "findings_total": len(self.findings),
         }

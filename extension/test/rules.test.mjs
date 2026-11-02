@@ -11,9 +11,11 @@ test("block rules: one redirect + one block rule per chunk and kind", () => {
   const ids = new Set(rules.map((r) => r.id));
   assert.equal(ids.size, rules.length);
   for (const r of rules) assert.ok(r.id < ALLOW_BASE_ID);
-  const main = rules.filter((r) => r.condition.resourceTypes.includes("main_frame"));
+  const main = rules.filter((r) => r.condition.resourceTypes?.includes("main_frame"));
+  assert.equal(main.length, 3);
   assert.ok(main.every((r) => r.action.type === "redirect" && r.condition.resourceTypes.length === 1));
-  assert.ok(rules.filter((r) => r.action.type === "block").every((r) => !r.condition.resourceTypes.includes("main_frame")));
+  const block = rules.filter((r) => r.action.type === "block");
+  assert.ok(block.every((r) => !r.condition.resourceTypes && r.condition.excludedResourceTypes.join() === "main_frame"));
 });
 
 test("block rules drop malformed entries and unknown kinds become custom", () => {
@@ -27,5 +29,7 @@ test("allow rules outrank block rules", () => {
   const [r] = buildAllowRules(["trusted.example", "bad host"]);
   assert.equal(r.id, ALLOW_BASE_ID);
   assert.ok(r.priority > 1);
-  assert.equal(r.action.type, "allowAllRequests");
+  // Scoped allow: a trusted page must not unblock the malware hosts it embeds.
+  assert.equal(r.action.type, "allow");
+  assert.deepEqual(r.condition.requestDomains, ["trusted.example"]);
 });
