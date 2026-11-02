@@ -13,6 +13,7 @@ chạy thật; chỗ nào chưa chạy được thì ghi rõ.
 | 3b. RT-016/017/018 (watcher) | ✅ `d03ea88` |
 | 3c. RT-021 (allowlist) | ✅ `8135706` |
 | 3d. Gate v2 mốc 3 (thêm) | ✅ Merge `7226927` sau 3 vòng review |
+| 3e. Gate v2 mốc 4 — ClamAV (thêm) | ✅ Merge `fe2880b` sau 2 vòng review |
 | 4. ROADMAP + báo cáo này | ✅ |
 | Thêm (anh/chị yêu cầu lúc thức): thiết kế xoay quanh quyền admin | ✅ Codex nghiên cứu R13 + thảo luận R13b với tôi; chưa có code chạy quyền admin |
 
@@ -163,6 +164,17 @@ phát hiện một test có thể làm **treo pytest** khi nó fail (socket khô
 mọi user, script `tools/admin_acceptance.ps1` (cần anh/chị chạy với quyền
 admin).
 
+## 2g. Gate v2 mốc 4 — adapter ClamAV (Codex viết)
+
+Client clamd chặt (reply phải đúng khung, có NUL, giới hạn độ dài),
+`RELOADING` chưa được coi là đã nạp, kiểm tuổi cơ sở dữ liệu, xác minh clamd
+bằng chủ sở hữu socket (bảng TCP của Windows + thời điểm tạo + đường dẫn), tệp
+container ClamAV không tự liệt kê (RAR, 7z, CAB, OLE2/MSI, PDF) không thể "sạch
+đáng tin" chỉ nhờ `OK`. Lỗi tôi bắt: **mỗi lần chờ chỉ 0,25 giây** → clamd
+thật quét tệp lớn sẽ luôn TIMEOUT (test giả không lộ vì trả lời ngay); cập nhật
+chữ ký thất bại làm ClamAV kẹt "chưa xác minh" mãi. Đã sửa. Chưa chạy với
+clamd thật (cần cơ sở dữ liệu chữ ký → phải tải; dữ liệu thật thì cấm dùng).
+
 ## 2f. Vỏ dịch vụ (A1) và worker quyền thấp (A2)
 
 * `service/host.py` (`f5dad5a`): vỏ dịch vụ Windows bằng `ctypes`; chỉ báo
@@ -175,6 +187,11 @@ admin).
   cạnh nó, **không sinh được tiến trình**, không cấp phát quá giới hạn, không
   thấy biến môi trường của tiến trình cha. Thử phá: bỏ low integrity → 2 test
   đỏ; bỏ giới hạn tiến trình → 1 test đỏ.
+* `service/workermain.py` + `workerclient.py` (`14249ad`): các adapter đọc tệp
+  lạ (core, luật JSON, YARA-X) **chạy thật bên trong worker** trên handle chỉ-đọc
+  được nhân bản sang; worker không bao giờ mở đường dẫn. Marker trên đĩa và
+  trong ZIP, EICAR trong bộ nhớ đều bị phát hiện; worker chết giữa chừng → lỗi
+  `WORKER_DIED`, không bao giờ "sạch"; worker chết giữa hai lần → tự thay.
 
 ## 3. Watcher (RT-016, RT-017, RT-018) và allowlist (RT-021)
 
@@ -197,12 +214,12 @@ thư mục sau khi hàng đợi tràn (R12d).
 
 ## Kết quả test thật
 
-Lệnh chạy trên `gate-baseline` sau lần merge cuối (`7226927`):
+Lệnh chạy trên `gate-baseline` sau lần merge cuối (`fe2880b`):
 
-* `.\.venv\Scripts\python -m pytest -q` → **347 passed, 4 skipped, 2 xfailed** (lần cuối, sau merge mốc 3 `7226927`; sau mốc 2 là 283)
+* `.\.venv\Scripts\python -m pytest -q` → **393 passed, 4 skipped, 2 xfailed** (lần cuối, sau merge mốc 4 `fe2880b`; sau mốc 3 là 347, sau mốc 2 là 283)
   (đầu đêm: 119 passed). 4 skip = test với clamd thật, clamd không chạy.
   2 xfail = RT-001, RT-002 (lỗi đã biết, chưa sửa — có chủ đích).
-  Gate v2: 177 test trong `tests/gate_v2/`; dịch vụ A1: 41 test.
+  Gate v2: 209 test trong `tests/gate_v2/`; dịch vụ A1/A2: 55 test.
 * `node --test "extension/test/*.test.mjs"` → **39 passed** (đầu đêm: 32).
 * Helium 156 e2e (`node tools/helium_e2e.mjs extension`, `SENTINEL_HOME` tạm
   trong `%TEMP%`, đã chặn `blocked-selftest.sentinelguard.invalid`): mọi kiểm

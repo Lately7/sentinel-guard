@@ -243,3 +243,27 @@ Checked by Claude: the new H7/H8 tests fail on `6f9618d` (6 failed) and pass
 after. Tests after the merge on `gate-baseline`: pytest 347 passed,
 4 skipped (real clamd not running), 2 xfailed (RT-001, RT-002); node --test
 39 passed.
+
+## Gate v2 milestone 4 (Codex writes, Claude reviews) — 2026-11-02 night
+
+Task files `CODEX_TASK_GATE_V2_M4.md` (pinned `18454a9`), `_R2.md`, `_R2B.md`;
+answers in `docs/handoff/codex-gate-v2-m4.md`. New `gate_v2/clamd.py`
+(strict INSTREAM client and adapter) and `winnet.py` (server PID of our TCP
+connection from `GetExtendedTcpTable`, then creation time and image path).
+Scope check clean. Merged `fe2880b`. Real clamd not run (no signature
+database in a temporary `SENTINEL_HOME` without downloading one; the real
+data directory is off limits for tests).
+
+| # | Finding by Claude | Outcome |
+|---|---|---|
+| J1 | Every recv/send/connect used a 0.25 s timeout and failed on the first expiry: a real clamd that needs seconds to scan would make nearly every non-trivial scan `TIMEOUT` (the fake server answered at once) | Fixed: wait to the request deadline, INSTREAM cap 150 s, cancellation checked every 0.1 s |
+| J2 | Refused local connection reported `TIMEOUT` on Windows (SYN retries outlast 0.25 s) | Fixed: connect budget up to 3 s |
+| J3 | PING + VERSION + TCP-table walk before every file | Fixed: readiness cached 5 s, invalidated on errors/reload/owner mismatch; the scan connection's owner is still checked every time |
+| J4 | A failed `RELOAD` left ClamAV `RELOAD_PENDING` forever although the old engine stays active (RT-030) | Fixed: failed/expired reload clears the target, reports `RELOAD_FAILED`, old generation trusted again |
+
+Process note: round 2 stopped after writing the tests because the brief said
+"if the sandbox refuses temp folders, report it and stop"; Claude meant
+"stop trying to run pytest". Round 2b clarified it. Claude ran the six new
+tests against round 1 (all fail) and after 2b (all pass), and removed two
+unused imports. Tests after the merge: pytest 393 passed, 4 skipped (real
+clamd), 2 xfailed (RT-001, RT-002); node --test 39 passed.

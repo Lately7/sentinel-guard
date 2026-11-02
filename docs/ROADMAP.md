@@ -61,7 +61,7 @@ tiến trình bằng chụp danh sách 500 ms trước, ETW để sau.
 |---|---|---|
 | G3–G6 | Gate v2 mốc 3–6 (core/luật, ClamAV, Defender, cache + adapter) | song song với A1 |
 | A1 | Giao thức pipe + phân quyền lệnh + `ServiceCore` + named pipe thật + client + vỏ dịch vụ | ✅ phần không cần admin: `1276db7`, `2b69586`, `d295c93`, `f5dad5a` (41 test); còn: hộp xác nhận UAC, cài dịch vụ, script kiểm thử admin |
-| A2 | Worker quét quyền thấp + Job Object | ✅ khởi chạy worker: `194ae38` (low integrity, không admin, không ghi được, không sinh tiến trình, giới hạn bộ nhớ); còn: giao thức worker + vòng quét |
+| A2 | Worker quét quyền thấp + Job Object | ✅ `194ae38`, `14249ad`: worker low integrity chạy adapter core/luật JSON/YARA-X trên handle được nhân bản; worker chết/treo/huỷ → lỗi có kiểu, không bao giờ sạch |
 | A3 | Gate v2 mốc 7 qua dịch vụ: cách ly có kiểm lại, nhật ký hoàn tác, hộp xác nhận UAC | |
 | A4 | Gate v2 mốc 8 + nguồn quét admin (mọi user, dịch vụ, tác vụ, WMI…) | |
 | A5 | USN journal, chụp danh sách tiến trình 500 ms, quét lại tệp tải về | cần chủ dự án chạy thử với quyền admin |
@@ -85,7 +85,7 @@ quyền và không đổi cài đặt Defender.
 | 0 | **Nền tảng**: C1 icon cũ, C2a cổng quét, C2b baseline, giao diện tối, bộ icon v2 | ✅ xong |
 | 1 | **Sửa lỗi** (C3a, d, e, g, h, j, k ✅; C3b/c/f vào Gate v2; C3i bỏ) | ✅ xong |
 | R | **Nghiên cứu sâu cho Gate v2** (R8a–R12d, R11 đặc tả) | ✅ xong |
-| G | **Gate v2** do Codex viết theo đặc tả R11 (8 mốc), Claude review | mốc 1 ✅ `9a101cb` · mốc 2 ✅ `e186184` · mốc 3 ✅ `7226927` · tiếp: mốc 4 (ClamAV) |
+| G | **Gate v2** do Codex viết theo đặc tả R11 (8 mốc), Claude review | mốc 1 ✅ `9a101cb` · mốc 2 ✅ `e186184` · mốc 3 ✅ `7226927` · mốc 4 ✅ `fe2880b` (ClamAV) · tiếp: mốc 5 (Defender + phân tích cấu trúc) |
 | 2 | **Red Team viết test** (Codex vòng 1a, 1b) | chờ giai đoạn 1 |
 | 3 | **Contract v1**: tách trạng thái quét khỏi kết luận; "một phần"/lỗi không bao giờ là "sạch" | chờ |
 | 4 | **Chính sách ClamAV + cách ly an toàn** | chờ |
@@ -198,5 +198,5 @@ cần xử lý mới sáng lên (333 ms); tắt hết khi Windows tắt hiệu �
 
 ## Kiểm thử gần nhất
 
-pytest **347 passed, 4 skipped, 2 xfailed** (không có clamd; 2 xfail = RT-001, RT-002; 177 test Gate v2, 41 test dịch vụ A1) · extension **39 passed** · Helium e2e: mọi kiểm tra đạt (2026-11-02 đêm).
+pytest **393 passed, 4 skipped, 2 xfailed** (không có clamd; 2 xfail = RT-001, RT-002; 209 test Gate v2, 55 test dịch vụ A1/A2) · extension **39 passed** · Helium e2e: mọi kiểm tra đạt (2026-11-02 đêm).
 Baseline tại C2a: `docs/baseline.md`.
