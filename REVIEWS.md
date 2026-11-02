@@ -189,3 +189,30 @@ Tests: Codex ran `tests/gate_v2` in its sandbox only with a workaround
 254 passed, 4 skipped, 2 xfailed; after the merge on `gate-baseline` pytest
 264 passed, 4 skipped (real clamd not running), 2 xfailed (RT-001, RT-002);
 node --test 39 passed.
+
+## Gate v2 milestone 2 (Codex writes, Claude reviews) — 2026-11-02 night
+
+Task files `CODEX_TASK_GATE_V2_M2.md` (pinned to `8d95a1d`) and
+`CODEX_TASK_GATE_V2_M2_R2.md`; answers in `docs/handoff/codex-gate-v2-m2.md`.
+New `gate_v2/identity.py`, `events.py`, `orchestrator.py`; one additive M1
+change (`FinalDecision.action_decision`, optional). Scope check clean in both
+rounds. Merged `e186184` (`--no-ff`). `engine/scanner.py` unchanged.
+
+| # | Finding by Claude on round 1 | Outcome |
+|---|---|---|
+| G1 | Tests imported `agent.sentinel.gate_v2`, loading a second copy of every module | Fixed: `sentinel.gate_v2` |
+| G2 | A result returned by an adapter was replaced by `CANCELLED`/`TIMEOUT` when cancel/deadline was noticed afterwards — a conclusive hit could be lost (invariant 9) | Fixed: returned results kept; only unstarted stages cancelled/timed out |
+| G3 | `scan_many` turned files into `unknown`/`ADMISSION_FULL` under a slow consumer instead of pausing admission | Fixed: waits on a condition, honours cancel |
+| G4 | Every routine stage end went into the never-drop terminal ledger | Fixed: only evidence/error-class ends are terminal |
+| G5 | `auto_quarantine=True` and the protection generation were hard-coded, so the stop barrier could never trip | Fixed: explicit inputs, generation read after the stages |
+| G6 | Identity re-checked only for `malicious`; legacy-v0 could propose quarantine of a `suspicious` file unchecked | Fixed: re-check before any proposed quarantine |
+| G7 | Missing in-place same-size rewrite test | Added |
+| G8 | ctypes bindings redefined per call | Module level |
+
+Not changed: a single `scan()` call still returns `ADMISSION_FULL` as a
+typed unknown when the ledger is full; durability of the terminal ledger is
+milestone 7. Codex could not run pytest in its sandbox (temp folder denied)
+in either round and said so; round 1 left three empty temp folders, which
+Claude removed. Tests run by Claude: worktree and `gate-baseline` after the
+merge — pytest 283 passed, 4 skipped (real clamd not running), 2 xfailed
+(RT-001, RT-002); node --test 39 passed.
