@@ -198,5 +198,5 @@ cần xử lý mới sáng lên (333 ms); tắt hết khi Windows tắt hiệu �
 
 ## Kiểm thử gần nhất
 
-pytest **119 passed, 4 skipped, 2 xfailed** (không có clamd; 2 xfail = RT-001, RT-002) · extension **32 passed** · Helium e2e: xem `docs/handoff/NEXT_SESSION.md` §3.
+pytest **283 passed, 4 skipped, 2 xfailed** (không có clamd; 2 xfail = RT-001, RT-002; 154 test Gate v2) · extension **39 passed** · Helium e2e: mọi kiểm tra đạt (2026-11-02 đêm).
 Baseline tại C2a: `docs/baseline.md`.
