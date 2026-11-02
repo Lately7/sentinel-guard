@@ -35,8 +35,8 @@ document/image extension.
 
 | # | Scope | Status |
 |---|-------|--------|
-| R1 | engine + scanner + quarantine | pending |
-| R2 | watcher + native host + feeds | pending |
-| R3 | extension | pending |
+| R1 | whole repository | done: 28 findings, 27 fixed, 1 partly |
+| R2 | round-1 fixes + new code | done: 26 findings, 24 fixed, 2 partly |
+| R3 | round-2 fixes (final) | see REVIEWS.md |
 
 Outcomes are recorded in `REVIEWS.md`.

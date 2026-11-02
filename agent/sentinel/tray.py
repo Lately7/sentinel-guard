@@ -24,16 +24,16 @@ from .watcher import RealtimeProtection
 log = logging.getLogger(__name__)
 
 APP = "Sentinel Guard"
-GREEN, AMBER, RED = (34, 160, 90), (220, 150, 20), (200, 40, 40)
+# The logo is a plain black square with a border; only the border colour
+# carries state, so the icon stays the same shape in every situation.
+GREEN, AMBER, RED = (230, 230, 230), (220, 150, 20), (200, 40, 40)
 
 
-def _icon_image(color: tuple[int, int, int]):
+def _icon_image(border: tuple[int, int, int]):
     from PIL import Image, ImageDraw
 
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.polygon([(32, 4), (58, 14), (54, 40), (32, 60), (10, 40), (6, 14)], fill=color + (255,))
-    d.line([(20, 33), (29, 42), (45, 24)], fill=(255, 255, 255, 255), width=6)
+    ImageDraw.Draw(img).rectangle([4, 4, 59, 59], fill=(0, 0, 0, 255), outline=border + (255,), width=6)
     return img
 
 
