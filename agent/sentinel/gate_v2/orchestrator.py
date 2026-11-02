@@ -9,7 +9,7 @@ from typing import Callable, Iterable
 
 from . import identity
 from .contract import (
-    CONTRACT_VERSION, ActionDecision, CancellationToken, ContractError, Coverage,
+    CONTRACT_VERSION, ActionCode, ActionDecision, CancellationToken, ContractError, Coverage,
     EngineAdapter, EngineResult, FileIdentity, FinalDecision, ScanError,
     ScanRequest, StageStatus, VerdictCode,
 )
@@ -59,13 +59,14 @@ def _synthetic(
                         if status in (StageStatus.ERROR, StageStatus.TIMEOUT, StageStatus.CHANGED) else None)
 
 
-def _unknown(request: ScanRequest, generation: str, code: str, measured: FileIdentity | None = None) -> FinalDecision:
+def _unknown(request: ScanRequest, generation: str, code: str, auto_quarantine: bool,
+             measured: FileIdentity | None = None) -> FinalDecision:
     decision = FinalDecision(CONTRACT_VERSION, request.scan_id, request.file_id, measured,
                              VerdictCode.UNKNOWN, False, "full", (code,), (), (), False,
                              generation, 0)
     action = should_auto_quarantine(
         decision, policy_version=request.action_policy_version,
-        auto_quarantine=True, protection_generation=request.protection_generation,
+        auto_quarantine=auto_quarantine, protection_generation=request.protection_generation,
         current_protection_generation=request.protection_generation,
         identity_reverified=False,
     )
@@ -88,9 +89,12 @@ def _publish(
 def scan(
     request: ScanRequest, *, adapters: Iterable[EngineAdapter],
     stages: RequiredStages | None = None, cancel: CancellationToken | None = None,
-    gate_generation: str, emit: EventStream | Callable[..., object] | None = None,
+    gate_generation: str, auto_quarantine: bool,
+    current_protection_generation: Callable[[], int | None] | None = None,
+    emit: EventStream | Callable[..., object] | None = None,
     clock: Clock = time.monotonic_ns, max_bytes: int = 512 * 1024 * 1024,
     skip_after_conclusive: bool = True,
+    _admitted: bool = False,
 ) -> FinalDecision:
     ordered = tuple(adapters)
     ids = tuple(item.engine_id for item in ordered)
@@ -99,18 +103,18 @@ def scan(
     required = stages or RequiredStages(frozenset(ids))
     token = cancel or _NeverCancel()
     machine = ScanState()
-    admitted = not isinstance(emit, EventStream) or emit.admit(request.file_id, terminal_slots=len(ordered) + 2)
+    admitted = _admitted or not isinstance(emit, EventStream) or emit.admit(request.file_id, terminal_slots=len(ordered) + 2)
     if not admitted:
-        return _unknown(request, gate_generation, "ADMISSION_FULL")
+        return _unknown(request, gate_generation, "ADMISSION_FULL", auto_quarantine)
     try:
         if not ordered or not required.required:
-            value = _unknown(request, gate_generation, "NO_ENABLED_STAGES")
+            value = _unknown(request, gate_generation, "NO_ENABLED_STAGES", auto_quarantine)
             _publish(emit, request.file_id, "action", "finished", value.action_decision.action.value.upper(), terminal=True)
             _publish(emit, request.file_id, "file", "error", "NO_ENABLED_STAGES", terminal=True)
             return value
         if token.cancelled():
             machine.advance("cancelled")
-            value = _unknown(request, gate_generation, "CANCELLED")
+            value = _unknown(request, gate_generation, "CANCELLED", auto_quarantine)
             _publish(emit, request.file_id, "action", "finished", value.action_decision.action.value.upper(), terminal=True)
             _publish(emit, request.file_id, "file", "cancelled", "CANCELLED", terminal=True)
             return value
@@ -121,7 +125,7 @@ def scan(
                            if request.path is not None else identity.measure_bytes(request.data or b"", max_bytes=max_bytes, cancel=token))
         if not measured_result.ok:
             machine.advance("cancelled" if measured_result.code == "CANCELLED" else "unknown")
-            value = _unknown(request, gate_generation, measured_result.code)
+            value = _unknown(request, gate_generation, measured_result.code, auto_quarantine)
             _publish(emit, request.file_id, "action", "finished", value.action_decision.action.value.upper(), terminal=True)
             _publish(emit, request.file_id, "file", "cancelled" if measured_result.code == "CANCELLED" else "error",
                      measured_result.code, terminal=True)
@@ -166,20 +170,18 @@ def scan(
                     # Engine exception text may contain paths or raw output.
                     result = _synthetic(adapter, request, measured, StageStatus.ERROR, "ADAPTER_ERROR", start)
                 elapsed = max(0, (clock() - start) // 1_000_000)
-                if token.cancelled():
-                    result = _synthetic(adapter, request, measured, StageStatus.CANCELLED, "CANCELLED", start, elapsed)
-                    stop = StageStatus.CANCELLED
-                elif clock() >= request.deadline_monotonic_ns:
-                    result = _synthetic(adapter, request, measured, StageStatus.TIMEOUT, "TIMEOUT", start, elapsed)
-                    stop = StageStatus.TIMEOUT
-                elif result.engine_id != adapter.engine_id or result.file_id != request.file_id:
+                if result.engine_id != adapter.engine_id or result.file_id != request.file_id:
                     result = _synthetic(adapter, request, measured, StageStatus.ERROR, "RESULT_BINDING", start, elapsed)
                 elif result.identity != measured:
                     result = _synthetic(adapter, request, measured, StageStatus.CHANGED, "RESULT_IDENTITY", start, elapsed)
                 elif getattr(adapter, "reopens_path", False) and request.path is not None:
-                    checked = identity.revalidate(request.path, measured, rehash=True, max_bytes=max_bytes, cancel=token)
+                    checked = identity.revalidate(request.path, measured, rehash=True, max_bytes=max_bytes)
                     if not checked.ok:
                         result = _synthetic(adapter, request, measured, StageStatus.CHANGED, checked.code, start, elapsed)
+                if token.cancelled():
+                    stop = StageStatus.CANCELLED
+                elif clock() >= request.deadline_monotonic_ns:
+                    stop = StageStatus.TIMEOUT
             results.append(result)
             state = ("skipped" if result.status is StageStatus.SKIPPED else
                      "cancelled" if result.status is StageStatus.CANCELLED else
@@ -187,21 +189,31 @@ def scan(
             _publish(emit, request.file_id, adapter.engine_id, state,
                      "DETECTION" if result.evidence else
                      "CONCLUSIVE_HIT" if result.status is StageStatus.SKIPPED else result.status.value.upper(),
-                     duration_ms=result.duration_ms, terminal=True)
+                     duration_ms=result.duration_ms,
+                     terminal=bool(result.evidence) or result.status in (
+                         StageStatus.ERROR, StageStatus.TIMEOUT, StageStatus.CHANGED,
+                         StageStatus.CANCELLED, StageStatus.UNVERIFIED, StageStatus.UNAVAILABLE))
         machine.advance("deciding")
         try:
             decision = decide(tuple(results), request, gate_generation, stages=required)
         except ContractError as exc:
-            decision = replace(_unknown(request, gate_generation, exc.code, measured), engine_results=tuple(results))
-        reverified = True
-        if request.path is not None and decision.verdict is VerdictCode.MALICIOUS:
-            reverified = identity.revalidate(request.path, measured, rehash=True, max_bytes=max_bytes, cancel=token).ok
+            decision = replace(_unknown(request, gate_generation, exc.code, auto_quarantine, measured), engine_results=tuple(results))
+        current_generation = (current_protection_generation() if current_protection_generation is not None
+                              else request.protection_generation)
         action: ActionDecision = should_auto_quarantine(
             decision, policy_version=request.action_policy_version,
-            auto_quarantine=True, protection_generation=request.protection_generation,
-            current_protection_generation=request.protection_generation,
-            identity_reverified=reverified,
+            auto_quarantine=auto_quarantine, protection_generation=request.protection_generation,
+            current_protection_generation=current_generation,
+            identity_reverified=True,
         )
+        if action.action is ActionCode.QUARANTINE and request.path is not None:
+            if not identity.revalidate(request.path, measured, rehash=True, max_bytes=max_bytes).ok:
+                action = should_auto_quarantine(
+                    decision, policy_version=request.action_policy_version,
+                    auto_quarantine=auto_quarantine, protection_generation=request.protection_generation,
+                    current_protection_generation=current_generation,
+                    identity_reverified=False,
+                )
         decision = replace(decision, action_decision=action)
         _publish(emit, request.file_id, "action", "finished", action.action.value.upper(), terminal=True)
         was_cancelled = token.cancelled() and decision.verdict is not VerdictCode.MALICIOUS
@@ -217,7 +229,9 @@ def scan(
 def scan_many(
     requests: Iterable[ScanRequest], *, adapters: Iterable[EngineAdapter],
     stages: RequiredStages | None = None, cancel: CancellationToken | None = None,
-    gate_generation: str, emit: EventStream | Callable[..., object] | None = None,
+    gate_generation: str, auto_quarantine: bool,
+    current_protection_generation: Callable[[], int | None] | None = None,
+    emit: EventStream | Callable[..., object] | None = None,
     clock: Clock = time.monotonic_ns, workers: int = 2,
     max_bytes: int = 512 * 1024 * 1024,
     skip_after_conclusive: bool = True,
@@ -225,10 +239,18 @@ def scan_many(
     if not 1 <= workers <= 4:
         raise ValueError("workers must be between 1 and 4")
     ordered_adapters = tuple(adapters)
+    def scan_admitted(request: ScanRequest) -> FinalDecision:
+        admitted = False
+        if isinstance(emit, EventStream):
+            admitted = emit.wait_for_admission(request.file_id, terminal_slots=len(ordered_adapters) + 2,
+                                               cancel=cancel)
+            if not admitted:
+                return _unknown(request, gate_generation, "CANCELLED", auto_quarantine)
+        return scan(request, adapters=ordered_adapters, stages=stages, cancel=cancel,
+                    gate_generation=gate_generation, auto_quarantine=auto_quarantine,
+                    current_protection_generation=current_protection_generation,
+                    emit=emit, clock=clock, max_bytes=max_bytes,
+                    skip_after_conclusive=skip_after_conclusive, _admitted=admitted)
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(scan, request, adapters=ordered_adapters, stages=stages,
-                               cancel=cancel, gate_generation=gate_generation, emit=emit,
-                               clock=clock, max_bytes=max_bytes,
-                               skip_after_conclusive=skip_after_conclusive)
-                   for request in requests]
+        futures = [pool.submit(scan_admitted, request) for request in requests]
         return tuple(future.result() for future in futures)

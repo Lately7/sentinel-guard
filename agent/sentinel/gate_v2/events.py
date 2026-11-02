@@ -8,9 +8,14 @@ from __future__ import annotations
 
 from collections import OrderedDict, deque
 from dataclasses import dataclass
-from threading import Lock
+from threading import Condition
+from typing import Protocol
 
 from .contract import EVENT_VERSION, ScanEvent
+
+
+class _Cancellation(Protocol):
+    def cancelled(self) -> bool: ...
 
 
 @dataclass(frozen=True)
@@ -28,7 +33,7 @@ class EventStream:
         self.scan_id = scan_id
         self.progress_capacity = progress_capacity
         self.terminal_capacity = terminal_capacity
-        self._lock = Lock()
+        self._lock = Condition()
         self._sequence = 0
         self._progress: OrderedDict[tuple[str | None, str], ScanEvent] = OrderedDict()
         self._terminal: deque[ScanEvent] = deque()
@@ -45,9 +50,24 @@ class EventStream:
             self._reserved[file_id] = terminal_slots
             return True
 
+    def wait_for_admission(self, file_id: str, *, terminal_slots: int,
+                           cancel: _Cancellation | None = None) -> bool:
+        if terminal_slots < 1:
+            raise ValueError("terminal_slots must be positive")
+        with self._lock:
+            while True:
+                if cancel is not None and cancel.cancelled():
+                    return False
+                if (file_id not in self._reserved and
+                    len(self._terminal) + sum(self._reserved.values()) + terminal_slots <= self.terminal_capacity):
+                    self._reserved[file_id] = terminal_slots
+                    return True
+                self._lock.wait(timeout=0.05)
+
     def release(self, file_id: str) -> None:
         with self._lock:
             self._reserved.pop(file_id, None)
+            self._lock.notify_all()
 
     def count(self, name: str, amount: int = 1) -> None:
         with self._lock:
@@ -85,4 +105,7 @@ class EventStream:
     def drain_terminal(self, limit: int | None = None) -> tuple[ScanEvent, ...]:
         with self._lock:
             count = len(self._terminal) if limit is None else min(limit, len(self._terminal))
-            return tuple(self._terminal.popleft() for _ in range(count))
+            drained = tuple(self._terminal.popleft() for _ in range(count))
+            if drained:
+                self._lock.notify_all()
+            return drained

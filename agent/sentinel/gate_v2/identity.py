@@ -17,6 +17,20 @@ from .contract import CancellationToken, ContractError, FileIdentity
 
 CHUNK_SIZE = 1024 * 1024
 
+if os.name == "nt":
+    import msvcrt
+
+    class FileBasicInfo(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_int64) for name in
+                    ("creation", "access", "write", "change")] + [("attributes", ctypes.c_uint32)]
+
+    _get_file_information = ctypes.windll.kernel32.GetFileInformationByHandleEx
+    _get_file_information.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+    _get_file_information.restype = ctypes.c_int
+    _get_final_path = ctypes.windll.kernel32.GetFinalPathNameByHandleW
+    _get_final_path.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32]
+    _get_final_path.restype = ctypes.c_uint32
+
 
 @dataclass(frozen=True)
 class IdentityResult:
@@ -35,17 +49,8 @@ def _cancelled(cancel: CancellationToken | None) -> bool:
 def _change_time(descriptor: int, info: os.stat_result) -> int:
     if os.name != "nt":
         return info.st_ctime_ns
-    import msvcrt
-
-    class FileBasicInfo(ctypes.Structure):
-        _fields_ = [(name, ctypes.c_int64) for name in
-                    ("creation", "access", "write", "change")] + [("attributes", ctypes.c_uint32)]
-
     basic = FileBasicInfo()
-    function = ctypes.windll.kernel32.GetFileInformationByHandleEx
-    function.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
-    function.restype = ctypes.c_int
-    if not function(msvcrt.get_osfhandle(descriptor), 0, ctypes.byref(basic), ctypes.sizeof(basic)):
+    if not _get_file_information(msvcrt.get_osfhandle(descriptor), 0, ctypes.byref(basic), ctypes.sizeof(basic)):
         raise OSError("change time unavailable")
     return max(0, (basic.change - 116444736000000000) * 100)
 
@@ -57,17 +62,12 @@ def _generation(info: os.stat_result, change_time_ns: int) -> tuple[int, int, in
 def _final_path(descriptor: int, fallback: str) -> str:
     if os.name != "nt":
         return os.path.realpath(fallback)
-    import msvcrt
-
     handle = msvcrt.get_osfhandle(descriptor)
-    function = ctypes.windll.kernel32.GetFinalPathNameByHandleW
-    function.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32]
-    function.restype = ctypes.c_uint32
-    length = function(handle, None, 0, 0)
+    length = _get_final_path(handle, None, 0, 0)
     if not length or length > 32768:
         raise OSError("final path unavailable")
     buffer = ctypes.create_unicode_buffer(length + 1)
-    written = function(handle, buffer, len(buffer), 0)
+    written = _get_final_path(handle, buffer, len(buffer), 0)
     if not written or written >= len(buffer):
         raise OSError("final path unavailable")
     path = buffer.value
