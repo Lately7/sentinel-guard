@@ -1,3 +1,5 @@
+import { pageStatus } from "./page_status.js";
+
 const $ = (id) => document.getElementById(id);
 let currentHost = "";
 
@@ -42,25 +44,10 @@ async function load() {
   }
   currentHost = new URL(tab.url).hostname;
   const info = tab.info || {};
-  const rep = info.reputation;
-  const score = info.total ?? tab.heuristic.score;
   const items = [...(tab.heuristic.reasons || []).map((r) => r.detail), ...(info.page || []).map((s) => s.detail)];
-  if (rep?.verdict === "malicious") {
-    page.textContent = `Nguy hiểm: ${rep.kind || "độc hại"} (${rep.source})`;
-    page.className = "state bad";
-  } else if (rep?.verdict === "allowed") {
-    page.textContent = "Bạn đã tin cậy trang này";
-    page.className = "state muted";
-  } else if (score >= 70) {
-    page.textContent = `Rủi ro cao (${score}/100)`;
-    page.className = "state bad";
-  } else if (score >= 40) {
-    page.textContent = `Đáng ngờ (${score}/100)`;
-    page.className = "state warn";
-  } else {
-    page.textContent = "Không phát hiện vấn đề";
-    page.className = "state ok";
-  }
+  const st = pageStatus(info, tab.heuristic.score);
+  page.textContent = st.text;
+  page.className = `state ${st.cls}`;
   reasons.replaceChildren(...items.map((t) => Object.assign(document.createElement("li"), { textContent: t })));
 }
 
