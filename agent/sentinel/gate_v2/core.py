@@ -11,10 +11,11 @@ from pathlib import PurePath
 from ..engine import filetype
 from . import archive
 from .content import BoundReader, ContentError
-from .contract import (CONTRACT_VERSION, ByteRange, CancellationToken, Category,
-                       Coverage, EngineResult, Evidence, FileIdentity, ScanError,
+from .contract import (CONTRACT_VERSION, CancellationToken, Category,
+                       EngineResult, Evidence, FileIdentity, ScanError,
                        ScanRequest, StageStatus, Strength, VerdictCode)
 from .coverage import CoverageLedger
+from .evidence import select_evidence
 
 EICAR_SHA256 = "275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f"
 HashLookup = Callable[[str], bool]
@@ -123,20 +124,27 @@ class CoreAdapter:
             inspect(PurePath(request.path or "").name, body)
             if body.startswith(archive.ZIP_PREFIXES):
                 if measured.size == len(body):
-                    archive.walk(body, ledger, cancel, lambda path, payload: inspect(path, payload, path))
+                    stopped = archive.walk(body, ledger, cancel, lambda path, payload: inspect(path, payload, path),
+                                           request.deadline_monotonic_ns)
+                    if stopped == "DEADLINE":
+                        status = StageStatus.TIMEOUT
+                        error = ScanError("DEADLINE", "archive", "DEADLINE", True)
+                    elif stopped == "CANCELLED":
+                        status = StageStatus.CANCELLED
                 else:
                     ledger.parser("zip", "partial")
         except ContentError as exc:
             status = StageStatus.CHANGED if exc.code == "CHANGED" else StageStatus.CANCELLED if exc.code == "CANCELLED" else StageStatus.ERROR
             error = ScanError(exc.code, "read", exc.code, True)
             ledger.inspected = reader.ranges
+        retained = select_evidence(evidence, ledger)
         coverage = ledger.finish()
         if coverage.mode in ("runtime_partial", "fixed_partial") and status is StageStatus.COMPLETED:
             status = StageStatus.PARTIAL
-        verdict = (VerdictCode.MALICIOUS if any(e.strength is Strength.CONCLUSIVE for e in evidence)
-                   else VerdictCode.SUSPICIOUS if any(e.category is Category.MALWARE for e in evidence)
+        verdict = (VerdictCode.MALICIOUS if any(e.strength is Strength.CONCLUSIVE for e in retained)
+                   else VerdictCode.SUSPICIOUS if any(e.category is Category.MALWARE for e in retained)
                    else VerdictCode.CLEAN if status is StageStatus.COMPLETED else VerdictCode.UNKNOWN)
         return EngineResult(CONTRACT_VERSION, self.engine_id, request.file_id, measured,
-                            status, verdict, coverage, tuple(evidence[:64]), "core-v2", None,
+                            status, verdict, coverage, retained, "core-v2", None,
                             None, "READY" if status is StageStatus.COMPLETED else status.value.upper(),
                             start, (time.monotonic_ns() - start) // 1_000_000, error)

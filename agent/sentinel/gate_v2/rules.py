@@ -15,6 +15,7 @@ from .contract import (CONTRACT_VERSION, ByteRange, CancellationToken, Category,
                        EngineResult, Evidence, FileIdentity, ScanError, ScanRequest,
                        StageStatus, Strength, VerdictCode)
 from .coverage import CoverageLedger
+from .evidence import select_evidence
 
 
 @dataclass(frozen=True)
@@ -47,12 +48,15 @@ def _result(engine: str, request: ScanRequest, measured: FileIdentity, reader: B
         ledger.limit(code)
     if reader.ranges != ((ByteRange(0, measured.size),) if measured.size else ()):
         ledger.fixed_reduction = status is StageStatus.PARTIAL and not limits
+    retained = select_evidence(evidence, ledger)
     coverage = ledger.finish()
-    verdict = (VerdictCode.MALICIOUS if any(e.strength is Strength.CONCLUSIVE for e in evidence)
-               else VerdictCode.SUSPICIOUS if evidence else
+    if coverage.mode == "runtime_partial" and status is StageStatus.COMPLETED:
+        status = StageStatus.PARTIAL
+    verdict = (VerdictCode.MALICIOUS if any(e.strength is Strength.CONCLUSIVE for e in retained)
+               else VerdictCode.SUSPICIOUS if retained else
                VerdictCode.CLEAN if status is StageStatus.COMPLETED else VerdictCode.UNKNOWN)
     return EngineResult(CONTRACT_VERSION, engine, request.file_id, measured, status,
-                        verdict, coverage, tuple(evidence[:64]), None, None, generation,
+                        verdict, coverage, retained, None, None, generation,
                         readiness, start, (time.monotonic_ns() - start) // 1_000_000, error)
 
 
@@ -169,7 +173,15 @@ class JsonRulesAdapter:
             inspect(body)
             if body.startswith(archive.ZIP_PREFIXES):
                 if len(body) == measured.size:
-                    archive.walk(body, ledger, cancel, lambda path, payload: inspect(payload, path))
+                    stopped = archive.walk(body, ledger, cancel, lambda path, payload: inspect(payload, path),
+                                           request.deadline_monotonic_ns)
+                    if stopped == "DEADLINE":
+                        return _result(self.engine_id, request, measured, reader, start, evidence,
+                                       StageStatus.TIMEOUT, state, self.ruleset_digest,
+                                       error=ScanError("DEADLINE", "archive", "DEADLINE", True), ledger=ledger)
+                    if stopped == "CANCELLED":
+                        return _result(self.engine_id, request, measured, reader, start, evidence,
+                                       StageStatus.CANCELLED, state, self.ruleset_digest, ledger=ledger)
                 else:
                     ledger.parser("zip", "partial")
             status = StageStatus.PARTIAL if state == "RULES_DEGRADED" or len(body) < measured.size else StageStatus.COMPLETED
@@ -266,7 +278,15 @@ class YaraXAdapter:
             inspect(body)
             if body.startswith(archive.ZIP_PREFIXES):
                 if not partial:
-                    archive.walk(body, ledger, cancel, lambda path, payload: inspect(payload, path))
+                    stopped = archive.walk(body, ledger, cancel, lambda path, payload: inspect(payload, path),
+                                           request.deadline_monotonic_ns)
+                    if stopped == "DEADLINE":
+                        return _result(self.engine_id, request, measured, reader, start, evidence,
+                                       StageStatus.TIMEOUT, state, self.ruleset_digest,
+                                       error=ScanError("DEADLINE", "archive", "DEADLINE", True), ledger=ledger)
+                    if stopped == "CANCELLED":
+                        return _result(self.engine_id, request, measured, reader, start, evidence,
+                                       StageStatus.CANCELLED, state, self.ruleset_digest, ledger=ledger)
                 else:
                     ledger.parser("zip", "partial")
             status = StageStatus.PARTIAL if partial or state == "RULES_DEGRADED" else StageStatus.COMPLETED

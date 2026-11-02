@@ -1,16 +1,19 @@
 from __future__ import annotations
 
-import hashlib
 import io
+import json
 import os
 import time
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from conftest import EICAR, MARKER
 from sentinel.gate_v2.content import BoundReader, ContentError
+from sentinel.gate_v2 import archive
+from sentinel.gate_v2.coverage import CoverageLedger
 from sentinel.gate_v2.contract import (ByteRange, ScanRequest, StageStatus,
                                        Strength, VerdictCode)
 from sentinel.gate_v2.core import CoreAdapter, _pe_signals
@@ -277,3 +280,116 @@ def test_yara_provenance_and_member() -> None:
     req, reader = bound(_zip([("inner.txt", b"MAGICMARK")]))
     result = adapter.scan_bound(req, reader.identity, Token(), reader)
     assert any(e.scope == "member" and e.member_path == "inner.txt" for e in result.evidence)
+
+
+def test_late_eicar_survives_evidence_cap() -> None:
+    payload = _zip([(f"invoice{i}.pdf.exe", b"harmless") for i in range(80)] +
+                   [("eicar.txt", EICAR)])
+    hit = scan(request(data=payload), adapters=[CoreAdapter()],
+               gate_generation="m3", auto_quarantine=False)
+    result = hit.engine_results[0]
+    assert hit.verdict is VerdictCode.MALICIOUS
+    assert any(e.detail_code == "EICAR" and e.is_test_file for e in result.evidence)
+    assert any(e.detail_code == "DOUBLE_EXTENSION_COUNT_80" for e in result.evidence)
+    assert "EVIDENCE_CAP" in result.coverage.limits_hit
+
+
+def test_late_user_rule_survives_evidence_cap(marker_rule: Path) -> None:
+    weak = json.dumps({"rules": [{"id": "weak", "severity": "medium",
+                                    "text": ["harmless"]}]}).encode()
+    rule = JsonRulesAdapter((("bundle", weak, False), ("user", marker_rule.read_bytes(), True)))
+    payload = _zip([(f"invoice{i}.pdf.exe", b"harmless") for i in range(80)] +
+                   [("last.txt", MARKER)])
+    hit = scan(request(data=payload), adapters=[CoreAdapter(), rule],
+               gate_generation="m3", auto_quarantine=False, skip_after_conclusive=False)
+    assert hit.verdict is VerdictCode.MALICIOUS
+    assert any(e.member_path == "last.txt" and e.strength is Strength.CONCLUSIVE
+               for e in hit.engine_results[1].evidence)
+    assert "EVIDENCE_CAP" in hit.engine_results[1].coverage.limits_hit
+
+
+def test_archive_deadline_omits_remaining_members() -> None:
+    payload = _zip([(f"item{i}", b"safe") for i in range(3)])
+    ticks = iter((0, 2))
+    ledger = CoverageLedger(len(payload))
+    seen: list[str] = []
+    stopped = archive.walk(payload, ledger, Token(), lambda name, _: seen.append(name),
+                           1, clock=lambda: next(ticks))
+    assert stopped == "DEADLINE"
+    assert seen == ["item0"]
+    assert ledger.objects_inspected == 1 and ledger.objects_omitted == 2
+    assert ledger.finish().mode == "runtime_partial"
+    assert "DEADLINE" in ledger.finish().object_reasons
+
+
+@pytest.mark.parametrize("adapter_kind", ["core", "json", "yara"])
+def test_member_deadline_returns_timeout(adapter_kind: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    if adapter_kind == "yara":
+        pytest.importorskip("yara_x", reason="yara_x is not installed")
+    adapter = (CoreAdapter() if adapter_kind == "core" else
+               JsonRulesAdapter((("user", json.dumps({"rules": [{"id": "r", "severity": "critical",
+                    "text": ["UNMATCHABLE"]}]}).encode(), True),)) if adapter_kind == "json" else
+               YaraXAdapter((("safe", "safe.yar", "rule Safe { condition: false }"),)))
+    original = archive.walk
+    def controlled(*args, **kwargs):
+        ticks = iter((0, 2))
+        return original(*args, **kwargs, clock=lambda: next(ticks))
+    monkeypatch.setattr(archive, "walk", controlled)
+    req, reader = bound(_zip([("one", b"safe"), ("two", b"safe")]))
+    req = replace(req, deadline_monotonic_ns=1)
+    result = adapter.scan_bound(req, reader.identity, Token(), reader)
+    assert result.status is StageStatus.TIMEOUT
+    assert result.verdict is not VerdictCode.CLEAN
+    assert result.coverage.objects_omitted == 1
+    assert "DEADLINE" in result.coverage.limits_hit
+
+
+def test_yara_timeout_is_typed(monkeypatch: pytest.MonkeyPatch) -> None:
+    yara_x = pytest.importorskip("yara_x", reason="yara_x is not installed")
+    adapter = YaraXAdapter((("safe", "safe.yar", "rule Safe { condition: false }"),), timeout=1)
+    class SlowScanner:
+        def scan(self, _: bytes):
+            raise yara_x.TimeoutError("synthetic timeout")
+    monkeypatch.setattr(adapter, "_scanner", lambda: SlowScanner())
+    req, reader = bound(b"harmless")
+    result = adapter.scan_bound(req, reader.identity, Token(), reader)
+    assert result.status is StageStatus.TIMEOUT
+    assert result.verdict is VerdictCode.UNKNOWN
+    assert result.error and result.error.code == "YARA_TIMEOUT"
+
+
+def test_yara_warning_and_rejected_source_manifest() -> None:
+    pytest.importorskip("yara_x", reason="yara_x is not installed")
+    adapter = YaraXAdapter((("warn", "warn.yar", "rule Warn { strings: $a = /./ condition: $a }"),
+                            ("bad", "bad.yar", "rule Broken { condition: }"),
+                            ("good", "good.yar", "rule Good { condition: true }")))
+    assert adapter.readiness() == "RULES_DEGRADED"
+    assert any(item.name == "bad.yar" and not item.accepted and item.reason == "COMPILE_ERROR"
+               for item in adapter.manifest)
+    assert any(item.name == "good.yar" and item.accepted for item in adapter.manifest)
+    assert any("slow_pattern" in detail for item in adapter.manifest for detail in item.details)
+    req, reader = bound(b"safe")
+    result = adapter.scan_bound(req, reader.identity, Token(), reader)
+    assert result.status is StageStatus.PARTIAL
+    assert "RULES_DEGRADED" in result.coverage.limits_hit
+    assert any(e.signature_id == "Good" for e in result.evidence)
+
+
+def test_same_json_rule_user_and_bundle_strength(marker_rule: Path) -> None:
+    raw = marker_rule.read_bytes()
+    for user, expected in ((False, Strength.SUPPORTING), (True, Strength.CONCLUSIVE)):
+        req, reader = bound(MARKER)
+        adapter = JsonRulesAdapter((("pack", raw, user),))
+        result = adapter.scan_bound(req, reader.identity, Token(), reader)
+        assert result.evidence[0].strength is expected
+
+
+def test_end_to_end_clean_with_all_local_engines(marker_rule: Path) -> None:
+    pytest.importorskip("yara_x", reason="yara_x is not installed")
+    adapters = [CoreAdapter(), JsonRulesAdapter((("user", marker_rule.read_bytes(), True),)),
+                YaraXAdapter((("safe", "safe.yar", "rule Safe { condition: false }"),))]
+    decision = scan(request(data=b"ordinary harmless bytes"), adapters=adapters,
+                    gate_generation="m3", auto_quarantine=False)
+    # M1 trusts a clean result only when every required stage completed with verified full coverage.
+    assert decision.verdict is VerdictCode.CLEAN and decision.trusted_clean
+    assert all(item.status is StageStatus.COMPLETED for item in decision.engine_results)

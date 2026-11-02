@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import io
+import time
 import zipfile
 from collections.abc import Callable
 
 from .. import config
-from .content import ContentError
 from .contract import CancellationToken
 from .coverage import CoverageLedger
 
@@ -20,18 +20,25 @@ _PARSE_ERRORS = (OSError, ValueError, RuntimeError, EOFError,
 
 
 def walk(data: bytes, ledger: CoverageLedger, cancel: CancellationToken,
-         inspect: MemberCheck) -> None:
+         inspect: MemberCheck, deadline_monotonic_ns: int,
+         *, clock: Callable[[], int] = time.monotonic_ns) -> str | None:
     """Call inspect before recording a member as inspected by this engine."""
     count = 0
     declared = 0
 
-    def visit(payload: bytes, depth: int, parent: str) -> None:
+    def visit(payload: bytes, depth: int, parent: str) -> str | None:
         nonlocal count, declared
         try:
             with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-                for info in archive.infolist():
-                    if cancel.cancelled():
-                        raise ContentError("CANCELLED")
+                members = archive.infolist()
+                for index, info in enumerate(members):
+                    reason = "CANCELLED" if cancel.cancelled() else "DEADLINE" if clock() >= deadline_monotonic_ns else None
+                    if reason:
+                        for _ in members[index:]:
+                            ledger.child("omitted", reason)
+                        ledger.limit(reason)
+                        ledger.parser("zip", "partial")
+                        return reason
                     count += 1
                     declared += max(0, info.file_size)
                     member_path = (parent + "/" + info.filename).lstrip("/")[:512]
@@ -60,9 +67,15 @@ def walk(data: bytes, ledger: CoverageLedger, cancel: CancellationToken,
                         inspect(member_path, body)
                         ledger.child("inspected")
                         if body.startswith(ZIP_PREFIXES):
-                            visit(body, depth + 1, member_path)
+                            reason = visit(body, depth + 1, member_path)
+                            if reason:
+                                for _ in members[index + 1:]:
+                                    ledger.child("omitted", reason)
+                                ledger.parser("zip", "partial")
+                                return reason
                 ledger.parser("zip", "complete")
         except _PARSE_ERRORS:
             ledger.parser("zip", "partial")
+        return None
 
-    visit(data, 0, "")
+    return visit(data, 0, "")
