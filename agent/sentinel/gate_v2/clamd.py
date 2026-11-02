@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from .content import BoundReader, ContentError
-from .contract import (CONTRACT_VERSION, ByteRange, CancellationToken, Category,
+from .contract import (CONTRACT_VERSION, ByteRange, CancellationToken,
                        EngineResult, Evidence, FileIdentity, ScanError,
                        ScanRequest, StageStatus, Strength, VerdictCode)
 from .coverage import CoverageLedger
@@ -87,17 +87,20 @@ def _version(raw: str) -> tuple[str, str, datetime]:
         raise _Failure(StageStatus.ERROR, "VERSION_FRAME") from exc
 
 
-def _reply(connection: socket.socket, deadline_ns: int) -> str:
+def _reply(connection: socket.socket, deadline_ns: int,
+           cancel: CancellationToken | None = None) -> str:
     data = bytearray()
     while True:
+        if cancel is not None and cancel.cancelled():
+            raise _Failure(StageStatus.CANCELLED, "CANCELLED")
         remaining = (deadline_ns - time.monotonic_ns()) / 1e9
         if remaining <= 0:
             raise _Failure(StageStatus.TIMEOUT, "DEADLINE")
-        connection.settimeout(min(0.25, remaining))
+        connection.settimeout(min(0.1 if cancel is not None else 1.0, remaining))
         try:
             part = connection.recv(min(4096, _REPLY_CAP + 1 - len(data)))
-        except socket.timeout as exc:
-            raise _Failure(StageStatus.TIMEOUT, "SOCKET_TIMEOUT") from exc
+        except socket.timeout:
+            continue
         if not part:
             raise _Failure(StageStatus.ERROR, "REPLY_EOF")
         if b"\0" in part:
@@ -115,6 +118,25 @@ def _reply(connection: socket.socket, deadline_ns: int) -> str:
         return data.decode("utf-8", "strict")
     except UnicodeDecodeError as exc:
         raise _Failure(StageStatus.ERROR, "REPLY_UTF8") from exc
+
+
+def _send(connection: socket.socket, payload: bytes, deadline_ns: int,
+          cancel: CancellationToken | None = None) -> None:
+    remaining_payload = memoryview(payload)
+    while remaining_payload:
+        if cancel is not None and cancel.cancelled():
+            raise _Failure(StageStatus.CANCELLED, "CANCELLED")
+        remaining = (deadline_ns - time.monotonic_ns()) / 1e9
+        if remaining <= 0:
+            raise _Failure(StageStatus.TIMEOUT, "DEADLINE")
+        connection.settimeout(min(0.1 if cancel is not None else 1.0, remaining))
+        try:
+            count = connection.send(remaining_payload)
+        except socket.timeout:
+            continue
+        if count == 0:
+            raise _Failure(StageStatus.ERROR, "SEND_EOF")
+        remaining_payload = remaining_payload[count:]
 
 
 def _scan_reply(raw: str) -> tuple[str, str | None]:
@@ -141,10 +163,15 @@ class ClamdAdapter:
                  facts: Callable[[], DatabaseFacts] | None = None,
                  now: Callable[[], datetime] | None = None,
                  max_database_age_days: int = 7, stream_cap: int = _STREAM_CAP,
-                 pool_size: int = 2) -> None:
+                 pool_size: int = 2, readiness_ttl_seconds: float = 5.0,
+                 reload_window_seconds: float = 150.0,
+                 instream_timeout_seconds: float = 150.0,
+                 clock_ns: Callable[[], int] | None = None) -> None:
         if host != "127.0.0.1" or not 1 <= port <= 65535 or not 1 <= pool_size <= 3:
             raise ValueError("private IPv4 loopback and pool of 1–3 required")
-        if max_database_age_days < 0 or stream_cap <= 0:
+        if (max_database_age_days < 0 or stream_cap <= 0 or
+            readiness_ttl_seconds <= 0 or reload_window_seconds <= 0 or
+            instream_timeout_seconds <= 0):
             raise ValueError("invalid limits")
         self.address = (host, port)
         self._verifier = verifier or (lambda conn: verify_connected_daemon(conn, expected_daemon))
@@ -154,15 +181,27 @@ class ClamdAdapter:
         self._cap = stream_cap
         self._pool = threading.BoundedSemaphore(pool_size)
         self._state_lock = threading.Lock()
+        self._clock_ns = clock_ns or time.monotonic_ns
+        self._readiness_ttl_ns = int(readiness_ttl_seconds * 1e9)
+        self._reload_window_ns = int(reload_window_seconds * 1e9)
+        self._instream_timeout_ns = int(instream_timeout_seconds * 1e9)
+        self._cached_readiness: ClamdReadiness | None = None
+        self._cached_at_ns = 0
         self._reload_target: str | None = None
         self._reload_acknowledged = False
+        self._reload_started_ns: int | None = None
+        self._reload_failed = False
+
+    def _invalidate_readiness(self) -> None:
+        with self._state_lock:
+            self._cached_readiness = None
 
     def _connect(self, deadline_ns: int) -> socket.socket:
         remaining = (deadline_ns - time.monotonic_ns()) / 1e9
         if remaining <= 0:
             raise _Failure(StageStatus.TIMEOUT, "DEADLINE")
         try:
-            return socket.create_connection(self.address, timeout=min(0.25, remaining))
+            return socket.create_connection(self.address, timeout=min(3.0, remaining))
         except ConnectionRefusedError as exc:
             raise _Failure(StageStatus.UNAVAILABLE, "CONNECTION_REFUSED") from exc
         except socket.timeout as exc:
@@ -176,7 +215,7 @@ class ClamdAdapter:
                 verified = bool(self._verifier(connection))
             except Exception:
                 verified = False
-            connection.sendall(b"z" + command + b"\0")
+            _send(connection, b"z" + command + b"\0", deadline_ns)
             return _reply(connection, deadline_ns), verified
 
     def request_reload(self, new_daily_version: str, deadline_ns: int) -> bool:
@@ -185,16 +224,32 @@ class ClamdAdapter:
         with self._state_lock:
             self._reload_target = new_daily_version
             self._reload_acknowledged = False
+            self._reload_started_ns = None
+            self._reload_failed = False
+            self._cached_readiness = None
         try:
             answer, verified = self._command(b"RELOAD", deadline_ns)
         except (OSError, _Failure):
+            with self._state_lock:
+                self._reload_target = None
+                self._reload_failed = True
             return False
         with self._state_lock:
             self._reload_acknowledged = answer == "RELOADING" and verified
+            if self._reload_acknowledged:
+                self._reload_started_ns = self._clock_ns()
+            else:
+                self._reload_target = None
+                self._reload_failed = True
             return self._reload_acknowledged
 
     def readiness(self, deadline_ns: int | None = None) -> ClamdReadiness:
         deadline_ns = deadline_ns or time.monotonic_ns() + 3_000_000_000
+        with self._state_lock:
+            now_ns = self._clock_ns()
+            if (self._cached_readiness is not None and self._reload_target is None and
+                now_ns - self._cached_at_ns < self._readiness_ttl_ns):
+                return self._cached_readiness
         try:
             pong, ping_owner = self._command(b"PING", deadline_ns)
             if pong != "PONG":
@@ -216,6 +271,16 @@ class ClamdAdapter:
                     if reload_ok:
                         self._reload_target = None
                         self._reload_acknowledged = False
+                        self._reload_started_ns = None
+                        self._reload_failed = False
+                    elif (self._reload_started_ns is not None and
+                          self._clock_ns() - self._reload_started_ns >= self._reload_window_ns):
+                        self._reload_target = None
+                        self._reload_acknowledged = False
+                        self._reload_started_ns = None
+                        self._reload_failed = True
+                        reload_ok = True
+                reload_failed = self._reload_failed
             config_ok = facts.configuration_acceptable and bool(facts.config_digest)
             generation = None
             if verified_db and config_ok:
@@ -223,12 +288,19 @@ class ClamdAdapter:
                                      separators=(",", ":")).encode("utf-8")
                 generation = hashlib.sha256(payload).hexdigest()
             owner = ping_owner and version_owner
-            code = ("READY" if all((owner, loaded, verified_db, fresh, reload_ok, config_ok))
+            code = ("RELOAD_FAILED" if reload_failed and
+                    all((owner, loaded, verified_db, fresh, reload_ok, config_ok)) else
+                    "READY" if all((owner, loaded, verified_db, fresh, reload_ok, config_ok))
                     else "DAEMON_UNVERIFIED" if not owner else "DATABASE_UNLOADED" if not loaded
                     else "DATABASE_UNVERIFIED" if not verified_db else "DATABASE_STALE" if not fresh
                     else "RELOAD_PENDING" if not reload_ok else "CONFIGURATION_UNACCEPTABLE")
-            return ClamdReadiness(True, owner, loaded, verified_db, fresh, reload_ok,
-                                  config_ok, engine, daily, db_date, generation, code)
+            result = ClamdReadiness(True, owner, loaded, verified_db, fresh, reload_ok,
+                                    config_ok, engine, daily, db_date, generation, code)
+            with self._state_lock:
+                if self._reload_target is None:
+                    self._cached_readiness = result
+                    self._cached_at_ns = self._clock_ns()
+            return result
         except (_Failure, OSError, ValueError, TypeError) as exc:
             code = exc.code if isinstance(exc, _Failure) else "READINESS_ERROR"
             return ClamdReadiness(False, False, False, False, False, False, False,
@@ -238,7 +310,9 @@ class ClamdAdapter:
                    cancel: CancellationToken, reader: BoundReader) -> EngineResult:
         start = time.monotonic_ns()
         ledger = CoverageLedger(measured.size)
-        readiness = self.readiness(request.deadline_monotonic_ns)
+        stream_deadline_ns = min(request.deadline_monotonic_ns,
+                                 start + self._instream_timeout_ns)
+        readiness = self.readiness(stream_deadline_ns)
         status = StageStatus.UNVERIFIED
         code = readiness.code
         evidence: tuple[Evidence, ...] = ()
@@ -253,30 +327,32 @@ class ClamdAdapter:
             while not acquired:
                 if cancel.cancelled():
                     raise _Failure(StageStatus.CANCELLED, "CANCELLED")
-                if time.monotonic_ns() >= request.deadline_monotonic_ns:
+                if time.monotonic_ns() >= stream_deadline_ns:
                     raise _Failure(StageStatus.TIMEOUT, "DEADLINE")
                 acquired = self._pool.acquire(timeout=0.05)
-            with self._connect(request.deadline_monotonic_ns) as connection:
+            with self._connect(stream_deadline_ns) as connection:
                 try:
                     scan_owner = bool(self._verifier(connection))
                 except Exception:
                     scan_owner = False
-                connection.sendall(b"zINSTREAM\0")
+                if not scan_owner:
+                    self._invalidate_readiness()
+                _send(connection, b"zINSTREAM\0", stream_deadline_ns, cancel)
                 first = b""
                 size = min(measured.size, self._cap)
                 while sent < size:
                     if cancel.cancelled():
                         raise _Failure(StageStatus.CANCELLED, "CANCELLED")
-                    if time.monotonic_ns() >= request.deadline_monotonic_ns:
+                    if time.monotonic_ns() >= stream_deadline_ns:
                         raise _Failure(StageStatus.TIMEOUT, "DEADLINE")
                     part = reader.read(sent, min(_CHUNK, reader.resident_limit, size - sent), cancel)
                     if not first:
                         first = part[:16]
-                    connection.settimeout(min(0.25, max(0.001, (request.deadline_monotonic_ns - time.monotonic_ns()) / 1e9)))
-                    connection.sendall(struct.pack(">I", len(part)) + part)
+                    _send(connection, struct.pack(">I", len(part)) + part,
+                          stream_deadline_ns, cancel)
                     sent += len(part)
-                connection.sendall(struct.pack(">I", 0))
-                raw = _reply(connection, request.deadline_monotonic_ns)
+                _send(connection, struct.pack(">I", 0), stream_deadline_ns, cancel)
+                raw = _reply(connection, stream_deadline_ns, cancel)
             kind, name = _scan_reply(raw)
             trusted = readiness.trusted and scan_owner
             # F8: verified means only that these outer bytes reached the verified
@@ -305,7 +381,7 @@ class ClamdAdapter:
             status = (StageStatus.UNVERIFIED if not trusted else StageStatus.PARTIAL
                       if ledger.fixed_reduction or ledger.objects_opaque or ledger.limits_hit
                       else StageStatus.COMPLETED)
-            code = readiness.code if not trusted else "READY"
+            code = readiness.code
         except ContentError as exc:
             status = StageStatus.CANCELLED if exc.code == "CANCELLED" else StageStatus.CHANGED if exc.code == "CHANGED" else StageStatus.ERROR
             code = exc.code
@@ -318,6 +394,8 @@ class ClamdAdapter:
         finally:
             if acquired:
                 self._pool.release()
+        if status in (StageStatus.ERROR, StageStatus.TIMEOUT, StageStatus.UNAVAILABLE):
+            self._invalidate_readiness()
         if not ledger.inspected and sent:
             ledger.inspected = (ByteRange(0, sent),)
         coverage = ledger.finish()

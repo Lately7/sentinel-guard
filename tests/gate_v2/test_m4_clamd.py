@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from sentinel.gate_v2.clamd import ClamdAdapter, DatabaseFacts
-from sentinel.gate_v2.contract import ActionCode, Category, ScanRequest, StageStatus, Strength, VerdictCode
+from sentinel.gate_v2.contract import ActionCode, ScanRequest, StageStatus, Strength, VerdictCode
 from sentinel.gate_v2.orchestrator import scan
 from sentinel.gate_v2.winnet import connected_server_pid
 
@@ -22,9 +22,11 @@ VERSION_2 = b"ClamAV 1.4.3/27651/Mon Nov  2 12:00:00 2026\0"
 
 
 class FakeClamd:
-    def __init__(self, reply: bytes = b"stream: OK\0", *, delay: float = 0) -> None:
+    def __init__(self, reply: bytes = b"stream: OK\0", *, delay: float = 0,
+                 reload_reply: bytes = b"RELOADING\0") -> None:
         self.reply = reply
         self.delay = delay
+        self.reload_reply = reload_reply
         self.version = VERSION_1
         self.streams: list[bytes] = []
         self.commands: list[bytes] = []
@@ -55,7 +57,7 @@ class FakeClamd:
                     elif command == b"zVERSION\0":
                         answer = self.version
                     elif command == b"zRELOAD\0":
-                        answer = b"RELOADING\0"
+                        answer = self.reload_reply
                     elif command == b"zINSTREAM\0":
                         body = bytearray()
                         while True:
@@ -116,11 +118,12 @@ def adapter(port: int, *, verified: bool = True, db_facts: DatabaseFacts | None 
 
 
 def decision(engine: ClamdAdapter, data: bytes = b"harmless bytes", *,
-             timeout: float = 3):
+             timeout: float = 3, cancel: object = None):
     request = ScanRequest(2, "m4", "file", None, data, "test", "memory",
                           "evidence-v1", "evidence-v1",
                           time.monotonic_ns() + int(timeout * 1e9), None, False)
-    return scan(request, adapters=[engine], gate_generation="m4", auto_quarantine=True)
+    return scan(request, adapters=[engine], cancel=cancel,
+                gate_generation="m4", auto_quarantine=True)
 
 
 @pytest.mark.parametrize("reply,status,strength,verdict", [
@@ -244,6 +247,85 @@ def test_timeout_and_refusal() -> None:
     refused = decision(adapter(port))
     assert refused.engine_results[0].status is StageStatus.UNAVAILABLE
     assert refused.verdict is VerdictCode.UNKNOWN
+
+
+def test_delayed_instream_reply_completes() -> None:
+    with FakeClamd(delay=1.0) as daemon:
+        result = decision(adapter(daemon.port), timeout=3)
+    assert result.engine_results[0].status is StageStatus.COMPLETED
+    assert result.trusted_clean
+
+
+def test_instream_waits_until_deadline() -> None:
+    with FakeClamd(delay=1.5) as daemon:
+        started = time.monotonic()
+        result = decision(adapter(daemon.port), timeout=0.7)
+        elapsed = time.monotonic() - started
+    assert result.engine_results[0].status is StageStatus.TIMEOUT
+    assert 0.55 <= elapsed < 1.3
+
+
+def test_cancel_during_instream_reply_wait() -> None:
+    stopped = threading.Event()
+
+    class Token:
+        def cancelled(self) -> bool:
+            return stopped.is_set()
+
+    with FakeClamd(delay=1.0) as daemon:
+        timer = threading.Timer(0.35, stopped.set)
+        timer.start()
+        started = time.monotonic()
+        result = decision(adapter(daemon.port), timeout=3, cancel=Token())
+        elapsed = time.monotonic() - started
+        timer.join()
+    assert result.engine_results[0].status is StageStatus.CANCELLED
+    assert elapsed < 0.7
+
+
+def test_readiness_cache_reused_and_invalidated_after_error() -> None:
+    with FakeClamd() as daemon:
+        engine = adapter(daemon.port)
+        for _ in range(3):
+            assert decision(engine).engine_results[0].status is StageStatus.COMPLETED
+        assert daemon.commands.count(b"zPING\0") == 1
+        assert daemon.commands.count(b"zVERSION\0") == 1
+        daemon.reply = b"bad reply\0"
+        assert decision(engine).engine_results[0].status is StageStatus.ERROR
+        daemon.reply = b"stream: OK\0"
+        assert decision(engine).engine_results[0].status is StageStatus.COMPLETED
+        assert daemon.commands.count(b"zPING\0") == 2
+        assert daemon.commands.count(b"zVERSION\0") == 2
+
+
+def test_failed_reload_keeps_old_generation_active() -> None:
+    with FakeClamd(reload_reply=b"UNKNOWN COMMAND\0") as daemon:
+        engine = adapter(daemon.port)
+        before = engine.readiness()
+        assert not engine.request_reload("27651", time.monotonic_ns() + 2_000_000_000)
+        after = engine.readiness()
+        assert after.code == "RELOAD_FAILED"
+        assert after.trusted
+        assert after.generation_digest == before.generation_digest
+        result = decision(engine)
+        assert result.engine_results[0].status is StageStatus.COMPLETED
+        assert result.engine_results[0].readiness_code == "RELOAD_FAILED"
+
+
+def test_reload_activation_window_expires_to_old_generation() -> None:
+    with FakeClamd() as daemon:
+        tick = [time.monotonic_ns()]
+        engine = ClamdAdapter(port=daemon.port, verifier=lambda _: True,
+                              facts=facts, now=lambda: NOW, clock_ns=lambda: tick[0],
+                              reload_window_seconds=2)
+        before = engine.readiness()
+        assert engine.request_reload("27651", time.monotonic_ns() + 2_000_000_000)
+        assert engine.readiness().code == "RELOAD_PENDING"
+        tick[0] += 3_000_000_000
+        after = engine.readiness()
+        assert after.code == "RELOAD_FAILED"
+        assert after.trusted
+        assert after.generation_digest == before.generation_digest
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows TCP owner table")
