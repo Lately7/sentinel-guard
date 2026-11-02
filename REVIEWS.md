@@ -152,6 +152,7 @@ with a desired-behaviour test are in `tests/test_known_issues.py`
 | RT-034 | No database-age readiness (`FailIfCvdOlderThan` absent; it would check only the youngest DB) | R8c (not re-checked) | Open → Gate v2 |
 | RT-035 | A (possibly weak) ClamAV hit skips Defender, removing corroboration | code | Open → Gate v2 |
 | RT-036 | No record of what an `OK` can mean (no match / FP rule / internal limit) | R8c | Open → Gate v2 contract |
+| RT-037…052 | YARA-X layer: swallowed scan errors/timeouts (RT-037, verified), 64 MiB bytes copies, front+tail split views, no match cap, compiler warnings/partial sources/origins ignored, provenance lost, metadata-driven severity, count-only cache identity, shared scanner, regex rule splitting, include policy, module outputs dropped, certificate presence called signed | RT-037 code; others R12a | Open → Gate v2 YARA-X adapter (`docs/research/R12a-yara-x.md` §6) |
 
 Tests after these fixes: pytest 110 passed, 4 skipped (real-clamd tests, no
 clamd), 3 xfailed (known issues); node --test 12 passed.

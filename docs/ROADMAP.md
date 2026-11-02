@@ -136,6 +136,7 @@ cần xử lý mới sáng lên (333 ms); tắt hết khi Windows tắt hiệu �
 | RT-027 | Chỉ đọc một view registry của khoá Run | TB | ✅ |
 | RT-028 | Tên ClamAV `BC.Heuristics.*` bị coi là chắc chắn độc (ClamAV coi là "có thể không mong muốn") | TB | Gate v2 |
 | RT-029…036 | Bộ chuyển ClamAV: cập nhật/RELOAD/độ sẵn sàng/định dạng trả lời/định danh cache/tuổi chữ ký (chi tiết trong `REVIEWS.md`, R8c) | TB–Cao | Gate v2 |
+| RT-037…052 | Lớp YARA-X: nuốt lỗi/timeout, chép 64 MB, chia đầu/đuôi, mất nguồn gốc luật, cache chỉ theo số luật… (R12a) | TB–Cao | Gate v2 |
 
 Đã kiểm chứng trong code: RT-008…013, 019, 022, 023, 026. Các mục còn lại
 được kiểm chứng bằng test khi sửa.
