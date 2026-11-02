@@ -49,14 +49,22 @@ Nghiên cứu xong: `docs/research/R13-admin-realtime-remediation.md`. Thiết k
   có bằng chứng chắc chắn; diệt tiến trình, gỡ khởi động cùng Windows, dịch
   vụ, WMI… cần xác nhận; không bao giờ đụng tệp hệ thống Windows hay Defender.
 
+Thảo luận thiết kế với Codex (`docs/research/R13b-design-discussion.md`)
+đã chốt thêm: dịch vụ LocalSystem mỏng viết bằng `ctypes` (không thêm thư
+viện); **lệnh làm yếu bảo vệ** (tắt bảo vệ, "Luôn tin cậy", khôi phục tệp,
+loại trừ, duyệt sửa) **phải xác nhận qua UAC**, vì mã độc chạy dưới quyền
+user cũng nói chuyện được với pipe; native host chỉ được tra cứu và báo tệp
+tải về; worker quét quyền thấp chạy sẵn 2 tiến trình (tối đa 4); theo dõi
+tiến trình bằng chụp danh sách 500 ms trước, ETW để sau.
+
 | Mốc | Việc | Ghi chú |
 |---|---|---|
-| G3–G6 | Gate v2 mốc 3–6 (core/luật, ClamAV, Defender, cache + adapter) | làm trước |
-| A1 | Giao thức pipe + dịch vụ giả lập, native host/khay thành client | không cần admin để test |
-| A2 | Worker quét quyền thấp + Job Object | không cần admin để test |
-| A3 | Gate v2 mốc 7 qua dịch vụ: cách ly có kiểm lại, nhật ký hoàn tác | |
+| G3–G6 | Gate v2 mốc 3–6 (core/luật, ClamAV, Defender, cache + adapter) | song song với A1 |
+| A1 | Giao thức pipe + phân quyền lệnh + `ServiceCore` + pipe giả lập | song song với G3–G6; không cần admin để test |
+| A2 | Worker quét quyền thấp + Job Object | sau adapter Gate v2 |
+| A3 | Gate v2 mốc 7 qua dịch vụ: cách ly có kiểm lại, nhật ký hoàn tác, hộp xác nhận UAC | |
 | A4 | Gate v2 mốc 8 + nguồn quét admin (mọi user, dịch vụ, tác vụ, WMI…) | |
-| A5 | USN journal, ETW khởi chạy tiến trình, quét lại tệp tải về | cần chủ dự án chạy thử với quyền admin |
+| A5 | USN journal, chụp danh sách tiến trình 500 ms, quét lại tệp tải về | cần chủ dự án chạy thử với quyền admin |
 | A6 | Xem trước kế hoạch sửa, rồi từng thao tác sửa có xác nhận | |
 
 Cài và chạy dịch vụ cần quyền admin: chủ dự án tự chạy; Claude không tự nâng
