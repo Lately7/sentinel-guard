@@ -16,6 +16,11 @@ async function load() {
   $("s-blocked").textContent = state.stats.blocked || 0;
   $("s-warned").textContent = state.stats.warned || 0;
   $("s-downloads").textContent = state.stats.downloads || 0;
+  const waiting = (state.pendingDownloads || []).length;
+  if (waiting) {
+    $("s-downloads").textContent += ` (+${waiting} chờ)`;
+    $("s-downloads").title = `${waiting} tệp tải về chưa được agent kiểm tra`;
+  }
 
   if (agent && !agent.error) {
     $("agent").textContent = `đã kết nối (v${agent.version})`;

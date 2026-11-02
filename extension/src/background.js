@@ -2,13 +2,14 @@ import { scoreUrl } from "./url_heuristics.js";
 import { buildBlockRules, buildAllowRules, ALLOW_BASE_ID, KIND_CODES, KIND_LABELS } from "./rules.js";
 import * as native from "./native.js";
 import { VALID } from "./messages.js";
+import { recordFailure, recordSuccess, retryable } from "./pending.js";
 
 const WARN_AT = 70; // heuristic score that earns a full-page warning
 const NOTE_AT = 40; // heuristic score shown in the popup / in-page banner
 const SYNC_MINUTES = 360;
 const BLOCKED_PAGE = chrome.runtime.getURL("src/blocked.html");
 
-const DEFAULTS = { enabled: true, blocklistVersion: "", allowVersion: "", blocklistSize: 0, allowHosts: [], pendingAllow: [], syncError: "", stats: { blocked: 0, warned: 0, downloads: 0 } };
+const DEFAULTS = { enabled: true, blocklistVersion: "", allowVersion: "", blocklistSize: 0, allowHosts: [], pendingAllow: [], pendingDownloads: [], syncError: "", stats: { blocked: 0, warned: 0, downloads: 0 } };
 
 async function getState() {
   const s = await chrome.storage.local.get(DEFAULTS);
@@ -247,15 +248,39 @@ chrome.downloads.onChanged.addListener(async (delta) => {
   if (!enabled) return;
   const [item] = await chrome.downloads.search({ id: delta.id });
   if (!item || !item.filename) return;
-  bumpStat("downloads");
+  await scanDownload({ id: item.id, path: item.filename, url: item.finalUrl || item.url });
+});
+
+// Pending list updates are serialised like the counters: two downloads can
+// finish (or fail) at the same moment.
+let pendingChain = Promise.resolve();
+function updatePending(fn) {
+  pendingChain = pendingChain.then(async () => {
+    const { pendingDownloads } = await getState();
+    await chrome.storage.local.set({ pendingDownloads: fn(pendingDownloads) });
+  }).catch(() => {});
+  return pendingChain;
+}
+
+async function scanDownload(d) {
+  const name = d.path.split(/[\\/]/).pop();
   let res;
   try {
-    res = await native.request("scan_download", { path: item.filename, url: item.finalUrl || item.url }, 180000);
-  } catch {
+    res = await native.request("scan_download", { path: d.path, url: d.url }, 180000);
+  } catch (e) {
+    // Not checked is not "scanned": keep it, tell the user once, retry later.
+    let first = false;
+    await updatePending((list) => {
+      first = !list.some((p) => p.id === d.id);
+      return recordFailure(list, d, e, Date.now());
+    });
+    if (first) notify("Chưa kiểm tra được tệp tải về", `${name}: agent trên máy chưa phản hồi — sẽ thử lại`);
+    chrome.alarms.create("download-retry", { delayInMinutes: 2 });
     return;
   }
+  await updatePending((list) => recordSuccess(list, d.id));
+  bumpStat("downloads");
   const label = res.verdict.label;
-  const name = item.filename.split(/[\\/]/).pop();
   if (label === "malicious") {
     notify(res.quarantined ? "Đã cách ly tệp tải về nguy hiểm" : "Tệp tải về nguy hiểm", `${name}: ${res.reason}`);
   } else if (label === "suspicious") {
@@ -410,6 +435,10 @@ chrome.runtime.onStartup.addListener(() => {
   syncBlocklist(false).catch(() => {});
   updateBadge();
 });
-chrome.alarms.onAlarm.addListener((a) => {
+chrome.alarms.onAlarm.addListener(async (a) => {
   if (a.name === "sync" || a.name === "sync-retry") syncBlocklist(false).catch(() => {});
+  if (a.name === "download-retry") {
+    const { pendingDownloads } = await getState();
+    for (const d of retryable(pendingDownloads)) await scanDownload(d);
+  }
 });
