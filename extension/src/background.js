@@ -383,9 +383,8 @@ async function handle(msg, sender) {
       } else {
         await allowOnce(tabId, host);
         report("proceeded", msg.url, "once");
-        // Navigate from here: a navigation started by the warning page itself
-        // reaches declarativeNetRequest with tabId -1, so the tab-scoped pass
-        // would not match it (seen in Helium 156).
+        // Navigate from here, after the rule is in place, so the warning page
+        // cannot race ahead of updateSessionRules.
         await chrome.tabs.update(tabId, { url: msg.url });
         return { ok: true, navigated: true };
       }

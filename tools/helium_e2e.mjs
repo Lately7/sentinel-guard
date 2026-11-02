@@ -124,16 +124,22 @@ try {
   results.once_opened = !onceUrl.includes("blocked.html");
   results.once_not_trusted = !(await allowHosts()).includes("blocked-selftest.sentinelguard.invalid");
   results.once_session_rules = await sessionRules();
-  results.once_debug = { url: onceUrl, rules: await evalSw("chrome.declarativeNetRequest.getSessionRules()"),
+  if (!results.once_opened) results.once_debug = { url: onceUrl, rules: await evalSw("chrome.declarativeNetRequest.getSessionRules()"),
                          once: await evalSw("chrome.storage.session.get(['once']).then(s => s.once)"),
                          matched: await evalSw("chrome.declarativeNetRequest.getMatchedRules({}).then(r => r.rulesMatchedInfo.slice(-4).map(m => ({rule: m.rule, tab: m.tabId})))") };
   // ...and leaving the site ends the pass.
   await blocked.ev("location.href = 'https://example.com/'");
   await sleep(4000);
   results.once_dropped_after_leaving = (await sessionRules()) === 0;
-  // "Luôn tin cậy" trusts exactly that host.
+  const again = await open("http://blocked-selftest.sentinelguard.invalid/login");
+  results.once_reblocked_after_leaving = again.where.includes("blocked.html");
+  // "Luôn tin cậy" trusts exactly that host...
   await click(warned.ev, "always");
   results.always_trusted = (await allowHosts()).includes("secure-paypal.account-verify.invalid");
+  // ...and really opens a host blocked by the network rules (the DNS lookup of
+  // .invalid then fails, so an error page is success; the warning page is not).
+  const alwaysUrl = await click(again.ev, "always");
+  results.always_opened_blocklisted = !alwaysUrl.includes("blocked.html");
 
   const popup = await open(`chrome-extension://${EXT_ID}/src/popup.html`, 2500);
   await popup.shot("popup.png", 320, 300);

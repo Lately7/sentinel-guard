@@ -32,12 +32,20 @@ test("allow rules outrank block rules", () => {
   // Scoped allow: a trusted page must not unblock the malware hosts it embeds.
   assert.equal(r.action.type, "allow");
   assert.deepEqual(r.condition.requestDomains, ["trusted.example"]);
+  // RT-022: without main_frame the redirect rule still sends the page itself to the warning.
+  assert.ok(r.condition.resourceTypes.includes("main_frame"));
+  assert.ok(r.condition.resourceTypes.includes("script"));
 });
 
 test("one-time pass is a tab-scoped allow rule above the block rules", async () => {
   const { buildOnceRule, ONCE_BASE_ID, ALLOW_BASE_ID: ALLOW } = await import("../src/rules.js");
   const r = buildOnceRule(ONCE_BASE_ID + 3, "login-example.test", 42);
-  assert.deepEqual(r.condition, { requestDomains: ["login-example.test"], tabIds: [42] });
+  assert.deepEqual(r.condition.requestDomains, ["login-example.test"]);
+  assert.deepEqual(r.condition.tabIds, [42]);
+  // RT-022: a condition without resource types skips main_frame, so the page never opened.
+  assert.ok(r.condition.resourceTypes.includes("main_frame"));
+  assert.ok(r.condition.resourceTypes.includes("xmlhttprequest"), "the opened page must load its own resources");
+  assert.equal(r.condition.excludedResourceTypes, undefined);
   assert.equal(r.action.type, "allow");
   assert.ok(r.priority > buildBlockRules([["x.example", "phishing"]])[0].priority);
   assert.ok(ONCE_BASE_ID > ALLOW + 5000, "one-time ids must not collide with the persistent allow range");

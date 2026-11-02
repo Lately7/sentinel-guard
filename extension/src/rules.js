@@ -42,6 +42,16 @@ export function buildBlockRules(hosts) {
   return rules;
 }
 
+// Allow rules must name their resource types: a DNR condition without
+// resourceTypes/excludedResourceTypes matches every type *except* main_frame
+// (chrome.declarativeNetRequest RuleCondition.resourceTypes, Chrome docs), so
+// a bare allow rule never lets the page itself past the redirect rule (RT-022,
+// reproduced in Helium 156 with tools/helium_e2e.mjs).
+export const ALL_RESOURCE_TYPES = [
+  "main_frame", "sub_frame", "stylesheet", "script", "image", "font", "object", "xmlhttprequest",
+  "ping", "csp_report", "media", "websocket", "webtransport", "webbundle", "other",
+];
+
 // One-time passes: session rules limited to one tab (tabIds is session-only in DNR).
 export const ONCE_BASE_ID = 950000;
 export const ONCE_SLOTS = 40000;
@@ -51,7 +61,7 @@ export function buildOnceRule(id, host, tabId) {
     id,
     priority: 10,
     action: { type: "allow" },
-    condition: { requestDomains: [host], tabIds: [tabId] },
+    condition: { requestDomains: [host], tabIds: [tabId], resourceTypes: ALL_RESOURCE_TYPES },
   };
 }
 
@@ -66,7 +76,7 @@ export function buildAllowRules(hosts) {
       // would also exempt everything a trusted page loads, so a compromised
       // trusted site could pull scripts from blocklisted malware hosts.
       action: { type: "allow" },
-      condition: { requestDomains: [h] },
+      condition: { requestDomains: [h], resourceTypes: ALL_RESOURCE_TYPES },
     }));
 }
 

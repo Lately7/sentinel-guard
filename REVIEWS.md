@@ -137,7 +137,7 @@ with a desired-behaviour test are in `tests/test_known_issues.py`
 | RT-019 | Native host accepted a missing origin | code + test | Fixed `5af59ed` (C3j; `--diagnostic` for manual runs) |
 | RT-020 | page_signals: NaN scores, unbounded fields | test | Fixed `62ff720` (C3k) |
 | RT-021 | Allowlist silently truncated at 5,000 | not yet | Open → phase 5 |
-| RT-022 | "Proceed" creates a permanent host exception | code + Helium e2e | Partly: split into "Mở một lần" (session rule, no trust entry) and "Luôn tin cậy" (`d422f74`); the one-time pass still gets redirected — open, see `docs/handoff/NEXT_SESSION.md` §3 |
+| RT-022 | "Proceed" creates a permanent host exception | code + Helium e2e | Fixed: split into "Mở một lần" (session rule for one tab, no trust entry) and "Luôn tin cậy" (`d422f74`). Root cause of the pass not opening: a DNR condition without `resourceTypes` matches every type except `main_frame` (Chrome DNR docs, `RuleCondition.resourceTypes`), so neither the one-time rule nor the persistent trust rules ever applied to the page itself — "Luôn tin cậy" did not open a network-blocked host either (e2e against the old rules: `once_opened: false`, `always_opened_blocklisted: false`). Allow rules now list every resource type including `main_frame`; Helium 156 e2e: once opened, not trusted, dropped and re-blocked after leaving, always-trust opens the blocked host, no SW errors |
 | RT-023 | Failed download hand-off counted as scanned | test | Fixed `0a29a6e` (pending list + retry); that commit also broke background.js syntax, fixed in `d422f74` |
 | RT-024 | Traversal omissions missing from coverage | not yet | Open → Gate v2 / phase 5 |
 | RT-025 | Popup "no issue" when nothing was checked | test | Fixed `fcb74d5` (`page_status.js`) |
