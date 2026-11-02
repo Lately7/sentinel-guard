@@ -325,6 +325,49 @@ Scope clean. Merged `09a1869`. New tests fail on `448e18e`.
 | L4 | An unaccepted hit displayed as CRITICAL 100, structure as MEDIUM | Fixed: `_grade` |
 | L5 | A failing cache write failed the scan | Fixed |
 
+## Edge-case test round by Codex
+
+`tests/codex/`, 42 cases, written by Codex, run by Claude. Fixed in `a68236c`.
+
+| # | Finding | Outcome |
+|---|---|---|
+| E1 | ZIP with data prepended was never walked, so it was trusted clean | Fixed: `archive.is_zip` finds the directory from the end |
+| E2 | A data descriptor with false sizes was accepted | Fixed: `HEADER_MISMATCH` |
+| E3 | Content only in an alternate data stream was trusted clean | Fixed: `ALTERNATE_STREAM` opaque coverage; Zone.Identifier and SmartScreen ignored |
+| E4 | A `BaseException` from an adapter ended the scan: Rust panics in YARA-X arrive that way | Fixed: typed `ADAPTER_ERROR` |
+| E5 | A wall clock moved backwards revived an expired cache entry | Fixed: `stored_at` |
+| E6 | Very deep JSON could raise `RecursionError` out of the native-host and pipe parsers | Fixed |
+
+## Gate v2 milestone 6 part 2 (Claude)
+
+`engine/scanner.py` is now a facade over Gate v2. Closes RT-004, RT-009, RT-012, RT-013,
+RT-014, RT-033. RT-001 stays open by design until `evidence-v1`: the label improved, the
+action did not, because `legacy-v0` is a locked owner decision and `act_on` follows it.
+
+Found while wiring or measuring:
+
+| # | Finding | Outcome |
+|---|---|---|
+| N1 | Overlapping YARA match offsets broke the contract and lost the hit | Fixed: `normalize_ranges` |
+| N2 | Repeated evidence collapsed into a count raised `EVIDENCE_CAP`, so an ordinary archive became unknown | Fixed: only a dropped item is a limit |
+| N3 | `_entropy` used 256 passes of `bytes.count`: 76% of scan time (cProfile, 390 files) | Fixed: `Counter`; 15 → 42 files/s |
+| N4 | `Windows.Data.Pdf.dll` read as a double extension: the only false alarm in 4,000 files | Fixed: libraries excluded |
+| N5 | The tail sample read past a small resident limit | Fixed |
+
+Behaviour changes, each deliberate: a file that could not be fully checked is `unknown`,
+not `clean`, and the CLI exits 3 for it; a corrupt ZIP is `unknown`; a clamd that is
+configured but down makes files `unknown`, and passive Defender does not; Defender stays
+limited to risky file types; a database older than 7 days does not clear files; one YARA
+Forge match is `MEDIUM`, whatever its metadata says; old score sums no longer reach
+`malicious` (R11 §6: no arithmetic threshold).
+
+Measured with `tools/fp_sample.py` (read-only, disposable home, no ClamAV, no Defender, no
+rules installed) on 4,000 files from System32, ClamAV and Python: 3,997 clean, 0 suspicious,
+3 unknown (2 unreadable, 1 in use), 42 files/s. This is not an FP rate for the product: it
+ran without external engines and on one machine.
+
+Not run: Helium e2e against the new gate, and a real clamd.
+
 ## R15 — independent code review by Codex (read-only)
 
 Answer in `docs/research/R15-code-review-gate-service.md`. Claude checked each finding.

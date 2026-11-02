@@ -32,6 +32,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
     settings.auto_quarantine = args.quarantine
     scanner = Scanner(db, use_defender=not args.no_defender and settings.use_defender,
                       use_clamav=not args.no_clamav and settings.use_clamav)
+    # clamd takes about 20 s to load; without this wait every file would be unknown.
+    if scanner.clamav is not None:
+        scanner.clamav.start(wait=60)
     malicious = suspicious = False
     results = []
     missing = [p for p in args.paths if not os.path.exists(p)]

@@ -174,6 +174,13 @@ def test_old_archive_signals_survive(db):
     assert v.label == SUSPICIOUS
 
 
+def test_a_dotted_library_name_is_not_a_disguise(db, tmp_path):
+    # Found by scanning System32: Windows.Data.Pdf.dll was the only false alarm in 4,000 files.
+    scanner = Scanner(db, use_defender=False)
+    assert scanner.scan_file(file_with(tmp_path, b"ordinary", "Windows.Data.Pdf.dll")).label == CLEAN
+    assert scanner.scan_file(file_with(tmp_path, b"ordinary", "invoice.pdf.exe")).label == SUSPICIOUS
+
+
 def test_files_above_the_limit_are_reported_not_clean(db, tmp_path, monkeypatch):
     monkeypatch.setattr(config, "MAX_SCAN_BYTES", 8)
     v = Scanner(db, use_defender=False).scan_file(file_with(tmp_path, MARKER))

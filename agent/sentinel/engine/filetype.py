@@ -10,6 +10,7 @@ EXECUTABLE_EXTS = frozenset(
     ".exe .scr .com .pif .cpl .msi .msp .dll .sys .jar .lnk .url .reg .appref-ms "
     ".bat .cmd .ps1 .psm1 .vbs .vbe .js .jse .wsf .wsh .hta .msc .scf .application".split()
 )
+LIBRARY_EXTS = frozenset(".dll .sys".split())
 SCRIPT_EXTS = frozenset(".bat .cmd .ps1 .psm1 .vbs .vbe .js .jse .wsf .wsh .hta .sh .py".split())
 DECOY_EXTS = frozenset(
     ".pdf .doc .docx .xls .xlsx .ppt .pptx .rtf .txt .csv .odt "
@@ -88,7 +89,8 @@ def check_name(name: str, head: bytes) -> list[Finding]:
             findings.append(Finding("filetype", "filetype.rtlo", Severity.HIGH,
                                     "file name contains bidirectional override characters that disguise its extension", 40))
 
-        if len(exts) >= 2 and last in EXECUTABLE_EXTS and exts[-2] in DECOY_EXTS:
+        # Nobody opens a .dll by double-clicking it, so "Windows.Data.Pdf.dll" fools no one.
+        if len(exts) >= 2 and last in EXECUTABLE_EXTS - LIBRARY_EXTS and exts[-2] in DECOY_EXTS:
             findings.append(Finding("filetype", "filetype.double_extension", Severity.MEDIUM,
                                     f"executable '{last}' hidden behind '{exts[-2]}'", 25))
         elif last in EXECUTABLE_EXTS and _padded_before_ext(name):
