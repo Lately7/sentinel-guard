@@ -39,7 +39,7 @@ cổng** vẫn làm ngay: native host (C3e, C3j), extension (C3k), mã thoát CL
 | # | Giai đoạn | Trạng thái |
 |---|---|---|
 | 0 | **Nền tảng**: C1 icon cũ, C2a cổng quét, C2b baseline, giao diện tối, bộ icon v2 | ✅ xong |
-| 1 | **Sửa lỗi** (C3a, e, g, h, j, k ✅; C3b/c/f vào Gate v2; C3i bỏ; còn C3d) | ⏳ gần xong |
+| 1 | **Sửa lỗi** (C3a, d, e, g, h, j, k ✅; C3b/c/f vào Gate v2; C3i bỏ) | ✅ xong |
 | R | **Nghiên cứu sâu cho Gate v2** (R8a–R11, `docs/research/`) | ⏳ R9, R10 đang chạy; R8 chờ tải mã nguồn ClamAV |
 | G | **Gate v2** do Codex viết theo đặc tả R11, Claude review | chờ R11 |
 | 2 | **Red Team viết test** (Codex vòng 1a, 1b) | chờ giai đoạn 1 |
@@ -56,7 +56,7 @@ cổng** vẫn làm ngay: native host (C3e, C3j), extension (C3k), mã thoát CL
 | C3a | Kết quả Defender có kiểu (sạch/độc/lỗi/hết giờ/không có) | RT-008 | ✅ `d77dea1` |
 | C3b | Định danh cổng quét theo nội dung luật; không cache kết quả chưa đầy đủ | RT-009 | ⏸ chuyển vào Gate v2 |
 | C3c | Giữ trạng thái "bỏ qua"/"một phần" cho ZIP quá lớn | một phần RT-004 | ⏸ chuyển vào Gate v2 |
-| C3d | Sửa 2 test đang khoá quyết định sai; sổ RT; `tools/check_codex_scope.ps1`; vai trò Codex trong `AGENTS.md` | — | ⏭ |
+| C3d | Sửa 2 test đang khoá quyết định sai; sổ RT; `tools/check_codex_scope.ps1`; vai trò Codex trong `AGENTS.md` | — | ✅ `ee2fb35` |
 | C3e | Native host đọc đủ thân thông điệp | RT-006 | ✅ `5af59ed` |
 | C3f | Chỗ cắm test cho ClamAV client | — | ⏸ chuyển vào Gate v2 |
 | C3g | Mã thoát CLI đúng thứ tự 2 > 3 > 1 > 0 | RT-011 | ✅ `290f4a0` |
@@ -151,5 +151,5 @@ cần xử lý mới sáng lên (333 ms); tắt hết khi Windows tắt hiệu �
 
 ## Kiểm thử gần nhất
 
-pytest **103 passed, 4 skipped** (không có clamd, sau C3k) · extension **12 passed**.
+pytest **110 passed, 4 skipped, 3 xfailed** (không có clamd; 3 xfail = lỗi đã biết RT-001/002/026) · extension **12 passed**.
 Baseline tại C2a: `docs/baseline.md`.
