@@ -15,6 +15,7 @@ from . import config
 from .db import Database
 from .engine.scanner import Scanner
 from .engine.verdict import CLEAN, MALICIOUS, Verdict
+from .gate_v2.legacy import UNKNOWN
 from .protection import act_on
 
 log = logging.getLogger(__name__)
@@ -92,6 +93,7 @@ class ScanProgress:
     # Files no external engine (ClamAV/Defender) confirmed: a clean label for
     # these rests on the built-in checks alone.
     unverified: int = 0
+    unknown: int = 0  # a required check did not finish: neither clean nor a threat
     current: str = ""
     cancelled: bool = False
     errors: list[str] = field(default_factory=list)
@@ -148,7 +150,8 @@ class ScanJob:
             level = "warning" if p.detections else "info"
             self.db.add_event("scan", level, "Đã dừng quét" if p.cancelled else "Quét xong",
                               f"{p.title}: {p.scanned} tệp, {p.detections} phát hiện, {p.quarantined} đã cách ly",
-                              {"paths": p.paths, "unverified": p.unverified, "unreadable": p.unreadable})
+                              {"paths": p.paths, "unverified": p.unverified, "unreadable": p.unreadable,
+                               "unknown": p.unknown})
             if self.on_done:
                 self.on_done(p)
 
@@ -160,6 +163,10 @@ class ScanJob:
                 v.engines.get(k, "").startswith(CHECKED) for k in ("clamav", "defender")):
             p.unverified += 1
         if v.label == CLEAN:
+            return
+        if v.label == UNKNOWN:
+            p.unknown += 1
+            act_on(self.db, v, self.settings, "scan")
             return
         p.detections += 1
         if v.label == MALICIOUS:

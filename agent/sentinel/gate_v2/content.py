@@ -60,6 +60,9 @@ class BoundReader:
         self._data = data
         self.resident_limit = resident_limit
         self._reads: list[ByteRange] = []
+        # Core, JSON rules and YARA-X all read the same front of the file; the
+        # generation check still runs, only the disk read and the copy are saved.
+        self._last: tuple[int, int, bytes] | None = None
 
     @classmethod
     def measure_path(cls, path: str, *, max_bytes: int,
@@ -106,6 +109,10 @@ class BoundReader:
             raise ContentError("RESIDENT_LIMIT")
         amount = min(n, self.identity.size - offset)
         self._check()
+        if self._last is not None and self._last[:2] == (offset, amount):
+            if amount:
+                self._reads.append(ByteRange(offset, offset + amount))
+            return self._last[2]
         out = bytearray()
         while len(out) < amount:
             if cancel.cancelled():
@@ -123,7 +130,8 @@ class BoundReader:
         self._check()
         if amount:
             self._reads.append(ByteRange(offset, offset + amount))
-        return bytes(out)
+        self._last = (offset, amount, bytes(out))
+        return self._last[2]
 
     def begin_stage(self) -> None:
         self._reads.clear()
@@ -141,6 +149,7 @@ class BoundReader:
         return normalize_ranges(tuple(self._reads), self.identity.size)
 
     def close(self) -> None:
+        self._last = None
         if self._stream is not None:
             self._stream.close()
             self._stream = None

@@ -9,10 +9,16 @@ import zipfile
 from collections.abc import Callable
 
 from .. import config
+from ..engine import filetype
 from .contract import CancellationToken
 from .coverage import CoverageLedger
 
+MAX_ZIP_ENTRIES = 200_000
+MAX_ZIP_DIRECTORY_BYTES = 32 * 1024 * 1024
+BOMB_RATIO = 200
+BOMB_BYTES = 50 * 1024 * 1024
 MemberCheck = Callable[[str, bytes], None]
+Notice = Callable[[str, str], None]
 ZIP_PREFIXES = (b"PK\x03\x04", b"PK\x05\x06")
 _METHODS = (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED,
             zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA)
@@ -54,18 +60,48 @@ def is_zip(payload: bytes) -> bool:
         return False
 
 
+def _directory_too_large(payload: bytes) -> bool:
+    """A small archive can declare millions of entries; decide from the end
+    record, before zipfile builds them all in memory."""
+    tail = payload[-66_000:]
+    at = tail.rfind(b"PK\x05\x06")
+    if at < 0 or at + 22 > len(tail):
+        return False
+    entries = int.from_bytes(tail[at + 10:at + 12], "little")
+    size = int.from_bytes(tail[at + 12:at + 16], "little")
+    wide = tail.rfind(b"PK\x06\x06", 0, at)  # ZIP64 carries the real 64-bit counts
+    if wide >= 0 and wide + 56 <= len(tail):
+        entries = int.from_bytes(tail[wide + 32:wide + 40], "little")
+        size = int.from_bytes(tail[wide + 40:wide + 48], "little")
+    return entries > MAX_ZIP_ENTRIES or size > MAX_ZIP_DIRECTORY_BYTES
+
+
+def _sort_key(info: zipfile.ZipInfo) -> bool:
+    # Executables and archives first, so the member limit never hides them
+    # behind thousands of harmless entries.
+    suffix = filetype.extension(info.filename)
+    return suffix not in filetype.EXECUTABLE_EXTS and suffix not in filetype.ARCHIVE_EXTS
+
+
 def walk(data: bytes, ledger: CoverageLedger, cancel: CancellationToken,
          inspect: MemberCheck, deadline_monotonic_ns: int,
-         *, clock: Callable[[], int] = time.monotonic_ns) -> str | None:
-    """Call inspect before recording a member as inspected by this engine."""
+         *, clock: Callable[[], int] = time.monotonic_ns, notice: Notice | None = None) -> str | None:
+    """Call inspect before recording a member as inspected by this engine.
+    `notice(code, member)` reports what can be said about a member without its bytes."""
     count = 0
     declared = 0
+    tell = notice or (lambda code, member: None)
 
     def visit(payload: bytes, depth: int, parent: str) -> str | None:
         nonlocal count, declared
+        if _directory_too_large(payload):
+            tell("DIRECTORY_TOO_LARGE", parent)
+            ledger.child("opaque", "DIRECTORY_TOO_LARGE")
+            ledger.parser("zip", "partial")
+            return None
         try:
             with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-                members = archive.infolist()
+                members = sorted(archive.infolist(), key=_sort_key)
                 for index, info in enumerate(members):
                     reason = "CANCELLED" if cancel.cancelled() else "DEADLINE" if clock() >= deadline_monotonic_ns else None
                     if reason:
@@ -78,13 +114,20 @@ def walk(data: bytes, ledger: CoverageLedger, cancel: CancellationToken,
                     declared += max(0, info.file_size)
                     member_path = (parent + "/" + info.filename).lstrip("/")[:512]
                     if count > config.MAX_ARCHIVE_MEMBERS:
+                        tell("NAME_ONLY", member_path)  # names cost nothing to check
                         ledger.child("omitted", "MAX_CHILDREN")
                     elif depth >= config.MAX_ARCHIVE_DEPTH:
                         ledger.child("omitted", "DEPTH_LIMIT")
                     elif info.flag_bits & 1:
+                        if filetype.extension(info.filename) in filetype.EXECUTABLE_EXTS:
+                            tell("ENCRYPTED_EXECUTABLE", member_path)
                         ledger.child("opaque", "ENCRYPTED")
                     elif info.compress_type not in _METHODS:
                         ledger.child("opaque", "UNSUPPORTED_METHOD")
+                    elif (info.compress_size and info.file_size > BOMB_BYTES and
+                          info.file_size / info.compress_size > BOMB_RATIO):
+                        tell("ARCHIVE_BOMB", member_path)
+                        ledger.child("omitted", "BOMB")
                     elif info.file_size > config.MAX_DEEP_SCAN_BYTES:
                         ledger.child("omitted", "MEMBER_SIZE_LIMIT")
                     elif declared > config.MAX_ARCHIVE_TOTAL_BYTES:

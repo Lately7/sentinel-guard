@@ -106,8 +106,13 @@ def scan(
     emit: EventStream | Callable[..., object] | None = None,
     clock: Clock = time.monotonic_ns, max_bytes: int = 512 * 1024 * 1024,
     skip_after_conclusive: bool = True,
+    resident_limit: int = 64 * 1024 * 1024,
+    short_circuit: Callable[[FileIdentity], FinalDecision | None] | None = None,
     _admitted: bool = False,
 ) -> FinalDecision:
+    """`short_circuit` sees the measured generation before any stage runs: a user
+    trust or a cached decision comes back from it. The action is decided here
+    either way, because protection state and identity are facts of this moment."""
     ordered = tuple(adapters)
     ids = tuple(item.engine_id for item in ordered)
     if len(ids) != len(set(ids)):
@@ -138,7 +143,8 @@ def scan(
         bound = any(callable(getattr(item, "scan_bound", None)) for item in ordered)
         if bound and request.path is not None:
             try:
-                reader = BoundReader.measure_path(request.path, max_bytes=max_bytes, cancel=token)
+                reader = BoundReader.measure_path(request.path, max_bytes=max_bytes, cancel=token,
+                                                  resident_limit=resident_limit)
                 measured_result = identity.IdentityResult(reader.identity, "OK")
             except ContentError as exc:
                 measured_result = identity.IdentityResult(None, exc.code)
@@ -157,12 +163,13 @@ def scan(
         measured = measured_result.identity
         assert measured is not None
         if bound and reader is None:
-            reader = BoundReader.from_bytes(request.data or b"", measured)
+            reader = BoundReader.from_bytes(request.data or b"", measured, resident_limit=resident_limit)
         _publish(emit, request.file_id, "identity", "finished", "OK")
         machine.advance("stages")
+        known = short_circuit(measured) if short_circuit is not None else None
         results: list[EngineResult] = []
         stop: StageStatus | None = None
-        for adapter in ordered:
+        for adapter in (() if known is not None else ordered):
             start = clock()
             if stop is None:
                 if token.cancelled():
@@ -232,7 +239,7 @@ def scan(
                          StageStatus.CANCELLED, StageStatus.UNVERIFIED, StageStatus.UNAVAILABLE))
         machine.advance("deciding")
         try:
-            decision = decide(tuple(results), request, gate_generation, stages=required)
+            decision = known or decide(tuple(results), request, gate_generation, stages=required)
         except ContractError as exc:
             decision = replace(_unknown(request, gate_generation, exc.code, auto_quarantine, measured), engine_results=tuple(results))
         current_generation = (current_protection_generation() if current_protection_generation is not None

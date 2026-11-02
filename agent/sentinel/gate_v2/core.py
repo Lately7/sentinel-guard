@@ -18,7 +18,12 @@ from .coverage import CoverageLedger
 from .evidence import select_evidence
 
 EICAR_SHA256 = "275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f"
-HashLookup = Callable[[str], bool]
+# Truthy for a known-bad hash; a string names the feed that listed it.
+HashLookup = Callable[[str], "bool | str | None"]
+INFLATED_PE_BYTES = 100 * 1024 * 1024
+_TAIL_SAMPLE = 1024 * 1024
+_MEMBER_SIGNALS = {"ENCRYPTED_EXECUTABLE": Category.MALWARE, "ARCHIVE_BOMB": Category.MALWARE,
+                   "DIRECTORY_TOO_LARGE": Category.STRUCTURE}
 _ORDINARY_STREAMS = frozenset({"zone.identifier", "smartscreen", "com.dropbox.attrs", "com.dropbox.attributes"})
 
 
@@ -68,8 +73,9 @@ class CoreAdapter:
     engine_id = "core"
     reopens_path = False
 
-    def __init__(self, known_bad: HashLookup | None = None) -> None:
+    def __init__(self, known_bad: HashLookup | None = None, name: str | None = None) -> None:
         self.known_bad = known_bad or (lambda digest: False)
+        self.name = name  # bytes scanned from memory have no path to take it from
 
     def readiness(self) -> str:
         return "READY"
@@ -82,14 +88,27 @@ class CoreAdapter:
         status = StageStatus.COMPLETED
         error = None
         def add(code: str, category: Category, strength: Strength, *,
-                test: bool = False, member_path: str | None = None) -> None:
+                test: bool = False, member_path: str | None = None,
+                source: str = "sentinel-core") -> None:
             span = reader.ranges[:1]
             # An empty file has no byte to point at, and a hit on it still counts.
             if span or not measured.size:
                 evidence.append(Evidence(f"core.{code.lower()}", self.engine_id, code, None,
                                          category, strength, "member" if member_path else "outer",
-                                         member_path, span, "sentinel-core",
+                                         member_path, span, source[:128],
                                          None, None, True, code, test))
+
+        def check_name(name: str, head: bytes, member_path: str | None) -> None:
+            for finding in filetype.check_name(PurePath(name).name, head):
+                if finding.rule in ("filetype.rtlo", "filetype.double_extension", "filetype.padded_name", "filetype.mismatch"):
+                    add(finding.rule.replace("filetype.", "").upper(), Category.MALWARE,
+                        Strength.SUPPORTING, member_path=member_path)
+
+        def notice(code: str, member: str) -> None:
+            if code == "NAME_ONLY":
+                check_name(member, b"", member)
+            else:
+                add(code, _MEMBER_SIGNALS[code], Strength.SUPPORTING, member_path=member or None)
 
         def inspect(name: str, payload: bytes, member_path: str | None = None) -> None:
             digest = hashlib.sha256(payload).hexdigest() if member_path else measured.sha256
@@ -98,17 +117,17 @@ class CoreAdapter:
                     member_path=member_path)
             else:
                 try:
-                    if self.known_bad(digest):
-                        add("KNOWN_BAD_HASH", Category.MALWARE, Strength.CONCLUSIVE,
-                            member_path=member_path)
+                    listed = self.known_bad(digest)
+                    if listed:
+                        add("KNOWN_BAD_HASH", Category.MALWARE, Strength.CONCLUSIVE, member_path=member_path,
+                            source=listed if isinstance(listed, str) else "sentinel-core")
                 except Exception:
                     nonlocal status
                     status = StageStatus.PARTIAL
                     ledger.parser("hash_lookup", "error")
-            for finding in filetype.check_name(PurePath(name).name, payload[:4096]):
-                if finding.rule in ("filetype.rtlo", "filetype.double_extension", "filetype.padded_name", "filetype.mismatch"):
-                    add(finding.rule.replace("filetype.", "").upper(), Category.MALWARE,
-                        Strength.SUPPORTING, member_path=member_path)
+            if member_path and PurePath(name).name.lower() == "vbaproject.bin":
+                add("OFFICE_MACROS", Category.STRUCTURE, Strength.CONTEXT, member_path=member_path)
+            check_name(name, payload[:4096], member_path)
             for code in _pe_signals(payload):
                 add(code, Category.STRUCTURE,
                     Strength.CONTEXT if code == "PE_CERTIFICATE_DECLARED" else Strength.SUPPORTING,
@@ -120,10 +139,17 @@ class CoreAdapter:
         try:
             # Content hashing was completed through this same handle before stages.
             body = reader.read(0, min(measured.size, reader.resident_limit), cancel)
-            ledger.inspected = reader.ranges
             if measured.size > len(body):
                 ledger.fixed_reduction = True
-            inspect(PurePath(request.path or "").name, body)
+                # Hundreds of MB of near-constant bytes after the code is padding
+                # meant to pass size limits; real installers append compressed data.
+                if body.startswith(b"MZ") and measured.size > INFLATED_PE_BYTES:
+                    sample = min(_TAIL_SAMPLE, reader.resident_limit)
+                    tail = reader.read(measured.size - sample, sample, cancel)
+                    if _entropy(tail) < 1.0:
+                        add("PE_INFLATED", Category.MALWARE, Strength.SUPPORTING)
+            ledger.inspected = reader.ranges
+            inspect(self.name or PurePath(request.path or "").name, body)
             for name, size in reader.named_streams():
                 # Content in a named stream is on disk but outside every byte we
                 # read; the marks browsers and Windows leave are not content.
@@ -132,7 +158,7 @@ class CoreAdapter:
             if archive.is_zip(body):
                 if measured.size == len(body):
                     stopped = archive.walk(body, ledger, cancel, lambda path, payload: inspect(path, payload, path),
-                                           request.deadline_monotonic_ns)
+                                           request.deadline_monotonic_ns, notice=notice)
                     if stopped == "DEADLINE":
                         status = StageStatus.TIMEOUT
                         error = ScanError("DEADLINE", "archive", "DEADLINE", True)
@@ -151,7 +177,8 @@ class CoreAdapter:
         verdict = (VerdictCode.MALICIOUS if any(e.strength is Strength.CONCLUSIVE for e in retained)
                    else VerdictCode.SUSPICIOUS if any(e.category is Category.MALWARE for e in retained)
                    else VerdictCode.CLEAN if status is StageStatus.COMPLETED else VerdictCode.UNKNOWN)
+        partial_code = "SIZE_LIMIT" if ledger.fixed_reduction else status.value.upper()
         return EngineResult(CONTRACT_VERSION, self.engine_id, request.file_id, measured,
                             status, verdict, coverage, retained, "core-v2", None,
-                            None, "READY" if status is StageStatus.COMPLETED else status.value.upper(),
+                            None, "READY" if status is StageStatus.COMPLETED else partial_code,
                             start, (time.monotonic_ns() - start) // 1_000_000, error)

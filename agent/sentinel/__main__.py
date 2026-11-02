@@ -49,6 +49,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
         if broken:
             failures.append(f"{f}: {'; '.join(broken)}")
             print(f"ERROR      {f}: {'; '.join(broken)}", file=sys.stderr)
+        # Not checked must never read as clean to a script (exit 3).
+        if v.label == "unknown":
+            failures.append(f"{f}: {v.skipped or 'not fully checked'}")
         malicious |= v.label == "malicious"
         suspicious |= v.label == "suspicious"
         if args.json:

@@ -21,15 +21,22 @@ from sentinel.engine.clamav import ClamAVEngine, finding_for, parse_reply
 from sentinel.engine.scanner import Scanner
 from sentinel.engine.signatures import _yara_severity
 from sentinel.engine.verdict import CLEAN, MALICIOUS, SUSPICIOUS, Severity
+from sentinel.gate_v2.clamd import DatabaseFacts
+from sentinel.gate_v2.legacy import UNKNOWN
 from sentinel.scanjob import ScanJob
+
+
+def clamd_date() -> str:
+    # The real reply carries the database date, and Gate v2 checks it for freshness.
+    return time.strftime("%a %b %d %H:%M:%S %Y", time.gmtime())
 
 
 class FakeClamd:
     """Speaks enough of clamd's protocol: PING, VERSION, INSTREAM."""
 
-    def __init__(self, verdict=lambda data: "OK", version: str = "ClamAV 1.5.4/1/test") -> None:
+    def __init__(self, verdict=lambda data: "OK", daily: int = 1) -> None:
         self.verdict = verdict
-        self.version = version
+        self.daily = daily
         self.streams: list[bytes] = []
         self.sock = socket.socket()
         self.sock.bind(("127.0.0.1", 0))
@@ -66,7 +73,7 @@ class FakeClamd:
         if cmd == b"zPING\0":
             conn.sendall(b"PONG\0")
         elif cmd == b"zVERSION\0":
-            conn.sendall(self.version.encode() + b"\0")
+            conn.sendall(f"ClamAV 1.5.4/{self.daily}/{clamd_date()}".encode() + b"\0")
         elif cmd == b"zINSTREAM\0":
             data = b""
             while True:
@@ -90,7 +97,13 @@ def fake_clamd():
 
 
 def gate(db, srv: FakeClamd) -> Scanner:
-    return Scanner(db, use_defender=False, clamav_engine=ClamAVEngine(autostart=False, port_=srv.port))
+    # A fake is not a clamd.exe in Program Files and has no database on disk, so
+    # what the real engine works out for itself is stated here.
+    def facts() -> DatabaseFacts:
+        return DatabaseFacts(True, True, str(srv.daily), f"inventory-{srv.daily}", "config", True, None)
+
+    return Scanner(db, use_defender=False, clamav_engine=ClamAVEngine(
+        autostart=False, port_=srv.port, verifier=lambda _: True, facts=facts))
 
 
 # -- protocol --------------------------------------------------------------
@@ -157,7 +170,8 @@ def test_clamav_error_reply_is_recorded(db, tmp_path):
         p.write_text("hello")
         v = gate(db, srv).scan_file(p)
         assert v.engines["clamav"].startswith("error")
-        assert v.label == CLEAN  # an engine failure is not evidence of malware
+        # An engine failure is not evidence of malware, and not a clean file (RT-013).
+        assert v.label == UNKNOWN and v.skipped.startswith("incomplete")
     finally:
         srv.close()
 
@@ -198,10 +212,10 @@ def test_oversized_file_rules_see_front_and_tail(scanner, monkeypatch, tmp_path)
 
 def test_padded_executable_is_suspicious(scanner, monkeypatch, tmp_path):
     from sentinel import config
-    from sentinel.engine import scanner as scanner_mod
+    from sentinel.gate_v2 import core
 
     monkeypatch.setattr(config, "MAX_DEEP_SCAN_BYTES", 4096)
-    monkeypatch.setattr(scanner_mod, "INFLATED_PE_BYTES", 1024 * 1024)
+    monkeypatch.setattr(core, "INFLATED_PE_BYTES", 1024 * 1024)
     p = tmp_path / "setup.exe"
     p.write_bytes(b"MZ" + os.urandom(8000) + b"\x00" * (3 * 1024 * 1024))
     v = scanner.scan_file(p)
@@ -217,21 +231,21 @@ def test_large_file_is_streamed_from_disk(db, fake_clamd, monkeypatch, tmp_path)
     p = tmp_path / "big.bin"
     p.write_bytes(b"\x00" * 5000 + MARKER)
     v = gate(db, fake_clamd).scan_file(p)
-    assert v.skipped and "hash and name" in v.skipped
+    assert v.engines["sentinel"].startswith("partial")
     assert v.engines["clamav"] == "detected" and v.label == MALICIOUS
 
 
 def test_cached_verdict_is_not_reused_after_clamav_update(db, tmp_path):
-    srv = FakeClamd(version="ClamAV 1.5.4/100/old")
+    srv = FakeClamd(daily=100)
     try:
         p = tmp_path / "x.bin"
         p.write_bytes(b"\x00" + MARKER)
         sc = gate(db, srv)
         assert sc.scan_file(p).label == CLEAN  # old database: no signature yet
         assert sc.scan_file(p).label == CLEAN and len(srv.streams) == 1  # served from cache
-        srv.version = "ClamAV 1.5.4/101/new"
+        srv.daily = 101
         srv.verdict = lambda d: "Win.Test.New-1 FOUND"
-        sc.clamav._version = None  # skip the 60 s version cache
+        sc._clamd_adapter()._invalidate_readiness()  # skip the 5 s readiness cache
         assert sc.scan_file(p).label == MALICIOUS
     finally:
         srv.close()
@@ -336,7 +350,8 @@ def test_yara_feed_drops_only_rules_that_do_not_compile(sentinel_home):
     sc = Scanner(Database(), use_defender=False)
     assert sc.sigs.yara_rules == 3
     v = sc.scan_bytes(b"xx SENTINEL-YARA-OK xx", "a.txt")
-    assert any(f.rule == "yara.good_one" and f.severity == Severity.HIGH for f in v.findings)
+    # One Forge match stays supporting, whatever its metadata says (R11 §5).
+    assert any(f.rule == "yara.good_one" and f.severity == Severity.MEDIUM for f in v.findings)
     assert v.engines["rules+yara"] == "detected"
     assert any(f.rule == "yara.uses_helper" for f in sc.scan_bytes(b"HELPER-XYZ", "b.txt").findings)
 

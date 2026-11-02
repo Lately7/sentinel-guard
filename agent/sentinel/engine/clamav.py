@@ -13,6 +13,7 @@ directory, so nothing in Program Files has to be writable.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import shutil
@@ -21,9 +22,13 @@ import struct
 import subprocess
 import threading
 import time
+from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .. import config
+from ..gate_v2.clamd import DatabaseFacts
+from ..gate_v2.winnet import verify_connected_image
 from .verdict import Finding, Severity
 
 log = logging.getLogger(__name__)
@@ -103,9 +108,10 @@ def write_configs() -> tuple[Path, Path]:
         "ScanHTML yes", "ScanXMLDOCS yes", "ScanHWP3 yes", "ScanArchive yes", "ScanMail yes",
         "Bytecode yes",
         "HeuristicAlerts yes",
-        # The "alert on X" switches flag ordinary password-protected archives
-        # and big installers; the agent reports those limits itself, softer.
-        "AlertBrokenExecutables no", "AlertEncrypted no", "AlertExceedsMax no", "AlertOLE2Macros no",
+        # Encrypted and over-limit content must be heard about: without these
+        # clamd answers OK for what it never saw (RT-012, RT-014). Gate v2 reads
+        # those names as coverage debt, not as malware.
+        "AlertBrokenExecutables no", "AlertEncrypted yes", "AlertExceedsMax yes", "AlertOLE2Macros no",
         "DetectPUA no",
         "",
     ]), encoding="utf-8")
@@ -122,6 +128,45 @@ def write_configs() -> tuple[Path, Path]:
         "",
     ]), encoding="utf-8")
     return clamd_conf, fresh_conf
+
+
+def _database_header(path: Path) -> dict[str, object] | None:
+    """The 512-byte header every .cvd and .cld starts with: version, signature
+    time and content digest. Reading it is cheap, and it changes with the bytes."""
+    try:
+        with path.open("rb") as stream:
+            raw = stream.read(512)
+        fields = raw.decode("ascii", errors="replace").rstrip(" \0").split(":")
+        if len(fields) < 9 or fields[0] != "ClamAV-VDB":
+            return None
+        return {"version": fields[2], "built": int(fields[8]), "digest": hashlib.sha256(raw).hexdigest(),
+                "size": path.stat().st_size, "name": path.name}
+    except (OSError, ValueError):
+        return None
+
+
+def database_facts() -> DatabaseFacts:
+    """What the database on disk says, to compare with what clamd reports it loaded."""
+    headers = {}
+    for stem in ("main", "daily", "bytecode"):
+        # freshclam's incremental .cld replaces the .cvd when both exist.
+        found = [h for h in (_database_header(db_dir() / f"{stem}.{kind}") for kind in ("cld", "cvd")) if h]
+        if found:
+            headers[stem] = found[0]
+    conf = home() / "clamd.conf"
+    try:
+        text = conf.read_bytes()
+    except OSError:
+        text = b""
+    daily = headers.get("daily")
+    return DatabaseFacts(
+        loaded=has_database(), verified="main" in headers and daily is not None,
+        expected_daily_version=str(daily["version"]) if daily else None,
+        inventory_digest=hashlib.sha256(repr(sorted(headers.items())).encode()).hexdigest() if headers else None,
+        config_digest=hashlib.sha256(text).hexdigest() if text else None,
+        configuration_acceptable=f"TCPAddr {HOST}".encode() in text,
+        # main.cvd is rebuilt rarely by design; only daily shows how fresh we are.
+        oldest_database_date=datetime.fromtimestamp(int(daily["built"]), timezone.utc) if daily else None)
 
 
 def update(timeout: float = 1800.0) -> str:
@@ -238,14 +283,25 @@ def finding_for(name: str) -> Finding:
 class ClamAVEngine:
     """Owns the clamd process (when it started it) and answers scan requests."""
 
-    def __init__(self, autostart: bool = True, port_: int | None = None) -> None:
+    def __init__(self, autostart: bool = True, port_: int | None = None,
+                 verifier: Callable[[socket.socket], bool] | None = None,
+                 facts: Callable[[], DatabaseFacts] | None = None) -> None:
         self.client = Clamd(port_=port_)
+        self.facts = facts or database_facts
+        self._verifier = verifier
         self._proc: subprocess.Popen[bytes] | None = None
         self._lock = threading.Lock()
         self._last_check = 0.0
         self._ready = False
         self._version: tuple[float, str | None] | None = None
         self.autostart = autostart
+
+    def verify(self, connection: socket.socket) -> bool:
+        """Is the process on the other end of this connection really clamd?"""
+        if self._verifier is not None:
+            return self._verifier(connection)
+        directory = install_dir()
+        return directory is not None and verify_connected_image(connection, str(directory / _exe("clamd")))
 
     def status(self) -> str:
         if self.ready():
@@ -258,8 +314,10 @@ class ClamAVEngine:
         # A dead daemon must be noticed, but pinging before every file would
         # double the cost of small scans.
         now = time.monotonic()
-        if self._ready and now - self._last_check < 10:
-            return True
+        # A refused connection costs about 2 s on Windows, so "down" is remembered
+        # too, or a folder scan would pay that for every file while clamd starts.
+        if now - self._last_check < (10 if self._ready else 5) and self._last_check:
+            return self._ready
         self._ready = self.client.ping()
         self._last_check = now
         if not self._ready and self.autostart:

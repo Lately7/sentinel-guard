@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 from .. import config
 from ..db import Database
-from .verdict import Finding, Severity
+from .verdict import Severity
 
 log = logging.getLogger(__name__)
 
@@ -22,7 +23,7 @@ log = logging.getLogger(__name__)
 EICAR_SHA256 = "275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f"
 
 _SEVERITY = {s.name.lower(): s for s in Severity}
-_SCORE = {Severity.INFO: 0, Severity.LOW: 10, Severity.MEDIUM: 25, Severity.HIGH: 45, Severity.CRITICAL: 100}
+_RULE = re.compile(r"^\s*(?:(?:private|global)\s+)*rule\s+\w+", re.M)
 
 
 @dataclass(frozen=True)
@@ -60,38 +61,27 @@ def load_pattern_rules(dirs: list[Path]) -> list[PatternRule]:
 
 
 class SignatureEngine:
+    """What rules are installed, for the dashboard and for Gate v2's adapters, which
+    do the matching. It compiles nothing: 5,000 YARA rules take seconds."""
+
     def __init__(self, db: Database, extra_rule_dirs: list[Path] | None = None) -> None:
         self.db = db
-        dirs = [Path(__file__).resolve().parent.parent / "rules", config.user_rules_dir(), *(extra_rule_dirs or [])]
-        self.pattern_rules = load_pattern_rules([d for d in dirs if d.is_dir()])
-        self._yara, self.yara_rules = _load_yara([d for d in dirs if d.is_dir()])
+        self.bundled_dirs = [d for d in (Path(__file__).resolve().parent.parent / "rules", *(extra_rule_dirs or []))
+                             if d.is_dir()]
+        self._dirs = [*self.bundled_dirs, config.user_rules_dir()]
+        self.pattern_rules = load_pattern_rules(self._dirs)
+        self.yara_rules = sum(len(_RULE.findall(source)) for _, _, source in self.yara_sources())
 
-    def match_hash(self, sha256: str) -> list[Finding]:
-        if sha256 == EICAR_SHA256:
-            return [Finding("signature", "eicar.test_file", Severity.CRITICAL, "EICAR anti-malware test file (harmless)", 100)]
-        row = self.db.hash_info(sha256)
-        if row:
-            name = row["name"] or "known malware"
-            return [Finding("signature", f"hash.{row['source']}", Severity.CRITICAL,
-                            f"SHA-256 listed by {row['source']}: {name}", 100)]
-        return []
-
-    def match_content(self, data: bytes) -> list[Finding]:
-        out: list[Finding] = []
-        for r in self.pattern_rules:
-            hits = [p in data for p in r.patterns]
-            if (all(hits) if r.match_all else any(hits)):
-                out.append(Finding("rules", r.id, r.severity, r.description, _SCORE[r.severity]))
-        if self._yara is not None:
-            try:
-                for rule in self._yara.scan(data).matching_rules:
-                    meta = dict(rule.metadata)
-                    sev = _yara_severity(meta)
-                    out.append(Finding("yara", f"yara.{rule.identifier}", sev,
-                                       str(meta.get("description", rule.identifier)), _SCORE[sev]))
-            except Exception as e:  # a broken or slow rule must not abort the scan
-                log.warning("yara match failed: %s", e)
-        return out
+    def yara_sources(self) -> tuple[tuple[str, str, str], ...]:
+        """(namespace, origin, source) of every *.yar file."""
+        out = []
+        for d in self._dirs:
+            for f in sorted(d.glob("*.yar")):
+                try:
+                    out.append((f.stem, str(f), f.read_text(encoding="utf-8", errors="replace")))
+                except OSError as e:
+                    log.warning("skipping YARA file %s: %s", f, e)
+        return tuple(out)
 
 
 def _yara_severity(meta: dict) -> Severity:
@@ -107,33 +97,3 @@ def _yara_severity(meta: dict) -> Severity:
             return Severity.MEDIUM
         return Severity.LOW
     return Severity.HIGH
-
-
-def _load_yara(dirs: list[Path]):
-    """User-supplied YARA rules (*.yar) via YARA-X, if installed."""
-    try:
-        import yara_x  # type: ignore[import-not-found]
-    except ImportError:
-        return None, 0
-    files = [p for d in dirs for p in sorted(d.glob("*.yar"))]
-    if not files:
-        return None, 0
-    compiler = yara_x.Compiler()
-    loaded = 0
-    for f in files:
-        try:
-            compiler.new_namespace(f.stem)
-            compiler.add_source(f.read_text(encoding="utf-8", errors="replace"))
-            loaded += 1
-        except Exception as e:  # one bad file must not disable the others
-            log.warning("skipping YARA file %s: %s", f, e)
-    if not loaded:
-        return None, 0
-    try:
-        rules = compiler.build()
-        scanner = yara_x.Scanner(rules)
-        scanner.set_timeout(20)
-        return scanner, sum(1 for _ in rules) if hasattr(rules, "__iter__") else loaded
-    except Exception as e:
-        log.warning("YARA rules failed to build: %s", e)
-        return None, 0

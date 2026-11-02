@@ -116,7 +116,8 @@ def test_zip_member_states(monkeypatch: pytest.MonkeyPatch) -> None:
     oversize = bytearray(normal)
     at = oversize.find(b"PK\x01\x02")
     oversize[at + 24:at + 28] = (65 * 1024 * 1024).to_bytes(4, "little")
-    assert "MEMBER_SIZE_LIMIT" in _zip_result(bytes(oversize)).coverage.object_reasons
+    # 65 MiB declared from a few bytes is a bomb first and oversize second.
+    assert "BOMB" in _zip_result(bytes(oversize)).coverage.object_reasons
     original = zipfile.ZipFile
     def broken(*args, **kwargs):
         raise zipfile.BadZipFile("synthetic")
@@ -291,7 +292,7 @@ def test_late_eicar_survives_evidence_cap() -> None:
     assert hit.verdict is VerdictCode.MALICIOUS
     assert any(e.detail_code == "EICAR" and e.is_test_file for e in result.evidence)
     assert any(e.detail_code == "DOUBLE_EXTENSION_COUNT_80" for e in result.evidence)
-    assert "EVIDENCE_CAP" in result.coverage.limits_hit
+    assert "EVIDENCE_CAP" not in result.coverage.limits_hit  # counted, nothing dropped
 
 
 def test_late_user_rule_survives_evidence_cap(marker_rule: Path) -> None:
@@ -305,7 +306,7 @@ def test_late_user_rule_survives_evidence_cap(marker_rule: Path) -> None:
     assert hit.verdict is VerdictCode.MALICIOUS
     assert any(e.member_path == "last.txt" and e.strength is Strength.CONCLUSIVE
                for e in hit.engine_results[1].evidence)
-    assert "EVIDENCE_CAP" in hit.engine_results[1].coverage.limits_hit
+    assert "EVIDENCE_CAP" not in hit.engine_results[1].coverage.limits_hit  # counted, nothing dropped
 
 
 def test_archive_deadline_omits_remaining_members() -> None:

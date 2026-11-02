@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 LAYERS = (("sentinel", "Lõi Sentinel"), ("rules+yara", "Luật + YARA-X"), ("clamav", "ClamAV"),
           ("defender", "Microsoft Defender"))
-LABEL_VI = {"clean": "sạch", "suspicious": "nghi ngờ", "malicious": "mối đe dọa"}
+LABEL_VI = {"clean": "sạch", "suspicious": "nghi ngờ", "malicious": "mối đe dọa", "unknown": "chưa kiểm tra xong"}
 OK, WARN, BAD, OFF = theme.OK, theme.WARN, theme.BAD, theme.OFF
 MAX_ROWS = 6
 

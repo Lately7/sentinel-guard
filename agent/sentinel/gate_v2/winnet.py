@@ -51,6 +51,44 @@ def connected_server_pid(connection: socket.socket) -> int | None:
     return None
 
 
+def verify_connected_image(connection: socket.socket, image_path: str) -> bool:
+    """True when the process serving this connection runs from `image_path`.
+
+    A local process can listen on the port first and answer OK to everything;
+    the image lives in Program Files, where that process cannot write. This also
+    covers a daemon started by another of our processes (tray, CLI)."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        pid = connected_server_pid(connection)
+        if pid is None:
+            return False
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD,
+                                                       wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+        kernel.QueryFullProcessImageNameW.restype = wintypes.BOOL
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return False
+        try:
+            path = ctypes.create_unicode_buffer(32768)
+            length = wintypes.DWORD(len(path))
+            if not kernel.QueryFullProcessImageNameW(handle, 0, path, ctypes.byref(length)):
+                return False
+            return (os.path.normcase(os.path.abspath(path.value)) ==
+                    os.path.normcase(os.path.abspath(image_path)))
+        finally:
+            kernel.CloseHandle(handle)
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 def verify_connected_daemon(connection: socket.socket, expected: ExpectedDaemon | None) -> bool:
     if sys.platform != "win32" or expected is None:
         return False
