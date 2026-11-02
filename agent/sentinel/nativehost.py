@@ -64,7 +64,8 @@ class Host:
     def scanner(self) -> Scanner:
         # Built lazily: most messages are URL lookups and must answer instantly.
         if self._scanner is None:
-            self._scanner = Scanner(self.db, use_defender=self.settings.use_defender)
+            self._scanner = Scanner(self.db, use_defender=self.settings.use_defender,
+                                    use_clamav=self.settings.use_clamav)
         return self._scanner
 
     def handle(self, msg: Any) -> dict[str, Any]:
@@ -181,7 +182,14 @@ def read_message(stream: BinaryIO) -> Any | None:
         return None
     (n,) = struct.unpack("<I", raw_len)
     if n > MAX_IN:
-        stream.read(n)  # drain so the stream stays in sync
+        # Drain so the stream stays in sync, in chunks: one read(n) of a
+        # 4 GB length prefix would try to allocate it all at once.
+        remaining = n
+        while remaining > 0:
+            part = stream.read(min(remaining, 1024 * 1024))
+            if not part:
+                return None
+            remaining -= len(part)
         return {"type": "__too_large__"}
     data = stream.read(n)
     try:

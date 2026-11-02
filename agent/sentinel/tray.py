@@ -11,13 +11,14 @@ import threading
 import time
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import messagebox, ttk
 
-from . import config, feeds, quarantine, report
+from . import config, feeds, quarantine, report, yarafeed
 from .db import Database
-from .engine import defender
+from .engine import clamav, defender
 from .engine.scanner import Scanner
-from .protection import act_on
+from .engine.signatures import SignatureEngine
+from .gate_ui import GatePanel
 from .singleton import AppInstance
 from .watcher import RealtimeProtection
 
@@ -50,7 +51,8 @@ class App:
             self.db.add_event("system", "warning", "Cơ sở dữ liệu bị hỏng và đã được tạo lại",
                               f"Bản hỏng được giữ tại {moved}. Danh sách mối đe dọa sẽ được tải lại.")
         self.db.prune_cache()
-        self.scanner = Scanner(self.db, use_defender=self.settings.use_defender)
+        self.scanner = Scanner(self.db, use_defender=self.settings.use_defender, use_clamav=self.settings.use_clamav)
+        self.gate: GatePanel | None = None
         self.realtime: RealtimeProtection | None = None
         self.ui_queue: queue.Queue = queue.Queue()
         self.root = tk.Tk()
@@ -67,9 +69,10 @@ class App:
 
         if self.settings.realtime:
             self.start_realtime()
+        threading.Thread(target=self._clamav_bootstrap, daemon=True, name="clamav").start()
         menu = pystray.Menu(
             pystray.MenuItem("Mở bảng điều khiển", lambda: self.ui(self.show), default=True),
-            pystray.MenuItem("Quét nhanh (Downloads, Desktop)", lambda: self.quick_scan()),
+            pystray.MenuItem("Quét nhanh", lambda: self.quick_scan()),
             pystray.MenuItem("Quét thư mục…", lambda: self.ui(self.pick_and_scan)),
             pystray.MenuItem("Cập nhật dữ liệu mối đe dọa", lambda: self.update_feeds_async()),
             pystray.MenuItem("Bảo vệ thời gian thực", lambda: self.toggle_realtime(),
@@ -88,6 +91,10 @@ class App:
         self._stop.set()
         if self.realtime:
             self.realtime.stop()
+        if self.gate and self.gate.job:
+            self.gate.job.cancel()
+        if self.scanner.clamav is not None:
+            self.scanner.clamav.stop()  # only a clamd this process started
         if self.icon:
             self.icon.stop()
         self.root.destroy()
@@ -156,8 +163,32 @@ class App:
                 log.exception("scheduled feed update failed")
             self._stop.wait(600)
 
+    def _clamav_bootstrap(self) -> None:
+        eng = self.scanner.clamav
+        if eng is None:
+            return
+        if not clamav.has_database():
+            res = clamav.update()
+            self.db.add_event("feeds", "info" if res == "ok" else "warning", "Tải chữ ký ClamAV lần đầu", res)
+            self.db.set_meta("clamav_updated", str(time.time()))
+        if not eng.start(wait=120):
+            self.db.add_event("system", "warning", "Lớp ClamAV chưa sẵn sàng", eng.status())
+
     def update_feeds(self) -> dict[str, str]:
         res = feeds.update_all(self.db)
+        if self.scanner.clamav is not None:
+            # ClamAV asks clients not to check more often than hourly.
+            last = float(self.db.get_meta("clamav_updated", "0") or 0)
+            if time.time() - last > 4 * 3600:
+                res["clamav"] = clamav.update()
+                self.db.set_meta("clamav_updated", str(time.time()))
+        last = float(self.db.get_meta("yara_updated", "0") or 0)
+        if time.time() - last > 24 * 3600:
+            res["yara-forge"] = yarafeed.update()
+            self.db.set_meta("yara_updated", str(time.time()))
+            if res["yara-forge"].startswith("ok"):
+                # New rules only take effect in a freshly built scanner.
+                self.scanner.sigs = SignatureEngine(self.db)
         if "skipped" in res:
             return res
         ok = sum(1 for v in res.values() if v.startswith("ok"))
@@ -168,30 +199,17 @@ class App:
     def update_feeds_async(self) -> None:
         threading.Thread(target=self.update_feeds, daemon=True).start()
 
-    def scan_paths(self, paths: list[str]) -> None:
-        def work() -> None:
-            n = threats = 0
-            for base in paths:
-                for f in _walk(base):
-                    v = self.scanner.scan_file(f)
-                    n += 1
-                    if v.label != "clean":
-                        threats += 1
-                        act_on(self.db, v, self.settings, "scan")
-            self.db.add_event("scan", "warning" if threats else "info", "Quét xong",
-                              f"{n} tệp, {threats} phát hiện", {"paths": paths})
-            if self.icon and not threats:
-                self.icon.notify(f"{n} tệp, không phát hiện mối đe dọa", "Quét xong")
-        threading.Thread(target=work, daemon=True).start()
+    def quick_scan_paths(self) -> list[str]:
+        # The places a download or a persistence drop lands: the watched folders.
+        return [d for d in self.settings.watch_dirs if Path(d).is_dir()]
 
     def quick_scan(self) -> None:
-        home = Path.home()
-        self.scan_paths([str(home / "Downloads"), str(home / "Desktop")])
+        self.ui(lambda: (self.show(), self.gate and self.gate.scan_quick()))
 
     def pick_and_scan(self) -> None:
-        d = filedialog.askdirectory(title="Chọn thư mục để quét")
-        if d:
-            self.scan_paths([d])
+        self.show()
+        if self.gate:
+            self.gate.scan_folder()
 
     # -- dashboard ---------------------------------------------------------
 
@@ -202,10 +220,11 @@ class App:
             return
         w = tk.Toplevel(self.root)
         w.title(APP)
-        w.geometry("980x600")
+        w.geometry("1180x720")
         self.window = w
         nb = ttk.Notebook(w)
         nb.pack(fill="both", expand=True, padx=8, pady=8)
+        self.gate = GatePanel(nb, self)
 
         ov = ttk.Frame(nb, padding=12)
         nb.add(ov, text="Tổng quan")
@@ -236,9 +255,12 @@ class App:
 
     def _table(self, parent, tab: str | None, cols, widths) -> ttk.Treeview:
         frame = ttk.Frame(parent)
+        # A notebook page is placed by the notebook; packing it as well pulls it
+        # out of the notebook and stacks it over the tab bar.
         if tab:
             parent.add(frame, text=tab)
-        frame.pack(fill="both", expand=True)
+        else:
+            frame.pack(fill="both", expand=True)
         tv = ttk.Treeview(frame, columns=cols, show="headings")
         for c, wdt in zip(cols, widths):
             tv.heading(c, text=c)
@@ -250,6 +272,8 @@ class App:
         return tv
 
     def refresh(self) -> None:
+        if self.gate is not None:
+            self.gate.refresh_layers()
         c = self.db.counts()
         fs = self.db.feed_status()
         last = max((f["updated"] or 0 for f in fs), default=0)
@@ -258,6 +282,7 @@ class App:
             f"Bảo vệ thời gian thực: {'BẬT' if rt else 'TẮT'}\n"
             f"Thư mục theo dõi: {', '.join(self.realtime.files.dirs) if rt else '—'}\n"
             f"Microsoft Defender (ý kiến thứ hai): {'có' if defender.available() and self.settings.use_defender else 'không'}\n"
+            f"ClamAV: {self.scanner.clamav.status() if self.scanner.clamav else 'không dùng'}\n"
             f"Chữ ký hash: {c['bad_hashes']:,} · Tên miền độc hại: {c['bad_hosts']:,} · URL độc hại: {c['bad_urls']:,}\n"
             f"Cập nhật dữ liệu lần cuối: {_fmt_ts(last) if last else 'chưa'}\n"
             f"Tệp đang cách ly: {c['quarantine']}"
@@ -316,15 +341,6 @@ def _fill(tv: ttk.Treeview, rows) -> None:
     present = [i for i in keep if tv.exists(i)]
     if present:
         tv.selection_set(present)
-
-
-def _walk(base: str):
-    if os.path.isfile(base):
-        yield base
-        return
-    for root, _dirs, files in os.walk(base):
-        for f in files:
-            yield os.path.join(root, f)
 
 
 def main() -> None:

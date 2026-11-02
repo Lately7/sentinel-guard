@@ -13,10 +13,20 @@ Brave).
 
 **Agent trên máy** (`agent/sentinel`, Python 3.12+)
 
-* Quét tệp qua nhiều bước: danh sách tin cậy → chữ ký hash/EICAR → nhận dạng
-  loại tệp và tên đánh lừa (đuôi kép, ký tự đảo chiều) → gói luật người dùng và
-  YARA-X → mở tệp nén (kể cả > 64 MB, từng tệp con) → nguồn tải về
-  (Mark-of-the-Web) → Microsoft Defender khi Defender đang là AV chính.
+* **Cổng quét nhiều lớp** — mỗi tệp phải đi qua lần lượt:
+
+  | Lớp | Engine | Bắt được |
+  |---|---|---|
+  | 1 | Lõi Sentinel | hash đã biết, EICAR, tên đánh lừa (đuôi kép, ký tự đảo chiều), cấu trúc PE, PE bị độn phình, ZIP lồng nhau |
+  | 2 | Luật + YARA-X | gói luật của bạn và ~5.000 luật YARA Forge core (mã nguồn mở) |
+  | 3 | ClamAV (mã nguồn mở) | ~3,6 triệu chữ ký; tự mở 7z, RAR, CAB, ISO, tar/gz/bz2/xz, MSI, PDF, Office, thư email |
+  | 4 | Microsoft Defender | ý kiến thứ hai cho tệp rủi ro, chỉ khi Defender là AV đang chạy |
+
+  Kết quả ghi lại từng lớp đã nói gì ("sạch", "PHÁT HIỆN", "một phần",
+  "không có"), nên "sạch" không bao giờ bị nhầm với "không ai kiểm tra".
+  ClamAV chạy như một `clamd` riêng của Sentinel trên 127.0.0.1, nhận đúng các
+  byte agent đã băm qua luồng INSTREAM. Tệp > 400 MB vẫn được kiểm tra phần đầu.
+* Nguồn tải về (Mark-of-the-Web) kế thừa kết quả blocklist URL.
 * Theo dõi thời gian thực Downloads, Desktop, Documents (theo đường dẫn thật, kể
   cả khi OneDrive chuyển chỗ), thư mục Startup, %TEMP%, và khoá Run trong
   registry.
@@ -43,6 +53,8 @@ cd sentinel-guard
 python -m venv .venv
 .\.venv\Scripts\python -m pip install -e ".[ui,dev]"
 .\.venv\Scripts\sentinel update              # tải dữ liệu mối đe dọa (~30 giây)
+.\.venv\Scripts\sentinel clamav update       # chữ ký ClamAV (~110 MB lần đầu; cần cài ClamAV)
+.\.venv\Scripts\sentinel rules update        # luật YARA Forge core
 .\.venv\Scripts\sentinel install             # đăng ký native host + tự chạy khi đăng nhập
 ```
 
@@ -57,7 +69,9 @@ lên, không chạy bản thứ hai.
 ## Lệnh
 
 ```powershell
-sentinel scan <tệp|thư mục> [--quarantine] [--json]   # 0 sạch, 1 đáng ngờ, 2 độc hại, 3 không truy cập được
+sentinel scan <tệp|thư mục> [--quarantine] [--json] [-v]   # 0 sạch, 1 đáng ngờ, 2 độc hại, 3 không truy cập được; -v in kết quả từng lớp
+sentinel clamav update | start | stop | status
+sentinel rules update
 sentinel check-url <url>
 sentinel block <tên miền> / sentinel unblock <tên miền>
 sentinel quarantine list | restore <id> | delete <id>
@@ -97,9 +111,12 @@ sentinel unblock blocked-selftest.sentinelguard.invalid
 
 * Phát hiện sau khi tệp đã ghi xuống đĩa, không chặn trước khi chạy.
 * abuse.ch (MalwareBazaar, URLhaus, ThreatFox) giờ yêu cầu khoá tài khoản nên
-  chưa có nguồn hash mã độc; phát hiện tệp chủ yếu dựa vào Defender (nếu đang
-  bật), gói luật/YARA bạn thêm vào `%LOCALAPPDATA%\SentinelGuard\rules`, và
-  nguồn tải về.
+  chưa có nguồn hash mã độc riêng; phát hiện tệp dựa vào ClamAV, YARA Forge,
+  Defender (nếu đang là AV chính) và nguồn tải về. Không cài ClamAV thì lớp 3
+  hiện "không có" và kết quả quét ghi rõ tệp chỉ được lõi kiểm tra.
+* `clamd` nghe trên 127.0.0.1: một chương trình cùng quyền người dùng có thể
+  chiếm cổng đó trước và trả lời "sạch" — cùng giới hạn với mọi phần mềm chạy
+  bằng quyền người dùng.
 * Agent chạy bằng quyền người dùng; mã độc chạy cùng quyền có thể can thiệp.
 * Trình duyệt giới hạn số quy tắc; ~400.000 tên miền được chặn ở tầng mạng,
   phần còn lại được bắt khi điều hướng.

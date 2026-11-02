@@ -64,7 +64,7 @@ class SignatureEngine:
         self.db = db
         dirs = [Path(__file__).resolve().parent.parent / "rules", config.user_rules_dir(), *(extra_rule_dirs or [])]
         self.pattern_rules = load_pattern_rules([d for d in dirs if d.is_dir()])
-        self._yara = _load_yara([d for d in dirs if d.is_dir()])
+        self._yara, self.yara_rules = _load_yara([d for d in dirs if d.is_dir()])
 
     def match_hash(self, sha256: str) -> list[Finding]:
         if sha256 == EICAR_SHA256:
@@ -81,12 +81,12 @@ class SignatureEngine:
         for r in self.pattern_rules:
             hits = [p in data for p in r.patterns]
             if (all(hits) if r.match_all else any(hits)):
-                out.append(Finding("signature", r.id, r.severity, r.description, _SCORE[r.severity]))
+                out.append(Finding("rules", r.id, r.severity, r.description, _SCORE[r.severity]))
         if self._yara is not None:
             try:
                 for rule in self._yara.scan(data).matching_rules:
                     meta = dict(rule.metadata)
-                    sev = _SEVERITY.get(str(meta.get("severity", "high")).lower(), Severity.HIGH)
+                    sev = _yara_severity(meta)
                     out.append(Finding("yara", f"yara.{rule.identifier}", sev,
                                        str(meta.get("description", rule.identifier)), _SCORE[sev]))
             except Exception as e:  # a broken or slow rule must not abort the scan
@@ -94,15 +94,30 @@ class SignatureEngine:
         return out
 
 
+def _yara_severity(meta: dict) -> Severity:
+    if "severity" in meta:
+        return _SEVERITY.get(str(meta["severity"]).lower(), Severity.HIGH)
+    # YARA Forge rates every rule 0-100 by how specific it is. Only the most
+    # specific reach HIGH, so one generic match never quarantines a file.
+    score = meta.get("score")
+    if isinstance(score, int) and not isinstance(score, bool):
+        if score >= 80:
+            return Severity.HIGH
+        if score >= 60:
+            return Severity.MEDIUM
+        return Severity.LOW
+    return Severity.HIGH
+
+
 def _load_yara(dirs: list[Path]):
     """User-supplied YARA rules (*.yar) via YARA-X, if installed."""
     try:
         import yara_x  # type: ignore[import-not-found]
     except ImportError:
-        return None
+        return None, 0
     files = [p for d in dirs for p in sorted(d.glob("*.yar"))]
     if not files:
-        return None
+        return None, 0
     compiler = yara_x.Compiler()
     loaded = 0
     for f in files:
@@ -113,11 +128,12 @@ def _load_yara(dirs: list[Path]):
         except Exception as e:  # one bad file must not disable the others
             log.warning("skipping YARA file %s: %s", f, e)
     if not loaded:
-        return None
+        return None, 0
     try:
-        scanner = yara_x.Scanner(compiler.build())
+        rules = compiler.build()
+        scanner = yara_x.Scanner(rules)
         scanner.set_timeout(20)
-        return scanner
+        return scanner, sum(1 for _ in rules) if hasattr(rules, "__iter__") else loaded
     except Exception as e:
         log.warning("YARA rules failed to build: %s", e)
-        return None
+        return None, 0

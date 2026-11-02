@@ -30,7 +30,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
     db = Database()
     settings = config.Settings.load()
     settings.auto_quarantine = args.quarantine
-    scanner = Scanner(db, use_defender=not args.no_defender and settings.use_defender)
+    scanner = Scanner(db, use_defender=not args.no_defender and settings.use_defender,
+                      use_clamav=not args.no_clamav and settings.use_clamav)
     worst = 0
     results = []
     missing = [p for p in args.paths if not os.path.exists(p)]
@@ -49,6 +50,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
         elif v.label != "clean" or args.verbose:
             note = f" [{v.skipped}]" if v.skipped else ""
             print(f"{v.label.upper():10} {v.score:3}  {f}  {top_reason(v)}{note}")
+            if args.verbose and v.engines:
+                print("           " + " · ".join(f"{k}: {s}" for k, s in v.engines.items()))
         if v.label != "clean":
             out = act_on(db, v, settings, "scan")
             if out["quarantined"] and not args.json:
@@ -167,7 +170,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
         if v["label"] != "clean":
             print(f"{v['label'].upper():10} {v['score']:3}  {v['path']}  quarantined={r['quarantined']}", flush=True)
 
-    rt = RealtimeProtection(db, settings, Scanner(db, use_defender=settings.use_defender), on_result=show)
+    scanner = Scanner(db, use_defender=settings.use_defender, use_clamav=settings.use_clamav)
+    rt = RealtimeProtection(db, settings, scanner, on_result=show)
     rt.start()
     print("watching:", ", ".join(rt.files.dirs), flush=True)
     try:
@@ -176,6 +180,40 @@ def cmd_watch(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         rt.stop()
     return 0
+
+
+def cmd_clamav(args: argparse.Namespace) -> int:
+    from .engine import clamav
+
+    if clamav.install_dir() is None:
+        print("ClamAV chưa được cài (https://www.clamav.net/downloads)", file=sys.stderr)
+        return 1
+    if args.action == "update":
+        res = clamav.update()
+        print(res)
+        return 0 if res == "ok" else 1
+    eng = clamav.ClamAVEngine(autostart=False)
+    if args.action == "start":
+        ok = eng.start(wait=120)
+        print("clamd ready" if ok else f"clamd not started: {eng.status()}")
+        return 0 if ok else 1
+    if args.action == "stop":
+        try:
+            clamav.Clamd().command(b"zSHUTDOWN\0", timeout=5)
+            print("clamd stopped")
+        except OSError:
+            print("clamd was not running")
+        return 0
+    print(f"{eng.status()}  {eng.client.version() or ''}  db={clamav.db_dir()}")
+    return 0 if eng.status() == "ready" else 1
+
+
+def cmd_rules(args: argparse.Namespace) -> int:
+    from . import yarafeed
+
+    res = yarafeed.update()
+    print(res)
+    return 0 if res.startswith("ok") else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -194,12 +232,19 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("paths", nargs="+")
     s.add_argument("--quarantine", action="store_true", help="cách ly tệp độc hại")
     s.add_argument("--no-defender", action="store_true")
+    s.add_argument("--no-clamav", action="store_true")
     s.add_argument("--no-cache", action="store_true")
     s.add_argument("--json", action="store_true")
     s.add_argument("-v", "--verbose", action="store_true")
     s.set_defaults(fn=cmd_scan)
 
     sub.add_parser("update", help="tải dữ liệu mối đe dọa").set_defaults(fn=cmd_update)
+    cl = sub.add_parser("clamav", help="lớp quét ClamAV: update | start | stop | status")
+    cl.add_argument("action", choices=["update", "start", "stop", "status"])
+    cl.set_defaults(fn=cmd_clamav)
+    ru = sub.add_parser("rules", help="tải luật YARA mã nguồn mở (YARA Forge core)")
+    ru.add_argument("action", choices=["update"])
+    ru.set_defaults(fn=cmd_rules)
     c = sub.add_parser("check-url", help="tra cứu URL")
     c.add_argument("url")
     c.set_defaults(fn=cmd_check_url)

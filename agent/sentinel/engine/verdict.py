@@ -45,6 +45,9 @@ class Verdict:
     findings: list[Finding] = field(default_factory=list)
     path: str | None = None
     skipped: str | None = None  # reason the content was not fully inspected
+    # Gate layer -> outcome ("clean", "detected", "skipped: …", "unavailable: …",
+    # "error: …"), so a "clean" label can be told apart from "nobody looked".
+    engines: dict[str, str] = field(default_factory=dict)
 
     @property
     def score(self) -> int:
@@ -78,6 +81,7 @@ class Verdict:
             "score": self.score,
             "label": self.label,
             "skipped": self.skipped,
+            "engines": dict(self.engines),
             "findings": [f.to_dict() for f in ranked[:max_findings]],
             "findings_total": len(self.findings),
         }

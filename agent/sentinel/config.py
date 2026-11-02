@@ -98,6 +98,7 @@ class Settings:
     watch_dirs: list[str] = field(default_factory=_default_watch_dirs)
     auto_quarantine: bool = True
     use_defender: bool = True  # ask Microsoft Defender for a second opinion
+    use_clamav: bool = True  # stream every file through a private clamd (if ClamAV is installed)
     feed_interval_hours: float = 6.0
     web_block_suspicious: bool = False  # suspicious URLs get a warning page only when True
     abusech_auth_key: str = ""  # free abuse.ch account key: enables the MalwareBazaar hash feed
@@ -117,7 +118,7 @@ class Settings:
             return s
         # Each field is type-checked on its own: one bad value falls back to
         # its default instead of crashing the agent at start-up.
-        for name in ("realtime", "auto_quarantine", "use_defender", "web_block_suspicious"):
+        for name in ("realtime", "auto_quarantine", "use_defender", "use_clamav", "web_block_suspicious"):
             if isinstance(raw.get(name), bool):
                 setattr(s, name, raw[name])
         dirs = raw.get("watch_dirs")

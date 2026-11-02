@@ -13,13 +13,16 @@ from pathlib import Path
 
 from .. import config, urlintel
 from ..db import Database
-from . import defender, filetype, motw
+from . import clamav, defender, filetype, motw
+from .clamav import ClamAVEngine
 from .signatures import SignatureEngine
-from .verdict import CLEAN, Finding, Severity, Verdict
+from .verdict import CLEAN, MALICIOUS, Finding, Severity, Verdict
 
 log = logging.getLogger(__name__)
 
 HEAD_BYTES = 64 * 1024
+TAIL_BYTES = 8 * 1024 * 1024
+INFLATED_PE_BYTES = 100 * 1024 * 1024
 
 
 def entropy(data: bytes) -> float:
@@ -31,10 +34,27 @@ def entropy(data: bytes) -> float:
 
 
 class Scanner:
-    def __init__(self, db: Database, *, use_defender: bool = True, signatures: SignatureEngine | None = None) -> None:
+    """The scan gate: every file passes through each layer in turn —
+    Sentinel core (hash, names, structure, archives) → rule packs and YARA-X →
+    ClamAV → Microsoft Defender — and the verdict records what each layer said."""
+
+    def __init__(self, db: Database, *, use_defender: bool = True, use_clamav: bool = False,
+                 clamav_engine: ClamAVEngine | None = None, signatures: SignatureEngine | None = None) -> None:
         self.db = db
         self.sigs = signatures or SignatureEngine(db)
         self.use_defender = use_defender and defender.available()
+        if clamav_engine is None and use_clamav and clamav.install_dir() is not None:
+            clamav_engine = ClamAVEngine()
+        self.clamav = clamav_engine
+
+    def gate_id(self) -> str:
+        """Identifies the engines and signature versions behind a verdict: a
+        cached "clean" from before ClamAV's last update is not reused."""
+        parts = [f"rules:{len(self.sigs.pattern_rules)}", f"yara:{self.sigs.yara_rules}"]
+        if self.clamav is not None:
+            parts.append(f"clamav:{self.clamav.version() or 'down'}")
+        parts.append(f"defender:{int(self.use_defender)}")
+        return "|".join(parts)
 
     # -- public API --------------------------------------------------------
 
@@ -48,11 +68,6 @@ class Scanner:
         if not p.is_file():
             return Verdict(name=name, sha256="", size=0, path=str(p), skipped="not a regular file")
 
-        if use_cache:
-            cached = self.db.cached_result(str(p), st.st_size, st.st_mtime, st.st_ino)
-            if cached is not None:
-                return _from_dict(cached)
-
         try:
             sha256, head, body = _read(p, st.st_size, st.st_mtime)
         except FileChanged:
@@ -60,8 +75,26 @@ class Scanner:
         except OSError as e:
             return Verdict(name=name, sha256="", size=st.st_size, path=str(p), skipped=f"unreadable: {e.strerror or e}")
 
+        gate = self.gate_id()
+        if use_cache:
+            # Size and timestamps are under the control of whoever wrote the
+            # file (os.utime restores an old mtime after a same-size swap), so
+            # a cached verdict is reused only for the very same bytes.
+            cached = self.db.cached_result(str(p), st.st_size, st.st_mtime, st.st_ino)
+            if cached is not None and cached.get("gate") == gate and cached.get("sha256") == sha256:
+                return _from_dict(cached)
+
+        if self.db.is_hash_allowed(sha256):
+            v = Verdict(name=name, sha256=sha256, size=st.st_size, path=str(p),
+                        findings=[Finding("allowlist", "allow.user", Severity.INFO, "trusted by the user", 0)],
+                        engines={"allowlist": "trusted by the user"})
+            self._store(p, st, v, gate)
+            return v
+
         v = self._scan_content(name, sha256, st.st_size, head, body, depth=0)
         v.path = str(p)
+        if body is None:
+            v.findings.extend(self._scan_oversized(p, st.st_size, head, v))
         if body is None and filetype.sniff(head) == "zip":
             # Too big to hold in memory, but each member can still be inspected
             # straight from disk.
@@ -76,28 +109,54 @@ class Scanner:
                         v.skipped = None
             except (zipfile.BadZipFile, OSError, ValueError, RuntimeError, EOFError, NotImplementedError):
                 pass
-        if self.db.is_hash_allowed(sha256):
-            v.findings = [Finding("allowlist", "allow.user", Severity.INFO, "trusted by the user", 0)]
-            self.db.store_result(str(p), st.st_size, st.st_mtime, st.st_ino, v.to_dict())
-            return v
 
         origin = motw.read(str(p))
         if origin is not None:
             v.findings.extend(self._origin_findings(origin, name, head))
 
-        kind = filetype.sniff(head)
-        risky_type = filetype.is_executable_kind(kind, name) or kind in ("zip", "rar", "7z", "ole", "pdf")
-        if self.use_defender and v.label != "malicious" and (risky_type or v.label != CLEAN):
-            v.findings.extend(defender.scan(str(p)))
+        if self.clamav is not None:
+            if body is not None:
+                status, found = self.clamav.scan_bytes(body)
+            else:
+                status, found = self.clamav.scan_file(str(p), st.st_size)
+                try:
+                    st2 = p.stat()
+                    if (st2.st_size, st2.st_mtime) != (st.st_size, st.st_mtime):
+                        status, found = "error: file changed while streaming", []
+                except OSError:
+                    status, found = "error: file vanished while streaming", []
+            v.engines["clamav"] = status
+            v.findings.extend(found)
 
-        self.db.store_result(str(p), st.st_size, st.st_mtime, st.st_ino, v.to_dict())
+        kind = filetype.sniff(head)
+        risky_type = filetype.is_executable_kind(kind, name) or kind in ("zip", "rar", "7z", "gzip", "ole", "pdf")
+        if not self.use_defender:
+            v.engines["defender"] = "unavailable: off or not the active antivirus"
+        elif v.label == MALICIOUS:
+            v.engines["defender"] = "skipped: already detected"
+        elif risky_type or v.label != CLEAN:
+            found = defender.scan(str(p))
+            v.engines["defender"] = "detected" if found else "clean"
+            v.findings.extend(found)
+        else:
+            v.engines["defender"] = "skipped: not a risky file type"
+
+        self._store(p, st, v, gate)
         return v
 
     def scan_bytes(self, data: bytes, name: str = "<memory>") -> Verdict:
         sha256 = hashlib.sha256(data).hexdigest()
-        return self._scan_content(name, sha256, len(data), data[:HEAD_BYTES], data, depth=0)
+        v = self._scan_content(name, sha256, len(data), data[:HEAD_BYTES], data, depth=0)
+        if self.clamav is not None:
+            status, found = self.clamav.scan_bytes(data)
+            v.engines["clamav"] = status
+            v.findings.extend(found)
+        return v
 
     # -- internals ---------------------------------------------------------
+
+    def _store(self, p: Path, st: os.stat_result, v: Verdict, gate: str) -> None:
+        self.db.store_result(str(p), st.st_size, st.st_mtime, st.st_ino, {**v.to_dict(), "gate": gate})
 
     def _scan_content(self, name: str, sha256: str, size: int, head: bytes, body: bytes | None, depth: int) -> Verdict:
         v = Verdict(name=name, sha256=sha256, size=size)
@@ -105,6 +164,8 @@ class Scanner:
         v.findings.extend(filetype.check_name(name, head))
         if body is None:
             v.skipped = f"larger than {config.MAX_DEEP_SCAN_BYTES // (1024 * 1024)} MB: hash and name checks only"
+            v.engines["sentinel"] = _layer_status(v.findings, ("signature", "filetype"), partial=True)
+            v.engines["rules+yara"] = "skipped: file too large"
             return v
         v.findings.extend(self.sigs.match_content(body))
         kind = filetype.sniff(head)
@@ -112,7 +173,42 @@ class Scanner:
             v.findings.extend(_pe_structure(body))
         if kind == "zip":
             v.findings.extend(self._scan_zip(name, body, depth))
+        v.engines["sentinel"] = _layer_status(v.findings, ("signature", "filetype", "pe", "archive", "office"))
+        v.engines["rules+yara"] = (_layer_status(v.findings, ("rules", "yara"))
+                                   if self.sigs.pattern_rules or self.sigs.yara_rules else "unavailable: no rules installed")
         return v
+
+    def _scan_oversized(self, p: Path, size: int, head: bytes, v: Verdict) -> list[Finding]:
+        """Too big to hold in memory: rules and YARA still see the first and
+        last parts, where droppers keep their code and appended payloads."""
+        out: list[Finding] = []
+        tail_len = min(TAIL_BYTES, max(0, size - config.MAX_DEEP_SCAN_BYTES))
+        try:
+            with p.open("rb") as fh:
+                front = fh.read(config.MAX_DEEP_SCAN_BYTES)
+                fh.seek(size - tail_len)
+                tail = fh.read(tail_len)
+        except OSError:
+            return out
+        seen: set[str] = set()
+        for part in (front, tail):
+            for f in self.sigs.match_content(part):
+                if f.rule not in seen:
+                    seen.add(f.rule)
+                    out.append(f)
+        if filetype.sniff(head) == "pe":
+            out.extend(f for f in _pe_structure(front) if f.rule != "pe.malformed")
+            # Hundreds of MB of near-constant bytes after the code is padding
+            # meant to exceed scanners' size limits; real installers append
+            # compressed (high-entropy) data instead.
+            if size > INFLATED_PE_BYTES and tail and entropy(tail[-1024 * 1024:]) < 1.0:
+                out.append(Finding("pe", "pe.inflated", Severity.MEDIUM,
+                                   f"executable padded to {size // (1024 * 1024)} MB with filler bytes "
+                                   "(a trick to exceed antivirus size limits)", 35))
+        v.engines["rules+yara"] = (("detected" if any(f.engine in ("rules", "yara") for f in out) else
+                                    "partial: first 64 MB and last 8 MB clean")
+                                   if self.sigs.pattern_rules or self.sigs.yara_rules else "unavailable: no rules installed")
+        return out
 
     def _origin_findings(self, origin: motw.Origin, name: str, head: bytes) -> list[Finding]:
         out: list[Finding] = []
@@ -302,8 +398,17 @@ def _read(p: Path, size: int, mtime: float) -> tuple[str, bytes, bytes | None]:
     return h.hexdigest(), head, b"".join(chunks) if deep else None
 
 
+def _layer_status(findings: list[Finding], engines: tuple[str, ...], partial: bool = False) -> str:
+    hits = [f for f in findings if f.engine in engines and f.severity >= Severity.MEDIUM]
+    if hits:
+        return "detected"
+    return "clean (hash and name only)" if partial else "clean"
+
+
 def _from_dict(d: dict) -> Verdict:
-    v = Verdict(name=d["name"], sha256=d["sha256"], size=d["size"], path=d.get("path"), skipped=d.get("skipped"))
+    engines = d.get("engines") if isinstance(d.get("engines"), dict) else {}
+    v = Verdict(name=d["name"], sha256=d["sha256"], size=d["size"], path=d.get("path"), skipped=d.get("skipped"),
+                engines={str(k): str(s) for k, s in engines.items()})
     for f in d.get("findings", []):
         v.findings.append(Finding(f["engine"], f["rule"], Severity[f["severity"]], f["detail"], f["score"]))
     return v
