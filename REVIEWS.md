@@ -137,14 +137,14 @@ with a desired-behaviour test are in `tests/test_known_issues.py`
 | RT-019 | Native host accepted a missing origin | code + test | Fixed `5af59ed` (C3j; `--diagnostic` for manual runs) |
 | RT-020 | page_signals: NaN scores, unbounded fields | test | Fixed `62ff720` (C3k) |
 | RT-021 | Allowlist silently truncated at 5,000 | not yet | Open → phase 5 |
-| RT-022 | "Proceed" creates a permanent host exception | code | Open → phase 5 |
-| RT-023 | Failed download hand-off counted as scanned | code | Open → phase 5 |
+| RT-022 | "Proceed" creates a permanent host exception | code + Helium e2e | Partly: split into "Mở một lần" (session rule, no trust entry) and "Luôn tin cậy" (`d422f74`); the one-time pass still gets redirected — open, see `docs/handoff/NEXT_SESSION.md` §3 |
+| RT-023 | Failed download hand-off counted as scanned | test | Fixed `0a29a6e` (pending list + retry); that commit also broke background.js syntax, fixed in `d422f74` |
 | RT-024 | Traversal omissions missing from coverage | not yet | Open → Gate v2 / phase 5 |
-| RT-025 | Popup "no issue" when nothing was checked | not yet | Open → phase 5 |
+| RT-025 | Popup "no issue" when nothing was checked | test | Fixed `fcb74d5` (`page_status.js`) |
 | RT-026 | Real-time "on" with nothing watched | test | Fixed: `start()` raises `NothingToWatch`, tray reports it |
 | RT-027 | Only one registry view of Run keys | fake-registry test | Fixed: HKLM read in 64- and 32-bit views (`HKLM32`) |
 | RT-028 | `BC.Heuristics.*` ClamAV names treated as conclusive (ClamAV itself classes them potentially unwanted) | ClamAV source `others.c:1730-1734` + `clamav.py:231` | Open → Gate v2 ClamAV policy (R8a) |
-| RT-029 | freshclam exit 1 accepted as a successful update | ClamAV source `freshclam.c:2198-2203` | Open → Gate v2 ClamAV adapter (R8c) |
+| RT-029 | freshclam exit 1 accepted as a successful update | ClamAV source `freshclam.c:2198-2203` + test | Fixed `5454a46` |
 | RT-030 | `RELOAD` reply ignored; `RELOADING` is not activation, a failed reload keeps the old engine | R8c (not re-checked) | Open → Gate v2 |
 | RT-031 | Readiness = file presence + `PING`; no header/signature/bytecode/age check | R8c (not re-checked) | Open → Gate v2 |
 | RT-032 | Reply parser accepts `FOUND` without the `stream:` frame and EOF before NUL | code | Open → Gate v2 |
