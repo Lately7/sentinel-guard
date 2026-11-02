@@ -58,6 +58,7 @@ class Feed:
     kind: str
     parse: Callable[[str], Iterable[str]]
     headers: tuple[tuple[str, str], ...] = ()  # e.g. an account key; never logged
+    pull: Callable[[], str] | None = None  # for sources a plain GET cannot reach
 
 
 def _lines(text: str) -> Iterable[str]:
@@ -214,7 +215,10 @@ MALWAREBAZAAR = Feed("malwarebazaar", "https://bazaar.abuse.ch/export/txt/sha256
 def configured_feeds(settings: "Settings") -> list[Feed]:
     feeds = list(FEEDS)
     if settings.abusech_auth_key:
+        from .reputation import api_feeds
+
         feeds.append(dataclasses.replace(MALWAREBAZAAR, headers=(("Auth-Key", settings.abusech_auth_key),)))
+        feeds.extend(api_feeds(settings.abusech_auth_key))
     return feeds
 
 
@@ -271,7 +275,8 @@ def _update_all(db: Database, feeds: list[Feed], fetcher: Callable[[str], str],
 
         for feed in feeds:
             try:
-                text = fetch(feed.url, dict(feed.headers)) if feed.headers else fetcher(feed.url)
+                text = (feed.pull() if feed.pull else
+                        fetch(feed.url, dict(feed.headers)) if feed.headers else fetcher(feed.url))
                 n = apply_feed(builder, feed, text, popular)
                 statuses.append((feed.name, n, "ok"))
                 results[feed.name] = f"ok ({n})"
