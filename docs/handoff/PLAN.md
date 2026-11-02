@@ -35,18 +35,18 @@ này thay mục 3–5 của `NEXT_SESSION.md` về thứ tự công việc. Các
 
 | Mục | Kết quả |
 |---|---|
-| `gate-baseline` | commit `31a7df4`, chưa push; pytest **393 passed, 4 skipped, 2 xfailed**; extension **39 passed** (tôi chạy lại tối nay) |
+| `gate-baseline` | commit `2b43cc0`, chưa push; pytest **393 passed, 4 skipped, 2 xfailed**; extension **39 passed** (tôi chạy lại tối nay) |
 | 4 skip / 2 xfail | test clamd thật (clamd không chạy) / RT-001, RT-002 (có chủ đích) |
 | Helium e2e | chưa chạy lại tối nay; lần cuối đạt theo báo cáo đêm |
-| Lỗi mới phát hiện | `test_identity_changed_and_cancelled_between_chunks` đỏ 6/12 lần: ghi cùng nhịp đồng hồ thì NTFS không đổi timestamp (đo 204/300). Con số "393 passed" trong handoff là may. Đã sửa test (`31a7df4`), đạt 30/30 |
-| Bản M5 Codex bị ngắt | commit `3cdb0de` trên `codex/gate-v2-m5`; scope sạch; `tests/gate_v2` 236 đạt, 1 đỏ. Claude tìm ra 17 lỗi K1–K17, tái hiện được 11 lỗi |
+| Lỗi mới phát hiện | `test_identity_changed_and_cancelled_between_chunks` đỏ 6/12 lần: ghi cùng nhịp đồng hồ thì NTFS không đổi timestamp (đo 204/300). Con số "393 passed" trong handoff là may. Đã sửa test (`2b43cc0`), đạt 30/30 |
+| Bản M5 Codex bị ngắt | commit `b66cb3f` trên `codex/gate-v2-m5`; scope sạch; `tests/gate_v2` 236 đạt, 1 đỏ. Claude tìm ra 17 lỗi K1–K17, tái hiện được 11 lỗi |
 | Sản phẩm | vẫn dùng `engine/scanner.py` cũ; chưa có gì gọi `gate_v2` |
 
 ### Codex đang chạy nền (bắt đầu 20:13)
 
 | Việc | Loại | Kết quả ở | Khi xong Claude làm gì |
 |---|---|---|---|
-| M5 vòng 2 (K1–K17) | viết code, worktree `sentinel-guard-gate-v2` | `%TEMP%\sg-codex\gate-v2-m5-r2.md` | Kiểm scope, đọc từng dòng, chạy test mới trên `3cdb0de`, merge nếu xanh |
+| M5 vòng 2 (K1–K17) | viết code, worktree `sentinel-guard-gate-v2` | `%TEMP%\sg-codex\gate-v2-m5-r2.md` | Kiểm scope, đọc từng dòng, chạy test mới trên `b66cb3f`, merge nếu xanh |
 | M6 phần 1 (`cache.py`, `legacy.py`) | viết code, worktree `sentinel-guard-gate-v2-m6` | `gate-v2-m6-p1.md` | Như trên, sau khi M5 vào |
 | R15 review độc lập Gate v2 + dịch vụ | chỉ đọc | `R15.md` | Kiểm chứng từng phát hiện, ghi vào `REVIEWS.md`, sửa trước M7 |
 | R14 nghiên cứu ETW + tệp mồi | chỉ đọc, có tra cứu web | `R14.md` | Lưu vào `docs/research/`; chỉ là nghiên cứu, chưa làm code (bước 10) |
@@ -88,7 +88,7 @@ Lỗi nặng nhất trong bản nháp (đều đã tái hiện):
 * Mọi tệp thường bị ghi `LNK_MALFORMED`, thiếu MotW bị coi là engine lỗi (K10, K12): nếu
   không sửa thì M6 không cache được gì.
 
-Xong khi: scope sạch; từng test K đỏ trên `3cdb0de`, xanh sau khi sửa; test Job Object thật
+Xong khi: scope sạch; từng test K đỏ trên `b66cb3f`, xanh sau khi sửa; test Job Object thật
 chạy với tiến trình con vô hại; `git merge --no-ff`; full suite xanh; bảng K vào `REVIEWS.md`.
 Không chạy `MpCmdRun` thật được vì Defender bị động trên máy này: định dạng đầu ra thật vẫn
 chưa kiểm chứng, phải ghi rõ.

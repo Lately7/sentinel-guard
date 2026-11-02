@@ -1,7 +1,7 @@
 # Baseline — scan gate as first committed (C2a)
 
 Measured 2026-11-02 on the owner's machine, in a clean detached checkout of
-commit `2b192a2` (C2a, "feat: multi-layer scan gate …"), using the project
+commit `6e7bb03` (C2a, "feat: multi-layer scan gate …"), using the project
 `.venv`. Every number below was produced by the command next to it.
 
 ## Environment

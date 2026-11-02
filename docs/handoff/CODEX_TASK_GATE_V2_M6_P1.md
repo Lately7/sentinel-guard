@@ -8,7 +8,7 @@ in `REVIEWS.md` (F, G, H, J) first and do not repeat them.
 ## Pinned start
 
 Worktree `..\sentinel-guard-gate-v2-m6`, branch `codex/gate-v2-m6`, start commit
-**0215d8e**; otherwise stop and report.
+**257c1aa**; otherwise stop and report.
 
 ## Allowed paths
 

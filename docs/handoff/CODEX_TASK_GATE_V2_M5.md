@@ -11,7 +11,7 @@ not by a short fixed timeout (J1).
 ## Pinned start
 
 Worktree `..\sentinel-guard-gate-v2`, branch `codex/gate-v2-m5`, start
-commit **8aefd3d**; otherwise stop and report.
+commit **7ba3e74**; otherwise stop and report.
 
 ## Allowed paths
 

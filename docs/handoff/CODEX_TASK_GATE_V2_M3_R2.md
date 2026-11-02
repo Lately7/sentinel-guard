@@ -1,14 +1,14 @@
 # Codex task — Gate v2 milestone 3, round 2: review fixes
 
 Same rules as `CODEX_TASK_GATE_V2_M3.md`. Worktree `..\sentinel-guard-gate-v2`,
-branch `codex/gate-v2-m3`; HEAD must be **57b8aa1** (your round-1 files,
+branch `codex/gate-v2-m3`; HEAD must be **948e8a2** (your round-1 files,
 committed by Claude), else stop and report. Allowed paths:
 `agent/sentinel/gate_v2/`, `tests/gate_v2/`. Do not commit.
 
 Claude ran `tests/gate_v2` outside the sandbox: **2 failed, 160 passed,
 1 warning**. Claude read every line. The bound reader, the JSON pack schema
 and the ZIP reason codes are good. Fix the findings below; each needs a test
-that fails on 57b8aa1 and passes after.
+that fails on 948e8a2 and passes after.
 
 ## Must fix
 

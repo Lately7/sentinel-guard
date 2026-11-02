@@ -1,14 +1,14 @@
 # Codex task — Gate v2 milestone 5, round 2: fix K1–K17
 
 Your first round was cut off when the previous session ended, before you wrote
-an answer. Claude committed what you had (`3cdb0de`, scope clean, 236 passed,
+an answer. Claude committed what you had (`b66cb3f`, scope clean, 236 passed,
 1 failed) and reviewed every line. Claude reproduced K1–K5, K7, K8, K10–K12 and
 K14 by running them with synthetic input; the others come from reading the code.
 
 ## Pinned start
 
 Worktree `..\sentinel-guard-gate-v2`, branch `codex/gate-v2-m5`, HEAD
-**3cdb0de**; otherwise stop and report.
+**b66cb3f**; otherwise stop and report.
 
 ## Allowed paths
 
@@ -21,7 +21,7 @@ different worktree: do not create those files.
 **Sandbox note:** you cannot run pytest in this sandbox (temp folder denied).
 That is *not* a reason to stop: implement everything, re-read your code against
 each test, and say which test covers what. Never create temp or probe folders.
-Claude runs the suites and runs your new tests against `3cdb0de`: each must fail
+Claude runs the suites and runs your new tests against `b66cb3f`: each must fail
 there and pass after.
 
 ## Findings

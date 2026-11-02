@@ -2,7 +2,7 @@
 
 ## Round 1 (task `CODEX_TASK_GATE_V2_M1.md`)
 
-Gate v2 milestone 1 is implemented on the pinned `682a495` worktree. No commit was made.
+Gate v2 milestone 1 is implemented on the pinned `fdc3e99` worktree. No commit was made.
 
 | Created file | Lines |
 |---|---:|

@@ -1,6 +1,6 @@
 # Codex product review — round 6 (read-only, web search, dashboard screenshot attached)
 
-Prompt: `docs/handoff/PROMPT_CODEX_PRODUCT.md`, 2026-11-02, reviewed commit 435120c.
+Prompt: `docs/handoff/PROMPT_CODEX_PRODUCT.md`, 2026-11-02, reviewed commit f02b5d2.
 Claude verified against the code: RT-019 (nativehost.py:220 accepts a missing origin),
 RT-022 (background.js:364 `trust()` persists the host), RT-023 (background.js:249 counts the
 download before the request and swallows the error), RT-026 (watcher.py:263 sets running=True

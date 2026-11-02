@@ -1,13 +1,13 @@
 # Codex task — Gate v2 milestone 2, round 2: review fixes
 
 Same rules as `CODEX_TASK_GATE_V2_M2.md`. Worktree `..\sentinel-guard-gate-v2`,
-branch `codex/gate-v2-m2`; HEAD must be **677d7ee** (your round-1 files,
+branch `codex/gate-v2-m2`; HEAD must be **d50a765** (your round-1 files,
 committed by Claude for a clean diff), else stop and report. Allowed paths:
 `agent/sentinel/gate_v2/`, `tests/gate_v2/`. Do not commit.
 
 Claude ran your tests outside the sandbox: `tests/gate_v2` 145 passed. Claude
 read every line. Identity and events are good. Fix these; each needs a test
-that fails on 677d7ee and passes after your change.
+that fails on d50a765 and passes after your change.
 
 ## Must fix
 

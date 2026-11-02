@@ -35,7 +35,7 @@ User-facing text is Vietnamese; code, identifiers and comments are English.
 
 ## 3. Git state
 
-* Branch `main`, HEAD `01bc342` ("fix: Codex review round 2 …").
+* Branch `main`, HEAD `eb556b5` ("fix: Codex review round 2 …").
 * Uncommitted changes, two different origins:
   * **Pre-existing before this session** (not gate work): `extension/icons/*.png`,
     `TASKS.md` (review table), the icon drawing in `agent/sentinel/tray.py`

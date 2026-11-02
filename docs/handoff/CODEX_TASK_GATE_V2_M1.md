@@ -10,7 +10,7 @@ specification `docs/research/R11-gate-v2-knowledge-pack.md` (R11).
 
 * Working directory: the git worktree `..\sentinel-guard-gate-v2`, branch
   `codex/gate-v2-m1`.
-* Start commit: **682a495** (`git log -1 --format=%h` must print `682a495`
+* Start commit: **fdc3e99** (`git log -1 --format=%h` must print `fdc3e99`
   before you write anything; if it does not, stop and report).
 * This task file is given to you as the prompt; it is not in your tree.
 
@@ -24,7 +24,7 @@ code, no existing tests, no `pyproject.toml`, no docs, no `.gitignore`.
 `agent/sentinel/engine/` and every existing caller stay untouched in this
 milestone. Do not commit; leave your work as untracked/modified files —
 Claude commits after review. Claude runs
-`tools/check_codex_scope.ps1 -Base 682a495 -Allow "agent/sentinel/gate_v2/,tests/gate_v2/"`
+`tools/check_codex_scope.ps1 -Base fdc3e99 -Allow "agent/sentinel/gate_v2/,tests/gate_v2/"`
 after you finish; any file outside these paths rejects the whole round.
 
 ## What to build (R11 §8 row 1)

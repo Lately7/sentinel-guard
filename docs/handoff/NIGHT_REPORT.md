@@ -8,12 +8,12 @@ chạy thật; chỗ nào chưa chạy được thì ghi rõ.
 | Việc (mục 5 của NEXT_SESSION.md) | Kết quả |
 |---|---|
 | 1. RT-022 "Mở một lần" | ✅ Đã sửa và kiểm bằng Helium e2e |
-| 2. Gate v2 mốc 1 (Codex viết) | ✅ Merge `9a101cb` sau 2 vòng review |
-| 3a. Gate v2 mốc 2 | ✅ Merge `e186184` sau 2 vòng review |
-| 3b. RT-016/017/018 (watcher) | ✅ `d03ea88` |
-| 3c. RT-021 (allowlist) | ✅ `8135706` |
-| 3d. Gate v2 mốc 3 (thêm) | ✅ Merge `7226927` sau 3 vòng review |
-| 3e. Gate v2 mốc 4 — ClamAV (thêm) | ✅ Merge `fe2880b` sau 2 vòng review |
+| 2. Gate v2 mốc 1 (Codex viết) | ✅ Merge `a168e6a` sau 2 vòng review |
+| 3a. Gate v2 mốc 2 | ✅ Merge `b2ae29b` sau 2 vòng review |
+| 3b. RT-016/017/018 (watcher) | ✅ `0f348f3` |
+| 3c. RT-021 (allowlist) | ✅ `566c57d` |
+| 3d. Gate v2 mốc 3 (thêm) | ✅ Merge `4cedf02` sau 3 vòng review |
+| 3e. Gate v2 mốc 4 — ClamAV (thêm) | ✅ Merge `92ae65f` sau 2 vòng review |
 | 4. ROADMAP + báo cáo này | ✅ |
 | Thêm (anh/chị yêu cầu lúc thức): thiết kế xoay quanh quyền admin | ✅ Codex nghiên cứu R13 + thảo luận R13b với tôi; chưa có code chạy quyền admin |
 
@@ -21,18 +21,18 @@ chạy thật; chỗ nào chưa chạy được thì ghi rõ.
 
 | Commit | Nội dung |
 |---|---|
-| `597df57` | RT-022: luật cho phép phủ cả `main_frame` — "Mở một lần" và "Luôn tin cậy" mở được trang |
-| `fc063bf` | Task file Codex mốc 1 |
-| `d03ea88` | RT-016/017/018: watcher thử lại tệp bị khoá, hàng đợi có giới hạn, rào chặn khi tắt |
-| `8135706` | RT-021: danh sách tin cậy theo trang, không cắt ở 5.000 |
-| `9a101cb` | Merge Gate v2 mốc 1 (commit Codex `7c82a9a`, `5004595`) |
-| `8d95a1d` | Ghi review mốc 1, câu trả lời Codex |
-| `74643a2` | Task file Codex mốc 2 |
-| `5d2965b` | Quyết định "xoay quanh quyền admin", brief R13 |
-| `1c93349` | R13 (nghiên cứu) + mốc A1–A6 trong ROADMAP |
-| `e186184` | Merge Gate v2 mốc 2 (commit Codex `677d7ee`, `cfef850`) |
-| `3b23d80` | Ghi review mốc 2, brief R13b |
-| `9898e9f` | R13b: thảo luận thiết kế với Codex, thiết kế đã chốt |
+| `75ba989` | RT-022: luật cho phép phủ cả `main_frame` — "Mở một lần" và "Luôn tin cậy" mở được trang |
+| `71078ec` | Task file Codex mốc 1 |
+| `0f348f3` | RT-016/017/018: watcher thử lại tệp bị khoá, hàng đợi có giới hạn, rào chặn khi tắt |
+| `566c57d` | RT-021: danh sách tin cậy theo trang, không cắt ở 5.000 |
+| `a168e6a` | Merge Gate v2 mốc 1 (commit Codex `72517f7`, `b02785b`) |
+| `95b3b72` | Ghi review mốc 1, câu trả lời Codex |
+| `d9f7e22` | Task file Codex mốc 2 |
+| `4e8cbe0` | Quyết định "xoay quanh quyền admin", brief R13 |
+| `1df2d19` | R13 (nghiên cứu) + mốc A1–A6 trong ROADMAP |
+| `b2ae29b` | Merge Gate v2 mốc 2 (commit Codex `d50a765`, `81f81e2`) |
+| `dab2dc2` | Ghi review mốc 2, brief R13b |
+| `71a1ba6` | R13b: thảo luận thiết kế với Codex, thiết kế đã chốt |
 | (commit cuối) | ROADMAP, NEXT_SESSION, báo cáo này |
 
 Chưa push. Không force, không viết lại lịch sử.
@@ -177,9 +177,9 @@ clamd thật (cần cơ sở dữ liệu chữ ký → phải tải; dữ liệu
 
 ## 2f. Vỏ dịch vụ (A1) và worker quyền thấp (A2)
 
-* `service/host.py` (`f5dad5a`): vỏ dịch vụ Windows bằng `ctypes`; chỉ báo
+* `service/host.py` (`ff4d283`): vỏ dịch vụ Windows bằng `ctypes`; chỉ báo
   "đã dừng" sau khi rào chặn hành động đóng. 5 test với SCM giả.
-* `service/worker.py` (`194ae38`): tiến trình worker để đọc tệp lạ — token
+* `service/worker.py` (`2b7e569`): tiến trình worker để đọc tệp lạ — token
   rút gọn từ chính token của mình, **low integrity**, Administrators bị vô
   hiệu, Job Object (giới hạn bộ nhớ, 1 tiến trình, tự chết khi đóng job), chỉ
   kế thừa 2 handle pipe, môi trường sạch. Chạy thật trên máy, không cần admin:
@@ -187,7 +187,7 @@ clamd thật (cần cơ sở dữ liệu chữ ký → phải tải; dữ liệu
   cạnh nó, **không sinh được tiến trình**, không cấp phát quá giới hạn, không
   thấy biến môi trường của tiến trình cha. Thử phá: bỏ low integrity → 2 test
   đỏ; bỏ giới hạn tiến trình → 1 test đỏ.
-* `service/workermain.py` + `workerclient.py` (`14249ad`): các adapter đọc tệp
+* `service/workermain.py` + `workerclient.py` (`76d0950`): các adapter đọc tệp
   lạ (core, luật JSON, YARA-X) **chạy thật bên trong worker** trên handle chỉ-đọc
   được nhân bản sang; worker không bao giờ mở đường dẫn. Marker trên đĩa và
   trong ZIP, EICAR trong bộ nhớ đều bị phát hiện; worker chết giữa chừng → lỗi
@@ -214,9 +214,9 @@ thư mục sau khi hàng đợi tràn (R12d).
 
 ## Kết quả test thật
 
-Lệnh chạy trên `gate-baseline` sau lần merge cuối (`fe2880b`):
+Lệnh chạy trên `gate-baseline` sau lần merge cuối (`92ae65f`):
 
-* `.\.venv\Scripts\python -m pytest -q` → **393 passed, 4 skipped, 2 xfailed** (lần cuối, sau merge mốc 4 `fe2880b`; sau mốc 3 là 347, sau mốc 2 là 283)
+* `.\.venv\Scripts\python -m pytest -q` → **393 passed, 4 skipped, 2 xfailed** (lần cuối, sau merge mốc 4 `92ae65f`; sau mốc 3 là 347, sau mốc 2 là 283)
   (đầu đêm: 119 passed). 4 skip = test với clamd thật, clamd không chạy.
   2 xfail = RT-001, RT-002 (lỗi đã biết, chưa sửa — có chủ đích).
   Gate v2: 209 test trong `tests/gate_v2/`; dịch vụ A1/A2: 55 test.

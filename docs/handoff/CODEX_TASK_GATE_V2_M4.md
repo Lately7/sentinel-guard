@@ -9,7 +9,7 @@ H1 "inspected without checking", H7 "cap drops a conclusive hit", F1
 ## Pinned start
 
 Worktree `..\sentinel-guard-gate-v2`, branch `codex/gate-v2-m4`, start
-commit **18454a9**; otherwise stop and report.
+commit **f9d034c**; otherwise stop and report.
 
 ## Allowed paths
 
