@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from . import archive
 from .content import BoundReader, ContentError
 from .contract import (CONTRACT_VERSION, ByteRange, CancellationToken, Category,
                        EngineResult, Evidence, FileIdentity, ScanError, ScanRequest,
@@ -40,8 +40,9 @@ class _Pattern:
 def _result(engine: str, request: ScanRequest, measured: FileIdentity, reader: BoundReader,
             start: int, evidence: list[Evidence], status: StageStatus, readiness: str,
             generation: str, *, error: ScanError | None = None,
-            limits: tuple[str, ...] = ()) -> EngineResult:
-    ledger = CoverageLedger(measured.size, inspected=reader.ranges, certainty="verified")
+            limits: tuple[str, ...] = (), ledger: CoverageLedger | None = None) -> EngineResult:
+    ledger = ledger or CoverageLedger(measured.size, certainty="verified")
+    ledger.inspected = reader.ranges
     for code in limits:
         ledger.limit(code)
     if reader.ranges != ((ByteRange(0, measured.size),) if measured.size else ()):
@@ -150,26 +151,35 @@ class JsonRulesAdapter:
             return _result(self.engine_id, request, measured, reader, start, [],
                            StageStatus.UNAVAILABLE, state, self.ruleset_digest)
         evidence: list[Evidence] = []
+        ledger = CoverageLedger(measured.size, certainty="verified")
         try:
             body = reader.read(0, min(measured.size, reader.resident_limit), cancel)
-            for rule in self.rules:
-                matches = [body.find(p) for p in rule.patterns]
-                if (all(i >= 0 for i in matches) if rule.all_patterns else any(i >= 0 for i in matches)):
-                    position = next(i for i in matches if i >= 0)
-                    length = len(rule.patterns[matches.index(position)])
-                    evidence.append(Evidence(f"json.{rule.digest[:12]}.{rule.rule_id}"[:128],
-                                             self.engine_id, rule.rule_id, None, Category.MALWARE,
-                                             Strength.CONCLUSIVE if rule.user and rule.critical else Strength.SUPPORTING,
-                                             "outer", None, (ByteRange(position, position + length),),
-                                             rule.name[:128], rule.digest, None, True, "JSON_RULE"))
+            def inspect(payload: bytes, member_path: str | None = None) -> None:
+                for rule in self.rules:
+                    matches = [payload.find(p) for p in rule.patterns]
+                    if (all(i >= 0 for i in matches) if rule.all_patterns else any(i >= 0 for i in matches)):
+                        position = next(i for i in matches if i >= 0)
+                        length = len(rule.patterns[matches.index(position)])
+                        spans = reader.ranges[:1] if member_path else (ByteRange(position, position + length),)
+                        evidence.append(Evidence(f"json.{rule.digest[:12]}.{rule.rule_id}"[:128],
+                                                 self.engine_id, rule.rule_id, None, Category.MALWARE,
+                                                 Strength.CONCLUSIVE if rule.user and rule.critical else Strength.SUPPORTING,
+                                                 "member" if member_path else "outer", member_path, spans,
+                                                 rule.name[:128], rule.digest, None, True, "JSON_RULE"))
+            inspect(body)
+            if body.startswith(archive.ZIP_PREFIXES):
+                if len(body) == measured.size:
+                    archive.walk(body, ledger, cancel, lambda path, payload: inspect(payload, path))
+                else:
+                    ledger.parser("zip", "partial")
             status = StageStatus.PARTIAL if state == "RULES_DEGRADED" or len(body) < measured.size else StageStatus.COMPLETED
             return _result(self.engine_id, request, measured, reader, start, evidence,
                            status, state, self.ruleset_digest,
-                           limits=("RULES_DEGRADED",) if state == "RULES_DEGRADED" else ())
+                           limits=("RULES_DEGRADED",) if state == "RULES_DEGRADED" else (), ledger=ledger)
         except ContentError as exc:
             status = StageStatus.CHANGED if exc.code == "CHANGED" else StageStatus.CANCELLED if exc.code == "CANCELLED" else StageStatus.ERROR
             return _result(self.engine_id, request, measured, reader, start, evidence, status,
-                           exc.code, self.ruleset_digest, error=ScanError(exc.code, "read", exc.code, True))
+                           exc.code, self.ruleset_digest, error=ScanError(exc.code, "read", exc.code, True), ledger=ledger)
 
 
 class YaraXAdapter:
@@ -180,7 +190,6 @@ class YaraXAdapter:
                  max_matches_per_pattern: int = 1024) -> None:
         self.timeout = timeout
         self.match_cap = max_matches_per_pattern
-        self._local = threading.local()
         self._rules = None
         self.manifest: tuple[SourceRecord, ...]
         self.ruleset_digest = hashlib.sha256(json.dumps(sources, separators=(",", ":")).encode()).hexdigest()
@@ -216,12 +225,9 @@ class YaraXAdapter:
         return "RULES_DEGRADED" if any(not r.accepted for r in self.manifest) else "READY"
 
     def _scanner(self) -> Any:
-        scanner = getattr(self._local, "scanner", None)
-        if scanner is None:
-            scanner = self._yara.Scanner(self._rules)
-            scanner.set_timeout(self.timeout)
-            scanner.max_matches_per_pattern(self.match_cap)
-            self._local.scanner = scanner
+        scanner = self._yara.Scanner(self._rules)
+        scanner.set_timeout(self.timeout)
+        scanner.max_matches_per_pattern(self.match_cap)
         return scanner
 
     def scan_bound(self, request: ScanRequest, measured: FileIdentity,
@@ -232,6 +238,7 @@ class YaraXAdapter:
             return _result(self.engine_id, request, measured, reader, start, [],
                            StageStatus.UNAVAILABLE, state, self.ruleset_digest)
         evidence: list[Evidence] = []
+        ledger = CoverageLedger(measured.size, certainty="verified")
         try:
             if measured.size > reader.resident_limit:
                 body = reader.read(0, reader.resident_limit, cancel)
@@ -239,18 +246,33 @@ class YaraXAdapter:
             else:
                 body = reader.read(0, measured.size, cancel)
                 partial = False
-            matches = self._scanner().scan(body).matching_rules
-            for rule in matches:
-                # The rule's own metadata never upgrades unvalidated feed evidence.
-                evidence.append(Evidence(f"yara.{rule.namespace}.{rule.identifier}"[:128], self.engine_id,
-                                         rule.identifier[:128], str(tuple(rule.tags))[:512],
-                                         Category.MALWARE, Strength.SUPPORTING, "outer", None,
-                                         (ByteRange(0, len(body)),) if body else (), rule.namespace[:128],
-                                         self.ruleset_digest, None, True, "YARA_MATCH"))
+            def inspect(payload: bytes, member_path: str | None = None) -> None:
+                scanner = self._scanner()
+                try:
+                    matches = scanner.scan(payload).matching_rules
+                    for rule in matches:
+                        offsets = [(match.offset, match.length) for pattern in rule.patterns
+                                   for match in pattern.matches][:64]
+                        spans = (reader.ranges[:1] if member_path else tuple(
+                            ByteRange(offset, offset + length) for offset, length in offsets if length > 0))
+                        evidence.append(Evidence(f"yara.{rule.namespace}.{rule.identifier}"[:128], self.engine_id,
+                                                 rule.identifier[:128], f"{rule.namespace}.{rule.identifier}"[:512],
+                                                 Category.MALWARE, Strength.SUPPORTING,
+                                                 "member" if member_path else "outer", member_path,
+                                                 spans, rule.namespace[:128], self.ruleset_digest,
+                                                 None, True, "YARA_MATCH"))
+                finally:
+                    del scanner
+            inspect(body)
+            if body.startswith(archive.ZIP_PREFIXES):
+                if not partial:
+                    archive.walk(body, ledger, cancel, lambda path, payload: inspect(payload, path))
+                else:
+                    ledger.parser("zip", "partial")
             status = StageStatus.PARTIAL if partial or state == "RULES_DEGRADED" else StageStatus.COMPLETED
             return _result(self.engine_id, request, measured, reader, start, evidence, status,
                            state, self.ruleset_digest,
-                           limits=("RULES_DEGRADED",) if state == "RULES_DEGRADED" else ())
+                           limits=("RULES_DEGRADED",) if state == "RULES_DEGRADED" else (), ledger=ledger)
         except ContentError as exc:
             status = StageStatus.CHANGED if exc.code == "CHANGED" else StageStatus.CANCELLED if exc.code == "CANCELLED" else StageStatus.ERROR
             code = exc.code
@@ -259,4 +281,4 @@ class YaraXAdapter:
         except Exception:
             status, code = StageStatus.ERROR, "YARA_SCAN_ERROR"
         return _result(self.engine_id, request, measured, reader, start, evidence, status,
-                       code, self.ruleset_digest, error=ScanError(code, "scan", code, True))
+                       code, self.ruleset_digest, error=ScanError(code, "scan", code, True), ledger=ledger)

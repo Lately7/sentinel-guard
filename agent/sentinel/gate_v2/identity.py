@@ -11,7 +11,7 @@ import hashlib
 import os
 import stat
 from dataclasses import dataclass
-from typing import Callable
+from typing import BinaryIO, Callable
 
 from .contract import CancellationToken, ContractError, FileIdentity
 
@@ -88,6 +88,29 @@ def measure(
         return IdentityResult(None, "CANCELLED")
     try:
         with open(path, "rb", buffering=0) as stream:
+            return measure_stream(stream, path, max_bytes=max_bytes, cancel=cancel,
+                                  chunk_size=chunk_size, between_chunks=between_chunks)
+    except (OSError, ValueError, OverflowError, ContractError) as exc:
+        if isinstance(exc, (IsADirectoryError, PermissionError)):
+            try:
+                if stat.S_ISDIR(os.stat(path).st_mode):
+                    return IdentityResult(None, "NOT_REGULAR")
+            except OSError:
+                pass
+        return IdentityResult(None, "UNREADABLE")
+
+
+def measure_stream(
+    stream: BinaryIO, path: str, *, max_bytes: int,
+    cancel: CancellationToken | None = None, chunk_size: int = CHUNK_SIZE,
+    between_chunks: Callable[[int], None] | None = None,
+) -> IdentityResult:
+    """Measure an already opened generation; the caller owns the stream."""
+    if max_bytes < 0 or chunk_size <= 0:
+        raise ValueError("invalid measurement limit")
+    if _cancelled(cancel):
+        return IdentityResult(None, "CANCELLED")
+    try:
             before = os.fstat(stream.fileno())
             before_change = _change_time(stream.fileno(), before)
             if not stat.S_ISREG(before.st_mode):
@@ -117,13 +140,7 @@ def measure(
                 canonical, after.st_dev, f"{after.st_ino:032x}", count,
                 digest.hexdigest(), after_change, after.st_mtime_ns,
             ), "OK")
-    except (OSError, ValueError, OverflowError, ContractError) as exc:
-        if isinstance(exc, (IsADirectoryError, PermissionError)):
-            try:
-                if stat.S_ISDIR(os.stat(path).st_mode):
-                    return IdentityResult(None, "NOT_REGULAR")
-            except OSError:
-                pass
+    except (OSError, ValueError, OverflowError, ContractError):
         return IdentityResult(None, "UNREADABLE")
 
 

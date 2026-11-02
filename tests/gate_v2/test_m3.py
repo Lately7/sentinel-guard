@@ -18,6 +18,7 @@ from sentinel.gate_v2.identity import measure, measure_bytes
 from sentinel.gate_v2.orchestrator import scan
 from sentinel.gate_v2.rules import JsonRulesAdapter, YaraXAdapter
 
+pytestmark = pytest.mark.filterwarnings("error::pytest.PytestUnraisableExceptionWarning")
 
 class Token:
     def cancelled(self) -> bool:
@@ -104,7 +105,7 @@ def test_zip_member_states(monkeypatch: pytest.MonkeyPatch) -> None:
     malformed = _zip_result(normal[:-10])
     assert malformed.status is StageStatus.PARTIAL
     many = _zip([(f"f{i}", b"") for i in range(2001)])
-    assert "MEMBER_LIMIT" in _zip_result(many).coverage.object_reasons
+    assert "MAX_CHILDREN" in _zip_result(many).coverage.object_reasons
     nested = b"plain"
     for _ in range(5):
         nested = _zip([("child.zip", nested)])
@@ -149,6 +150,7 @@ def test_bound_reader_limits_and_change(tmp_path: Path) -> None:
     reader.resident_limit = 1024 * 1024
     with pytest.raises(ContentError, match="RESIDENT_LIMIT"):
         reader.read(0, reader.resident_limit + 1, Token())
+    reader.resident_limit += 1
     class Cancels:
         calls = 0
         def cancelled(self) -> bool:
@@ -170,6 +172,64 @@ def test_end_to_end(marker_rule: Path, tmp_path: Path) -> None:
     clean = scan(request(path=clean_path), adapters=[CoreAdapter(), rules],
                  gate_generation="m3", auto_quarantine=False)
     assert clean.verdict is VerdictCode.CLEAN and clean.trusted_clean
+
+
+def test_eicar_member_is_conclusive_in_memory() -> None:
+    hit = scan(request(data=_zip([("eicar.txt", EICAR)])), adapters=[CoreAdapter()],
+               gate_generation="m3", auto_quarantine=False)
+    assert hit.verdict is VerdictCode.MALICIOUS
+    evidence = hit.engine_results[0].evidence
+    assert any(e.detail_code == "EICAR" and e.scope == "member" and e.is_test_file for e in evidence)
+
+
+def test_json_member_and_nested_member(marker_rule: Path, tmp_path: Path) -> None:
+    rules = JsonRulesAdapter.from_directories(marker_rule.parent)
+    for payload, expected in ((_zip([("marker.txt", MARKER)]), "marker.txt"),
+                              (_zip([("inside.zip", _zip([("marker.txt", MARKER)]))]),
+                               "inside.zip/marker.txt")):
+        path = tmp_path / "sample.zip"
+        path.write_bytes(payload)
+        hit = scan(request(path=path), adapters=[CoreAdapter(), rules],
+                   gate_generation="m3", auto_quarantine=False)
+        assert hit.verdict is VerdictCode.MALICIOUS
+        assert any(e.scope == "member" and e.member_path == expected and
+                   e.strength is Strength.CONCLUSIVE for e in hit.engine_results[1].evidence)
+
+
+def test_archive_depth_debt_all_engines(marker_rule: Path) -> None:
+    payload = MARKER
+    for _ in range(5):
+        payload = _zip([("inside.zip", payload)])
+    adapters = [CoreAdapter(), JsonRulesAdapter.from_directories(marker_rule.parent)]
+    hit = scan(request(data=payload), adapters=adapters,
+               gate_generation="m3", auto_quarantine=False)
+    assert hit.verdict is not VerdictCode.CLEAN and not hit.trusted_clean
+    assert all("DEPTH_LIMIT" in result.coverage.object_reasons for result in hit.engine_results)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows share mode is required")
+def test_bound_reader_denies_writers(tmp_path: Path) -> None:
+    import ctypes
+
+    path = tmp_path / "shared"
+    path.write_bytes(b"safe")
+    reader = BoundReader.measure_path(str(path), max_bytes=100, cancel=Token())
+    kernel = ctypes.windll.kernel32
+    kernel.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32,
+                                   ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+    kernel.CreateFileW.restype = ctypes.c_void_p
+    try:
+        writer = kernel.CreateFileW(str(path), 0x40000000, 0x7, None, 3, 0x80, None)
+        assert writer == ctypes.c_void_p(-1).value
+    finally:
+        reader.close()
+    writer = kernel.CreateFileW(str(path), 0x40000000, 0x7, None, 3, 0x80, None)
+    assert writer != ctypes.c_void_p(-1).value
+    try:
+        with pytest.raises(ContentError, match="IN_USE"):
+            BoundReader.measure_path(str(path), max_bytes=100, cancel=Token())
+    finally:
+        kernel.CloseHandle(ctypes.c_void_p(writer))
 
 
 def test_yara_namespaces_and_degraded() -> None:
@@ -194,9 +254,26 @@ def test_yara_one_scanner_per_thread() -> None:
     def worker():
         scanner = adapter._scanner()
         barrier.wait()
-        return get_ident(), scanner
+        identifier = get_ident()
+        result = scanner.scan(b"safe")
+        del scanner
+        return identifier, len(result.matching_rules)
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(worker)
         second = pool.submit(worker)
         a, b = first.result(), second.result()
-    assert a[0] != b[0] and a[1] is not b[1]
+    assert a[0] != b[0] and a[1] == b[1] == 1
+
+
+def test_yara_provenance_and_member() -> None:
+    pytest.importorskip("yara_x", reason="yara_x is not installed")
+    adapter = YaraXAdapter((("sample", "sample.yar",
+                             'rule Marker : local { strings: $a = "MAGICMARK" condition: $a }'),),
+                           max_matches_per_pattern=2)
+    req, reader = bound(b"xMAGICMARKyMAGICMARKzMAGICMARK")
+    result = adapter.scan_bound(req, reader.identity, Token(), reader)
+    assert result.evidence[0].raw_name == "sample.Marker"
+    assert result.evidence[0].ranges == (ByteRange(1, 10), ByteRange(11, 20))
+    req, reader = bound(_zip([("inner.txt", b"MAGICMARK")]))
+    result = adapter.scan_bound(req, reader.identity, Token(), reader)
+    assert any(e.scope == "member" and e.member_path == "inner.txt" for e in result.evidence)

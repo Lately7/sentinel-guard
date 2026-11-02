@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import stat
 from typing import BinaryIO
 
 from . import identity
@@ -17,6 +16,34 @@ from .contract import ByteRange, CancellationToken, FileIdentity
 from .coverage import normalize_ranges
 
 CHUNK = 1024 * 1024
+
+if os.name == "nt":
+    import ctypes
+    import msvcrt
+
+    _create_file = ctypes.windll.kernel32.CreateFileW
+    _create_file.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32,
+                             ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+    _create_file.restype = ctypes.c_void_p
+    _close_handle = ctypes.windll.kernel32.CloseHandle
+    _close_handle.argtypes = [ctypes.c_void_p]
+
+
+def _open_measured(path: str) -> BinaryIO:
+    if os.name != "nt":
+        return open(path, "rb", buffering=0)
+    handle = _create_file(path, 0x80000000, 0x1 | 0x4, None, 3, 0x80, None)
+    if handle == ctypes.c_void_p(-1).value:
+        code = ctypes.windll.kernel32.GetLastError()
+        if code in (32, 33):
+            raise ContentError("IN_USE")
+        raise OSError(code, "CreateFileW failed", path)
+    try:
+        descriptor = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+    except BaseException:
+        _close_handle(handle)
+        raise
+    return os.fdopen(descriptor, "rb", buffering=0)
 
 
 class ContentError(Exception):
@@ -37,32 +64,13 @@ class BoundReader:
     @classmethod
     def measure_path(cls, path: str, *, max_bytes: int,
                      cancel: CancellationToken, resident_limit: int = 64 * 1024 * 1024) -> BoundReader:
-        stream = open(path, "rb", buffering=0)
+        stream = _open_measured(path)
         try:
-            before = os.fstat(stream.fileno())
-            change = identity._change_time(stream.fileno(), before)
-            if not stat.S_ISREG(before.st_mode):
-                raise ContentError("NOT_REGULAR")
-            if before.st_size > max_bytes:
-                raise ContentError("TOO_LARGE")
-            canonical = identity._final_path(stream.fileno(), path)
-            digest = hashlib.sha256()
-            count = 0
-            while count < before.st_size:
-                if cancel.cancelled():
-                    raise ContentError("CANCELLED")
-                block = stream.read(min(CHUNK, before.st_size - count))
-                if not block:
-                    raise ContentError("CHANGED")
-                digest.update(block)
-                count += len(block)
-            after = os.fstat(stream.fileno())
-            after_change = identity._change_time(stream.fileno(), after)
-            if identity._generation(before, change) != identity._generation(after, after_change):
-                raise ContentError("CHANGED")
-            measured = FileIdentity(canonical, after.st_dev, f"{after.st_ino:032x}", count,
-                                    digest.hexdigest(), after_change, after.st_mtime_ns)
-            return cls(measured, stream=stream, resident_limit=resident_limit)
+            result = identity.measure_stream(stream, path, max_bytes=max_bytes, cancel=cancel)
+            if not result.ok:
+                raise ContentError(result.code)
+            assert result.identity is not None
+            return cls(result.identity, stream=stream, resident_limit=resident_limit)
         except BaseException:
             stream.close()
             raise
@@ -92,11 +100,11 @@ class BoundReader:
             raise ContentError("CHANGED")
 
     def read(self, offset: int, n: int, cancel: CancellationToken) -> bytes:
+        if cancel.cancelled():
+            raise ContentError("CANCELLED")
         if offset < 0 or n < 0 or offset > self.identity.size or n > self.resident_limit:
             raise ContentError("RESIDENT_LIMIT")
         amount = min(n, self.identity.size - offset)
-        if cancel.cancelled():
-            raise ContentError("CANCELLED")
         self._check()
         out = bytearray()
         while len(out) < amount:

@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-import io
+import hashlib
 import math
 import time
-import zipfile
 from collections.abc import Callable
 from pathlib import PurePath
 
-from .. import config
 from ..engine import filetype
+from . import archive
 from .content import BoundReader, ContentError
 from .contract import (CONTRACT_VERSION, ByteRange, CancellationToken, Category,
                        Coverage, EngineResult, Evidence, FileIdentity, ScanError,
@@ -63,42 +62,6 @@ def _pe_signals(data: bytes) -> tuple[str, ...]:
         return ("PE_MALFORMED",)
 
 
-def _inventory(data: bytes, ledger: CoverageLedger, depth: int = 0) -> None:
-    try:
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            infos = archive.infolist()
-            for index, info in enumerate(infos):
-                if index >= config.MAX_ARCHIVE_MEMBERS:
-                    ledger.child("omitted", "MEMBER_LIMIT")
-                elif depth >= config.MAX_ARCHIVE_DEPTH:
-                    ledger.child("omitted", "DEPTH_LIMIT")
-                elif info.flag_bits & 1:
-                    ledger.child("opaque", "ENCRYPTED")
-                elif info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED,
-                                                 zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA):
-                    ledger.child("opaque", "UNSUPPORTED_METHOD")
-                elif info.file_size > config.MAX_DEEP_SCAN_BYTES:
-                    ledger.child("omitted", "MEMBER_SIZE_LIMIT")
-                elif sum(i.file_size for i in infos[:index + 1]) > config.MAX_ARCHIVE_TOTAL_BYTES:
-                    ledger.child("omitted", "EXPANSION_LIMIT")
-                else:
-                    try:
-                        with archive.open(info) as member:
-                            body = member.read(config.MAX_DEEP_SCAN_BYTES + 1)
-                        if len(body) != info.file_size:
-                            ledger.child("omitted", "MEMBER_SIZE_MISMATCH")
-                        else:
-                            ledger.child("inspected")
-                            if body.startswith(b"PK\x03\x04"):
-                                _inventory(body, ledger, depth + 1)
-                    except (OSError, ValueError, RuntimeError, EOFError, zipfile.BadZipFile,
-                            NotImplementedError):
-                        ledger.child("opaque", "MEMBER_PARSE_ERROR")
-            ledger.parser("zip", "complete")
-    except (OSError, ValueError, RuntimeError, EOFError, zipfile.BadZipFile, NotImplementedError):
-        ledger.parser("zip", "partial")
-
-
 class CoreAdapter:
     engine_id = "core"
     reopens_path = False
@@ -116,39 +79,51 @@ class CoreAdapter:
         evidence: list[Evidence] = []
         status = StageStatus.COMPLETED
         error = None
-        def add(code: str, category: Category, strength: Strength, *, test: bool = False) -> None:
+        def add(code: str, category: Category, strength: Strength, *,
+                test: bool = False, member_path: str | None = None) -> None:
             span = reader.ranges[:1]
             if span:
                 evidence.append(Evidence(f"core.{code.lower()}", self.engine_id, code, None,
-                                         category, strength, "outer", None, span, "sentinel-core",
+                                         category, strength, "member" if member_path else "outer",
+                                         member_path, span, "sentinel-core",
                                          None, None, True, code, test))
+
+        def inspect(name: str, payload: bytes, member_path: str | None = None) -> None:
+            digest = hashlib.sha256(payload).hexdigest() if member_path else measured.sha256
+            if digest == EICAR_SHA256:
+                add("EICAR", Category.MALWARE, Strength.CONCLUSIVE, test=True,
+                    member_path=member_path)
+            else:
+                try:
+                    if self.known_bad(digest):
+                        add("KNOWN_BAD_HASH", Category.MALWARE, Strength.CONCLUSIVE,
+                            member_path=member_path)
+                except Exception:
+                    nonlocal status
+                    status = StageStatus.PARTIAL
+                    ledger.parser("hash_lookup", "error")
+            for finding in filetype.check_name(PurePath(name).name, payload[:4096]):
+                if finding.rule in ("filetype.rtlo", "filetype.double_extension", "filetype.padded_name", "filetype.mismatch"):
+                    add(finding.rule.replace("filetype.", "").upper(), Category.MALWARE,
+                        Strength.SUPPORTING, member_path=member_path)
+            for code in _pe_signals(payload):
+                add(code, Category.STRUCTURE,
+                    Strength.CONTEXT if code == "PE_CERTIFICATE_DECLARED" else Strength.SUPPORTING,
+                    member_path=member_path)
+            if filetype.extension(name) in filetype.SCRIPT_EXTS and any(
+                marker in payload.lower() for marker in (b"invoke-expression", b"frombase64string", b"wscript.shell")):
+                add("SCRIPT_INDICATOR", Category.STRUCTURE, Strength.SUPPORTING,
+                    member_path=member_path)
         try:
             # Content hashing was completed through this same handle before stages.
             body = reader.read(0, min(measured.size, reader.resident_limit), cancel)
             ledger.inspected = reader.ranges
             if measured.size > len(body):
                 ledger.fixed_reduction = True
-            if measured.sha256 == EICAR_SHA256:
-                add("EICAR", Category.MALWARE, Strength.CONCLUSIVE, test=True)
-            else:
-                try:
-                    if self.known_bad(measured.sha256):
-                        add("KNOWN_BAD_HASH", Category.MALWARE, Strength.CONCLUSIVE)
-                except Exception:
-                    status = StageStatus.PARTIAL
-                    ledger.parser("hash_lookup", "error")
-            name = PurePath(request.path or "").name
-            for finding in filetype.check_name(name, body[:4096]):
-                if finding.rule in ("filetype.rtlo", "filetype.double_extension", "filetype.padded_name", "filetype.mismatch"):
-                    add(finding.rule.replace("filetype.", "").upper(), Category.MALWARE, Strength.SUPPORTING)
-            for code in _pe_signals(body):
-                add(code, Category.STRUCTURE, Strength.CONTEXT if code == "PE_CERTIFICATE_DECLARED" else Strength.SUPPORTING)
-            if filetype.extension(name) in filetype.SCRIPT_EXTS and any(
-                marker in body.lower() for marker in (b"invoke-expression", b"frombase64string", b"wscript.shell")):
-                add("SCRIPT_INDICATOR", Category.STRUCTURE, Strength.SUPPORTING)
-            if body.startswith((b"PK\x03\x04", b"PK\x05\x06")):
+            inspect(PurePath(request.path or "").name, body)
+            if body.startswith(archive.ZIP_PREFIXES):
                 if measured.size == len(body):
-                    _inventory(body, ledger)
+                    archive.walk(body, ledger, cancel, lambda path, payload: inspect(path, payload, path))
                 else:
                     ledger.parser("zip", "partial")
         except ContentError as exc:
