@@ -70,7 +70,7 @@ class BoundReader:
         stream = _open_measured(path)
         try:
             result = identity.measure_stream(stream, path, max_bytes=max_bytes, cancel=cancel,
-                                             deny_write=os.name == "nt")
+                                             ignore_times=os.name == "nt")
             if not result.ok:
                 raise ContentError(result.code)
             assert result.identity is not None

@@ -113,7 +113,7 @@ def _hives(reg: Any) -> Iterator[tuple[str, Any, str]]:
         while True:
             sid = reg.EnumKey(reg.HKEY_USERS, index)
             index += 1
-            if sid.startswith("S-1-5-21-") and not sid.endswith("_Classes"):
+            if sid.startswith(("S-1-5-21-", "S-1-12-1-")) and not sid.endswith("_Classes"):
                 yield sid, reg.HKEY_USERS, sid + "\\"
     except OSError:
         return

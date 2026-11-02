@@ -749,6 +749,9 @@ def test_a_lane_gets_its_threads_back_after_many_stalls():
         while "clean" not in done and time.monotonic() < deadline:
             time.sleep(0.01)
         assert "clean" in done, "stuck threads gave their places back"
+        deadline = time.monotonic() + 5
+        while lane.stuck and time.monotonic() < deadline:
+            time.sleep(0.01)
         assert lane.stuck == 0
     finally:
         release.set()
@@ -815,7 +818,7 @@ def test_cleaning_up_a_redirected_folder_removes_only_what_was_created(tmp_path,
 
 def test_a_page_of_events_fits_a_frame_and_later_events_still_arrive(core, db):
     for i in range(195):
-        db.add_event("realtime", "warning", "t", "\U0001f600" * 400 + str(i), {"owner_sid": USER.sid})
+        db.add_event("realtime", "warning", "t", "\U0001f600" * 900 + str(i), {"owner_sid": USER.sid})
     db.add_event("realtime", "threat", "last", "the one that matters", {"owner_sid": USER.sid})
     seen: list[str] = []
     after = 0
@@ -918,6 +921,153 @@ def test_the_record_is_on_disk_before_the_original_goes(db, tmp_path, monkeypatc
     monkeypatch.setattr(winfile.Target, "mark_delete", lambda self, delete=True: (order.append("delete"), real_mark(self, delete))[1])
     quarantine.quarantine(db, str(path), {})
     assert order[:2] == ["flush", "delete"]
+
+
+# Third round
+
+
+def test_a_file_swapped_while_quarantine_runs_neither_vanishes_nor_lies(db, tmp_path, monkeypatch):
+    # The real file is the one held. A decoy put at the name must change nothing.
+    path = tmp_path / "x.bin"
+    path.write_bytes(BODY)
+    moved = tmp_path / "moved.bin"
+    real = quarantine._quarantine
+
+    def swapped_first(*args, **kwargs):
+        # Between opening the file and starting on it, the moment a claim can wait.
+        os.rename(path, moved)
+        path.write_bytes(b"decoy")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(quarantine, "_quarantine", swapped_first)
+    qid = quarantine.quarantine(db, str(path), {})
+    assert not moved.exists(), "the held file went"
+    assert path.read_bytes() == b"decoy", "what was put at the name is not ours"
+    assert db.quarantine_item(qid) is not None
+    assert (config.quarantine_dir() / f"{qid}.qbin").is_file()
+
+
+def test_a_delete_that_waits_holds_up_nothing_else(db, tmp_path, monkeypatch):
+    stuck = tmp_path / "stuck.bin"
+    stuck.write_bytes(BODY)
+    other = tmp_path / "other.bin"
+    other.write_bytes(BODY)
+    entered, release = threading.Event(), threading.Event()
+    real = winfile.Target.mark_delete
+
+    def waits(self, delete=True):
+        if delete and self.path.endswith("stuck.bin"):
+            entered.set()
+            release.wait(10)
+        real(self, delete)
+
+    monkeypatch.setattr(winfile.Target, "mark_delete", waits)
+    thread = threading.Thread(target=lambda: quarantine.quarantine(db, str(stuck), {}))
+    thread.start()
+    entered.wait(5)
+    finished = threading.Event()
+    threading.Thread(target=lambda: (quarantine.quarantine(db, str(other), {}), finished.set()), daemon=True).start()
+    try:
+        assert finished.wait(5)
+    finally:
+        release.set()
+        thread.join(10)
+
+
+def test_a_touch_loop_ends_in_quarantine(db, scanner, tmp_path):
+    bad = bad_file(tmp_path)
+    stop = threading.Event()
+
+    def touch() -> None:
+        tick = 1000
+        while not stop.is_set():
+            tick += 1
+            try:
+                os.utime(bad, (tick, tick))
+            except OSError:
+                return
+
+    thread = threading.Thread(target=touch, daemon=True)
+    thread.start()
+    try:
+        verdict = scanner.scan_file(bad, use_cache=False)
+        assert verdict.decision.action_decision.action is ActionCode.QUARANTINE
+        out = protection.act_on(db, verdict, config.Settings(), "scan")
+    finally:
+        stop.set()
+        thread.join(5)
+    assert out["quarantined"] is True
+
+
+def test_a_slow_observed_scan_is_replaced_not_cancelled():
+    release = threading.Event()
+    seen: list[bool] = []
+
+    def run(job: _Job) -> None:
+        if job.path == "slow":
+            release.wait(10)
+            seen.append(job.cancel.cancelled())
+        else:
+            seen.append(False)
+
+    now = [0.0]
+    lane = _Lane("test", 1, run, limit=60.0, give_up=150.0, clock=lambda: now[0])
+    try:
+        slow = _Job("1", "slow", "journal", None, "", None)
+        lane.submit(slow)
+        deadline = time.monotonic() + 5
+        while not lane.running and time.monotonic() < deadline:
+            time.sleep(0.005)
+        now[0] = 61.0
+        lane.sweep()
+        lane.submit(_Job("2", "next", "journal", None, "", None))
+        deadline = time.monotonic() + 5
+        while not seen and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert seen == [False] and slow.state != "failed", "the next job ran beside it"
+        release.set()
+        deadline = time.monotonic() + 5
+        while len(seen) < 2 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert seen == [False, False], "and the slow one finished uncancelled"
+    finally:
+        release.set()
+        lane.stop()
+
+
+def test_entra_users_keep_their_paths_private():
+    caller = Caller("S-1-12-1-1-2-3-4", 1, "medium", False)
+    assert backend_module._visible(caller, "S-1-12-1-1-2-3-4")
+    assert not backend_module._visible(caller, "S-1-12-1-9-9-9-9")
+    assert backend_module._visible(caller, "S-1-5-32-544")
+
+
+def test_a_file_already_being_quarantined_is_refused_not_copied_twice(db, tmp_path):
+    path = tmp_path / "x.bin"
+    path.write_bytes(BODY)
+    probe = winfile.open_target(str(path))
+    key = probe.key
+    probe.close()
+    quarantine._claims.add(key)
+    try:
+        with pytest.raises(quarantine.QuarantineError) as caught:
+            quarantine.quarantine(db, str(path), {})
+    finally:
+        quarantine._claims.discard(key)
+    assert caught.value.code == "ALREADY" and path.exists() and not db.quarantine_items()
+
+
+def test_a_new_folder_is_held_from_its_creation_with_no_second_lookup(tmp_path, monkeypatch):
+    monkeypatch.setattr(os, "mkdir", lambda *a, **k: pytest.fail("a name-based create leaves a window"))
+    monkeypatch.setattr(winfile._k32, "CreateFileW", lambda *a: pytest.fail("a second lookup of the name"))
+    winfile.make_parents(str(tmp_path / "a" / "b" / "x.bin"))
+    monkeypatch.undo()
+    assert (tmp_path / "a" / "b").is_dir()
+
+
+def test_nothing_observed_is_given_up_on_before_a_scan_could_have_finished(backend):
+    lane = backend._observed_lane
+    assert lane.limit < config.SCAN_DEADLINE_SECONDS < lane.give_up
 
 
 def test_ctypes_structures_match_windows():

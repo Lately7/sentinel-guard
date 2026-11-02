@@ -442,7 +442,7 @@ def _profiles(reg: object) -> Iterator[tuple[str, str]]:
             except OSError:
                 return
             index += 1
-            if not sid.startswith("S-1-5-21-"):
+            if not sid.startswith(("S-1-5-21-", "S-1-12-1-")):
                 continue  # the system accounts' profiles hold no user autostart
             try:
                 with reg.OpenKey(parent, sid, 0, reg.KEY_READ) as key:  # type: ignore[attr-defined]

@@ -84,6 +84,8 @@ if os.name == "nt":
     _k32.WriteFile.argtypes = [wintypes.HANDLE, ctypes.c_char_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
                                ctypes.c_void_p]
     _k32.LocalFree.argtypes = [ctypes.c_void_p]
+    _k32.ReOpenFile.restype = wintypes.HANDLE
+    _k32.ReOpenFile.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD]
     _adv.GetSecurityInfo.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p),
                                      ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
                                      ctypes.POINTER(ctypes.c_void_p)]
@@ -172,6 +174,17 @@ class Target:
         if not _k32.SetFileInformationByHandle(self.handle, FILE_DISPOSITION_INFO, ctypes.byref(plain), 1):
             raise _fail(self.path)
         self.posix = False
+
+    def watch(self) -> Target:
+        """A handle that only looks, on this very file with no name involved.
+
+        It outlives the deletion and can tell whether any name did. Opening the
+        name again would look at whatever was swapped in there meanwhile.
+        """
+        handle = _k32.ReOpenFile(self.handle, FILE_READ_ATTRIBUTES, FILE_SHARE_ALL, FILE_FLAG_OPEN_REPARSE_POINT)
+        if handle in (None, INVALID_HANDLE):
+            raise _fail(self.path)
+        return Target(os.fdopen(msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY), "rb", buffering=0), self.path)
 
     def _standard_info(self) -> FILE_STANDARD_INFO:
         info = FILE_STANDARD_INFO()
@@ -290,11 +303,6 @@ def open_target(path: str) -> Target:
         target.close()
         raise
     return target
-
-
-def open_watch(path: str) -> Target:
-    """A handle that only looks: it outlives the deletion and can tell if any name did."""
-    return _open(path, FILE_READ_ATTRIBUTES, FILE_SHARE_ALL, OPEN_EXISTING, 0, os.O_RDONLY | os.O_BINARY, "rb")
 
 
 def create_new(path: str) -> Target:

@@ -57,7 +57,8 @@ WATCH_SECONDS = 5.0
 # ever and nothing can interrupt it. Past MAX_STUCK at once, no more threads.
 STALL_SECONDS = config.SCAN_DEADLINE_SECONDS + 30.0
 MAX_STUCK = 16
-OBSERVED_STALL_SECONDS = 60.0  # nobody is waiting on these, and one must not hold up the next
+OBSERVED_STALL_SECONDS = 60.0  # one must not hold up the next, and a slow scan just carries on
+USER_SIDS = ("S-1-5-21-", "S-1-12-1-")  # local or domain, and Entra ID
 # A file that would not hold still is looked at again, a few times, then reported.
 RETRY_SECONDS = (5.0, 30.0, 120.0, 600.0)
 MAX_RETRIES = 1024
@@ -98,16 +99,19 @@ class _Job:
 class _Lane:
     """Worker threads a stuck file cannot use up.
 
-    A job past its time is written off and a new thread takes its place; the
-    stuck one ends by itself when its open finally returns.
+    A job past `limit` gets its place taken by a new thread, and goes on: it may
+    only be slow. Past `give_up` it is reported and cancelled. A stuck thread
+    gives its place back when its open finally returns.
     """
 
     def __init__(self, name: str, workers: int, run: Callable[[_Job], None], *, limit: float = STALL_SECONDS,
-                 clock: Callable[[], float] = time.monotonic,
+                 give_up: float | None = None, clock: Callable[[], float] = time.monotonic,
                  on_stall: Callable[[_Job], None] = lambda job: None) -> None:
         self.name, self.run, self.limit, self.clock, self.on_stall = name, run, limit, clock, on_stall
+        self.give_up = limit if give_up is None else give_up
         self.jobs: queue.SimpleQueue[_Job] = queue.SimpleQueue()
-        self.running: dict[threading.Thread, tuple[_Job, float]] = {}
+        self.running: dict[threading.Thread, list[Any]] = {}  # job, started, given up on
+        self.replaced: set[threading.Thread] = set()
         self.stalled = 0  # ever
         self.stuck = 0  # right now
         self.missing = 0  # replacements not started because too many are stuck
@@ -133,35 +137,46 @@ class _Lane:
             except queue.Empty:
                 continue
             with self._lock:
-                self.running[me] = (job, self.clock())
+                self.running[me] = [job, self.clock(), False]
+            done = False
             try:
                 self.run(job)
             finally:
                 with self._lock:
-                    written_off = self.running.pop(me, None) is None
-                    if written_off:
+                    del self.running[me]
+                    if me in self.replaced:
+                        self.replaced.discard(me)
                         self.stuck -= 1
-                        wanted = self.missing > 0
-                        self.missing -= 1 if wanted else 0
-            if written_off and not wanted:
-                return  # a replacement has this place
+                        if self.missing:
+                            self.missing -= 1  # stays on, in the place nobody could fill
+                        else:
+                            done = True
+            if done:
+                return
 
     def sweep(self) -> None:
         now = self.clock()
+        spare = 0
+        abandoned: list[_Job] = []
         with self._lock:
-            stuck = [(thread, job) for thread, (job, started) in self.running.items() if now - started > self.limit]
-            for thread, _ in stuck:
-                del self.running[thread]
-        for _, job in stuck:
+            for thread, entry in self.running.items():
+                age = now - entry[1]
+                if age > self.limit and thread not in self.replaced:
+                    self.replaced.add(thread)
+                    self.stalled += 1
+                    self.stuck += 1
+                    if self.stuck <= MAX_STUCK:
+                        spare += 1
+                    else:
+                        self.missing += 1
+                if age > self.give_up and not entry[2]:
+                    entry[2] = True
+                    abandoned.append(entry[0])
+        for _ in range(spare):
+            self._add()
+        for job in abandoned:
             job.cancel.cancel()
             job.result, job.state = {"code": "STALLED"}, "failed"
-            with self._lock:
-                self.stalled += 1
-                self.stuck += 1
-                room = self.stuck <= MAX_STUCK
-                self.missing += 0 if room else 1
-            if room:
-                self._add()
             self.on_stall(job)
 
 
@@ -185,7 +200,7 @@ class ProductBackend:
         self._lock = threading.Lock()
         self._asked_lane = _Lane("scan", SCAN_THREADS, self._run)
         self._observed_lane = _Lane("observed", 1, self._run_observed, limit=OBSERVED_STALL_SECONDS,
-                                    on_stall=self._gave_up)
+                                    give_up=STALL_SECONDS, on_stall=self._gave_up)
         self._observed = threading.BoundedSemaphore(MAX_OBSERVED)
         self._later: list[tuple[float, str, str, int]] = []
         self._stop = threading.Event()
@@ -566,7 +581,7 @@ class ProductBackend:
 def _visible(caller: Caller, owner: str | None) -> bool:
     # A user's own file is private to them. One owned by Administrators or SYSTEM,
     # as anything an elevated process wrote is, must not reach nobody at all.
-    return caller.is_admin or owner == caller.sid or not (owner or "").startswith("S-1-5-21-")
+    return caller.is_admin or owner == caller.sid or not (owner or "").startswith(USER_SIDS)
 
 
 def _owner(item: dict[str, Any]) -> str | None:

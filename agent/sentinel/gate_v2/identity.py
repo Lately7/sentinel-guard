@@ -105,7 +105,7 @@ def measure(
     path: str, *, max_bytes: int = 512 * 1024 * 1024,
     cancel: CancellationToken | None = None,
     chunk_size: int = CHUNK_SIZE,
-    between_chunks: Callable[[int], None] | None = None,
+    between_chunks: Callable[[int], None] | None = None, ignore_times: bool = False,
 ) -> IdentityResult:
     if max_bytes < 0 or chunk_size <= 0:
         raise ValueError("invalid measurement limit")
@@ -113,8 +113,8 @@ def measure(
         return IdentityResult(None, "CANCELLED")
     try:
         with open(path, "rb", buffering=0) as stream:
-            return measure_stream(stream, path, max_bytes=max_bytes, cancel=cancel,
-                                  chunk_size=chunk_size, between_chunks=between_chunks)
+            return measure_stream(stream, path, max_bytes=max_bytes, cancel=cancel, chunk_size=chunk_size,
+                                  between_chunks=between_chunks, ignore_times=ignore_times)
     except (OSError, ValueError, OverflowError, ContractError) as exc:
         if isinstance(exc, (IsADirectoryError, PermissionError)):
             try:
@@ -128,13 +128,13 @@ def measure(
 def measure_stream(
     stream: BinaryIO, path: str, *, max_bytes: int,
     cancel: CancellationToken | None = None, chunk_size: int = CHUNK_SIZE,
-    between_chunks: Callable[[int], None] | None = None, deny_write: bool = False,
+    between_chunks: Callable[[int], None] | None = None, ignore_times: bool = False,
 ) -> IdentityResult:
     """Measure an already opened generation; the caller owns the stream.
 
-    With `deny_write` nobody can write while the stream is held, so only which
-    file it is matters. Touching a file needs no write access, and a loop of
-    that must not be a way to keep a detected file unknown for ever.
+    `ignore_times` is for a caller with a better proof: a handle no writer can
+    share, or a hash to compare. Touching a file needs no write access, and a
+    loop of that must not keep a detected file unknown or out of quarantine.
     """
     if max_bytes < 0 or chunk_size <= 0:
         raise ValueError("invalid measurement limit")
@@ -165,7 +165,7 @@ def measure_stream(
             after = os.fstat(stream.fileno())
             after_change = _change_time(stream.fileno(), after)
             first, last = _generation(before, before_change), _generation(after, after_change)
-            if (first[:3] != last[:3] if deny_write else first != last) or count != after.st_size:
+            if (first[:3] != last[:3] if ignore_times else first != last) or count != after.st_size:
                 return IdentityResult(None, "CHANGED")
             return IdentityResult(FileIdentity(
                 canonical, after.st_dev, f"{after.st_ino:032x}", count,
@@ -218,7 +218,7 @@ def revalidate(
                                       "OK" if metadata == expected_metadata else "CHANGED")
         except (OSError, ValueError, OverflowError):
             return IdentityResult(None, "UNREADABLE")
-    actual = measure(path, max_bytes=max_bytes, cancel=cancel)
+    actual = measure(path, max_bytes=max_bytes, cancel=cancel, ignore_times=True)
     if not actual.ok:
         return actual
     assert actual.identity is not None

@@ -530,3 +530,17 @@ it open a pipe. It gets an identification-level token at most, since a medium-in
 `SeImpersonatePrivilege`, and the gate refuses it as not a regular file. Named streams other than the
 download mark are lost on restore. A hard link created after the last enumeration leaves the file in place
 and reports `IN_USE`: the file stays, and nothing false is said.
+
+### Third round
+
+| # | Finding | Outcome |
+|---|---|---|
+| R3-1 | The watch handle reopened the name, so a decoy swapped in made a real file end up in neither place | `ReOpenFile`: no name involved |
+| R3-2 | The final delete can wait on an oplock too, under the one global lock | Claims per file; no lock across any file operation |
+| R3-3 | A touch loop still stopped the action at the pre-action check | That check compares a hash, so timestamps add nothing |
+| R3-4 | 60 s was below the 120 s scan deadline, so a slow scan was cancelled and never retried | Replaced after 60 s, carries on, given up on only at 150 s |
+| R3-5 | Entra users' paths reached everyone | `S-1-12-1-` counts as a user |
+
+Left by choice: an event with no known owner reaches every local user, because a threat nobody hears
+about is worse than a path a local user can see. While 17 oplocks are held at once a lane stops; it
+recovers when they are released, and `status` shows `stalled`.

@@ -54,6 +54,7 @@ def escalate_origin(v: Verdict, reputation: dict[str, Any] | None) -> None:
 
 NOT_QUARANTINED_VI = {
     "NOT_CONFIRMED": "dịch vụ quét lại không xác nhận được phát hiện này",
+    "ALREADY": "tệp đang được cách ly",
     "CHANGED": "tệp đã đổi sau khi quét, sẽ quét lại",
     "IN_USE": "tệp đang chạy hoặc đang được dùng, hãy đóng chương trình rồi quét lại",
     "MISSING": "tệp không còn ở đó",

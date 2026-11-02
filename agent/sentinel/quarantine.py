@@ -38,8 +38,12 @@ MAX_ZONE_BYTES = 4096
 JOURNAL_GRACE_SECONDS = 60.0
 LINK_ROUNDS = 8
 
-# Two scans of one file must not both claim it.
+# Restores and crash recovery, one at a time.
 _action_lock = threading.RLock()
+# Two scans of one file must not both claim it. Per file, not one lock for all:
+# even the final delete can wait on a hostile oplock, for as long as its holder likes.
+_claims: set[tuple[int, str]] = set()
+_claims_lock = threading.Lock()
 # NTFS allows lone surrogates in names and SQLite's UTF-8 does not. They are kept
 # as private-use characters, so the file goes back under its exact name.
 _KEPT_SHIFT = 0xF0000 - 0xD800
@@ -138,16 +142,25 @@ def _open_names(path: str, expected: FileIdentity | None) -> list[winfile.Target
 
 
 def quarantine(db: Database, path: str, verdict: dict[str, Any], *, expected: FileIdentity | None = None) -> str:
-    # Opening can wait for as long as a hostile oplock holder likes, so none of
-    # it happens under the lock: one such file must not hold up every other.
     src = Path(path)
     zone = _zone_identifier(path)
     try:
         names = _open_names(path, expected)
     except TargetError as e:
         raise QuarantineError(f"cannot open {src} (in use or removed?): {e}", e.code) from e
-    with _action_lock:
+    key = names[0].key
+    with _claims_lock:
+        taken = key in _claims
+        _claims.add(key)
+    if taken:
+        for n in names:
+            n.close()
+        raise QuarantineError(f"{src} is being quarantined already", "ALREADY")
+    try:
         return _quarantine(db, src, names, verdict, expected, zone)
+    finally:
+        with _claims_lock:
+            _claims.discard(key)
 
 
 def _quarantine(db: Database, src: Path, names: list[winfile.Target], verdict: dict[str, Any],
@@ -160,7 +173,7 @@ def _quarantine(db: Database, src: Path, names: list[winfile.Target], verdict: d
     try:
         if first.gone():
             raise QuarantineError(f"{src} is already gone", "MISSING")
-        watch = winfile.open_watch(first.path)
+        watch = first.watch()
         sha = _copy_xor(first, dest)
         wanted = verdict.get("sha256") or (expected.sha256 if expected else None)
         if wanted and sha != wanted:
