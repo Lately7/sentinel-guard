@@ -341,9 +341,8 @@ class App:
         sel = self.q_tv.selection()
         if not sel:
             return
-        # Restore still trusts the file's hash everywhere (RT-002); say so plainly until that changes.
-        if not messagebox.askyesno(APP, "Khôi phục tệp này về vị trí cũ?\n\nNội dung này sẽ được tin cậy và không bị "
-                                        "chặn lại ở bất kỳ đâu trên máy."):
+        if not messagebox.askyesno(APP, "Khôi phục tệp này về vị trí cũ?\n\nChỉ tệp này, ở đúng vị trí này, được bỏ qua "
+                                        "khi quét. Bản sao ở nơi khác vẫn bị chặn."):
             return
         for qid in sel:
             try:

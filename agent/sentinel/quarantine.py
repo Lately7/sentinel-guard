@@ -133,12 +133,14 @@ def restore(db: Database, qid: str, *, trust: bool = True) -> Path:
         raise QuarantineError("quarantined copy is damaged (hash mismatch)")
     try:
         # One transaction: either the item is gone from quarantine *and*
-        # trusted, or nothing changed and the restored copy is removed again,
+        # excepted, or nothing changed and the restored copy is removed again,
         # so a retry can't produce a duplicate.
         with db.transaction():
             if trust:
-                # Without this the watcher would quarantine the file again immediately.
-                db.allow_hash(item["sha256"])
+                # Without this the watcher would quarantine the file again at once.
+                # This file at this path only: restoring is not trusting these
+                # bytes everywhere (RT-002); trust is its own explicit action.
+                db.add_restore_exception(str(target), item["sha256"])
                 db.bump_generation()
             db.remove_quarantine(qid)
     except sqlite3.Error as e:

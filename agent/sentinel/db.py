@@ -45,6 +45,12 @@ CREATE TABLE IF NOT EXISTS allow_hashes (
     sha256 TEXT PRIMARY KEY,
     added  REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS restore_exceptions (
+    path   TEXT NOT NULL,      -- os.path.realpath of the restored file, normcased
+    sha256 TEXT NOT NULL,
+    added  REAL NOT NULL,
+    PRIMARY KEY (path, sha256)
+);
 CREATE TABLE IF NOT EXISTS gate_cache (
     key     TEXT PRIMARY KEY,  -- file generation + gate generation, see gate_v2/cache.py
     payload TEXT NOT NULL,     -- the decision as JSON, revalidated on every read
@@ -104,7 +110,7 @@ class _Rows:
 # filter. Feed data lives in snapshots and is simply re-downloaded; the user's
 # own blocklist entries (source='user') are kept.
 SALVAGE: dict[str, str] = {
-    "allow_hosts": "", "allow_hashes": "", "quarantine": "", "events": "", "meta": "",
+    "allow_hosts": "", "allow_hashes": "", "restore_exceptions": "", "quarantine": "", "events": "", "meta": "",
     "bad_hosts": "WHERE source='user'", "bad_urls": "WHERE source='user'", "bad_hashes": "WHERE source='user'",
 }
 
@@ -431,6 +437,14 @@ class Database:
 
     def allow_hash(self, sha256: str) -> None:
         self._exec("INSERT OR IGNORE INTO allow_hashes(sha256,added) VALUES(?,?)", (sha256.lower(), time.time()))
+
+    def add_restore_exception(self, path: str, sha256: str) -> None:
+        self._exec("INSERT OR IGNORE INTO restore_exceptions(path,sha256,added) VALUES(?,?,?)",
+                   (os.path.normcase(os.path.realpath(path)), sha256.lower(), time.time()))
+
+    def has_restore_exception(self, path: str, sha256: str) -> bool:
+        return self._exec("SELECT 1 FROM restore_exceptions WHERE path=? AND sha256=?",
+                          (os.path.normcase(os.path.realpath(path)), sha256.lower())).fetchone() is not None
 
     def is_hash_allowed(self, sha256: str) -> bool:
         return self._exec("SELECT 1 FROM allow_hashes WHERE sha256=?", (sha256.lower(),)).fetchone() is not None

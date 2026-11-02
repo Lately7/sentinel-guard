@@ -23,7 +23,6 @@ def test_weak_clamav_name_is_not_conclusive():
     assert finding_for("Win.Trojan.Suspect-34").severity < Severity.CRITICAL
 
 
-@pytest.mark.xfail(strict=True, reason="RT-002: restore grants global hash trust")
 def test_restore_creates_a_path_and_hash_exception_only(db, scanner, tmp_path):
     p = tmp_path / "bad.bin"
     p.write_bytes(b"head " + MARKER + b" tail")

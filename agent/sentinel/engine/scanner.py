@@ -192,7 +192,7 @@ class Scanner:
         def known(measured: FileIdentity) -> FinalDecision | None:
             if path is None:
                 return None
-            if self.db.is_hash_allowed(measured.sha256):
+            if self.db.is_hash_allowed(measured.sha256) or self.db.has_restore_exception(path, measured.sha256):
                 served.append("allowlist")
                 return _trusted(request, measured, generation)
             found = cache.lookup(self.db, measured, generation, request, time.time())
