@@ -39,13 +39,21 @@ class Scanner:
     ClamAV → Microsoft Defender — and the verdict records what each layer said."""
 
     def __init__(self, db: Database, *, use_defender: bool = True, use_clamav: bool = False,
-                 clamav_engine: ClamAVEngine | None = None, signatures: SignatureEngine | None = None) -> None:
+                 clamav_engine: ClamAVEngine | None = None, signatures: SignatureEngine | None = None,
+                 defender_runner: defender.Runner | None = None) -> None:
         self.db = db
         self.sigs = signatures or SignatureEngine(db)
-        self.use_defender = use_defender and defender.available()
+        self.want_defender = use_defender
+        self.defender_runner = defender_runner
         if clamav_engine is None and use_clamav and clamav.install_dir() is not None:
             clamav_engine = ClamAVEngine()
         self.clamav = clamav_engine
+
+    @property
+    def use_defender(self) -> bool:
+        # Re-evaluated (with a TTL) so a Defender that becomes active or passive
+        # while the agent runs is picked up without a restart.
+        return self.want_defender and defender.available()
 
     def gate_id(self) -> str:
         """Identifies the engines and signature versions behind a verdict: a
@@ -135,9 +143,9 @@ class Scanner:
         elif v.label == MALICIOUS:
             v.engines["defender"] = "skipped: already detected"
         elif risky_type or v.label != CLEAN:
-            found = defender.scan(str(p))
-            v.engines["defender"] = "detected" if found else "clean"
-            v.findings.extend(found)
+            res = defender.scan(str(p), runner=self.defender_runner)
+            v.engines["defender"] = res.engine_status
+            v.findings.extend(res.findings)
         else:
             v.engines["defender"] = "skipped: not a risky file type"
 

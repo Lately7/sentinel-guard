@@ -98,11 +98,13 @@ def test_defender_failure_is_not_a_detection():
 
     # Real output from this machine with Defender off (Malwarebytes active):
     failed = "[Failed][0x80004005] Unspecified error\nCmdTool: Failed with hr = 0x80004005."
-    assert defender.parse_result(2, failed) == []
+    res = defender.parse_result(2, failed)
+    assert res.status == "error" and res.findings == ()
     found = "Scanning C:\\x found 1 threats.\n\nThreat                  : Virus:DOS/EICAR_Test_File\n"
-    [f] = defender.parse_result(2, found)
-    assert f.severity == Severity.CRITICAL and "EICAR_Test_File" in f.detail
-    assert defender.parse_result(0, "") == []
+    res = defender.parse_result(2, found)
+    [f] = res.findings
+    assert res.status == "malicious" and f.severity == Severity.CRITICAL and "EICAR_Test_File" in f.detail
+    assert defender.parse_result(0, "").status == "clean"
 
 
 # -- verdict -----------------------------------------------------------------
