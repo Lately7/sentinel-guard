@@ -68,7 +68,9 @@ def _quarantine(db: Database, v: Verdict, data: dict[str, Any], authority: bool)
     if done is not None:
         if done.get("quarantine_id"):
             return str(done["quarantine_id"])
-        raise quarantine.QuarantineError(str(done.get("error") or "not confirmed"), str(done.get("code") or "NOT_CONFIRMED"))
+        error = quarantine.QuarantineError(str(done.get("error") or "not confirmed"), str(done.get("code") or "NOT_CONFIRMED"))
+        error.repair_id = done.get("repair_id")  # type: ignore[attr-defined]
+        raise error
     decision = getattr(v, "decision", None)
     return quarantine.quarantine(db, str(v.path), data, expected=decision.identity if decision else None)
 
@@ -99,7 +101,7 @@ def act_on(db: Database, v: Verdict, settings: Settings, source: str,
                          f"{v.name}: {top_reason(v)}", {**data, "quarantine_id": qid})
         except quarantine.QuarantineError as e:
             why = NOT_QUARANTINED_VI.get(e.code, "không cách ly được")
-            out["error"] = why
+            out.update(error=why, code=e.code, repair_id=getattr(e, "repair_id", None))
             log.warning("quarantine of %s failed: %s", v.name, e)
             db.add_event(source, "threat", "Phát hiện mối đe dọa (chưa cách ly được)",
                          f"{v.name}: {top_reason(v)} — {why}", data)

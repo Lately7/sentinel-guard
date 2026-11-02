@@ -30,11 +30,12 @@ from ..engine.verdict import Verdict
 from ..gate_v2 import identity, scope
 from ..gate_v2.actions import ProtectionBarrier, ProtectionStopped
 from ..protection import act_on, escalate_origin, top_reason
-from . import winpipe
+from . import repair, winpipe
 from .authz import Caller
 from .observers import DbCursorStore, Observers
 from .procwatch import ProcessWatcher, windows_resolve, windows_snapshot
 from .protocol import ProtocolError
+from .repair import shown
 from .rescan import DbDownloadStore, Download, RescanQueue
 from .usn import WindowsVolume
 
@@ -48,20 +49,12 @@ MAX_OBSERVED = 2048
 # A stop or an approved "off" waits this long for an action already running.
 OFF_BARRIER_SECONDS = 20.0
 MAINTENANCE_SECONDS = 600.0
+MAX_REPAIRS = 64
 PAGE_BYTES = 600_000  # a frame holds 1 MiB, and a page of long names can exceed that
 HOST = re.compile(r"(?=.{1,253}\Z)[a-z0-9-]+(\.[a-z0-9-]+)*\Z")
 OFF_META = "protection_off"
 SOURCES = {"download": "download", "on_demand": "scan", "journal": "realtime", "process": "realtime",
            "reconcile": "realtime", "rescan": "rescan"}
-
-
-def shown(text: str) -> str:
-    """Text from a file name or a page, safe to put in a confirmation.
-
-    Direction overrides and control characters are how a name is made to read
-    as something else in the one prompt the user trusts.
-    """
-    return "".join(c for c in text if c.isprintable())[:300]
 
 
 class _Cancel:
@@ -113,6 +106,7 @@ class ProductBackend:
         self._stop = threading.Event()
         self._maintenance: threading.Thread | None = None
         self.rescans = RescanQueue(DbDownloadStore(db))
+        self._repairs: OrderedDict[str, repair.Repair] = OrderedDict()
         self._rule_generation: str | None = None
         self.observers = observers(self)
 
@@ -298,11 +292,22 @@ class ProductBackend:
                   "url_reputation": reputation,
                   "engines": sorted(r.engine_id for r in decision.engine_results) if decision else [],
                   "trusted": bool(decision) and "USER_TRUST" in decision.reason_codes}
-        if outcome.get("error"):
-            result["code"] = "NOT_QUARANTINED"
+        if outcome.get("code") == "IN_USE" and decision is not None:
+            result["repair_id"] = self._offer_repair(verdict, decision.identity.sha256)
         if job.reason == "download" and decision is not None and not outcome["quarantined"]:
             self._remember_download(job, decision)
         return result
+
+    def _offer_repair(self, verdict: Verdict, sha256: str) -> str | None:
+        try:
+            proposal = repair.plan(str(verdict.path), sha256)
+        except (repair.RepairError, OSError):
+            return None
+        with self._lock:
+            self._repairs[proposal.repair_id] = proposal
+            while len(self._repairs) > MAX_REPAIRS:
+                self._repairs.popitem(last=False)
+        return proposal.repair_id
 
     def _remember_download(self, job: _Job, decision: Any) -> None:
         seen = decision.identity
@@ -333,6 +338,10 @@ class ProductBackend:
                 return f"Xóa vĩnh viễn bản cách ly của {where}. Không khôi phục lại được."
             return (f"Khôi phục {where}, SHA-256 {item['sha256'][:16]}. Chỉ tệp này ở đúng vị trí này được bỏ qua "
                     "khi quét; bản sao ở nơi khác vẫn bị chặn.")
+        if kind == "approve_repair":
+            with self._lock:
+                proposal = self._repairs.get(params["repair_id"])
+            return None if proposal is None else repair.describe(proposal)
         if kind == "add_exclusion":
             found = identity.measure(params["path"], max_bytes=config.MAX_SCAN_BYTES)
             if not found.ok or found.identity is None or found.identity.sha256 != params["sha256"].lower():
@@ -360,11 +369,23 @@ class ProductBackend:
                 target = quarantine.restore(self.db, params["quarantine_id"])
             except quarantine.QuarantineError as e:
                 raise ProtocolError("ACTION_FAILED", e.code) from e
+            back = repair.undo(self.db, params["quarantine_id"])
             self.db.add_event("system", "warning", "Đã khôi phục tệp", shown(str(target)))
-            return {"restored": str(target)}
+            return {"restored": str(target), "autostart_restored": back}
         if kind == "delete_quarantine":
             quarantine.delete(self.db, params["quarantine_id"])
             return {"deleted": True}
+        if kind == "approve_repair":
+            with self._lock:
+                proposal = self._repairs.pop(params["repair_id"], None)
+            if proposal is None:
+                raise ProtocolError("NOT_FOUND", "nothing to act on")
+            try:
+                done = repair.execute(self.db, proposal, {"owner_sid": self._file_owner(proposal.path) or ""})
+            except repair.RepairError as e:
+                raise ProtocolError("ACTION_FAILED", e.code) from e
+            self.db.add_event("system", "threat", "Đã xử lý chương trình đang chạy", shown(proposal.path), done)
+            return done
         if kind == "add_exclusion":
             self.db.allow_hash(params["sha256"])
             self.db.bump_generation()

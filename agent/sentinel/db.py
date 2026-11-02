@@ -67,6 +67,16 @@ CREATE TABLE IF NOT EXISTS downloads (
     first_run   INTEGER NOT NULL,
     PRIMARY KEY (volume, file_id)
 );
+CREATE TABLE IF NOT EXISTS repair_undo (
+    qid   TEXT NOT NULL,
+    hive  TEXT NOT NULL,
+    key   TEXT NOT NULL,
+    view  INTEGER NOT NULL,
+    name  TEXT NOT NULL,
+    data  TEXT NOT NULL,
+    kind  INTEGER NOT NULL,
+    PRIMARY KEY (qid, hive, key, view, name)
+);
 CREATE TABLE IF NOT EXISTS gate_cache (
     key     TEXT PRIMARY KEY,  -- file generation + gate generation, see gate_v2/cache.py
     payload TEXT NOT NULL,     -- the decision as JSON, revalidated on every read
@@ -126,7 +136,7 @@ class _Rows:
 # filter. Feed data lives in snapshots and is simply re-downloaded; the user's
 # own blocklist entries (source='user') are kept.
 SALVAGE: dict[str, str] = {
-    "allow_hosts": "", "allow_hashes": "", "restore_exceptions": "", "action_journal": "", "quarantine": "",
+    "allow_hosts": "", "allow_hashes": "", "restore_exceptions": "", "action_journal": "", "repair_undo": "", "quarantine": "",
     "events": "", "meta": "",
     "bad_hosts": "WHERE source='user'", "bad_urls": "WHERE source='user'", "bad_hashes": "WHERE source='user'",
 }
@@ -545,6 +555,16 @@ class Database:
 
     def delete_download(self, volume: int, file_id: int) -> None:
         self._exec("DELETE FROM downloads WHERE volume=? AND file_id=?", (volume, str(file_id)))
+
+    def add_repair_undo(self, qid: str, hive: str, key: str, view: int, name: str, data: str, kind: int) -> None:
+        self._exec("INSERT OR REPLACE INTO repair_undo(qid,hive,key,view,name,data,kind) VALUES(?,?,?,?,?,?,?)",
+                   (qid, hive, key, view, name, data, kind))
+
+    def repair_undos(self, qid: str) -> list[dict[str, Any]]:
+        return [dict(r) for r in self._exec("SELECT * FROM repair_undo WHERE qid=?", (qid,)).fetchall()]
+
+    def clear_repair_undos(self, qid: str) -> None:
+        self._exec("DELETE FROM repair_undo WHERE qid=?", (qid,))
 
     def open_action(self, qid: str, path: str, sha256: str) -> None:
         self._exec("INSERT INTO action_journal(qid,path,sha256,started) VALUES(?,?,?,?)",

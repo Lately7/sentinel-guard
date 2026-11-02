@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from . import theme
 from .engine import clamav
 from .scanjob import ScanJob, ScanProgress, describe_paths, discovery, fixed_drives
+from .service import repair
 
 if TYPE_CHECKING:
     from .tray import App
@@ -347,3 +348,24 @@ class GatePanel:
         if v["outcome"].get("error"):
             text += ["", f"Lỗi cách ly: {v['outcome']['error']}"]
         messagebox.showinfo("Chi tiết", "\n".join(text))
+        if v["outcome"].get("code") == "IN_USE":
+            self.offer_repair(sel[0], v)
+
+    def offer_repair(self, iid: str, v: dict[str, Any]) -> None:
+        """A running program holds its file: stopping it is the user's call, with the steps shown."""
+        outcome = v["outcome"]
+        try:
+            if outcome.get("repair_id"):
+                done = self.app.lease.approve("approve_repair", {"repair_id": outcome["repair_id"]})
+            else:
+                proposal = repair.plan(v["path"], v["sha256"])
+                done = messagebox.askyesno("Xử lý chương trình đang chạy", repair.describe(proposal))
+                if done:
+                    repair.execute(self.app.db, proposal, v)
+        except (repair.RepairError, OSError) as e:
+            log.warning("repair failed: %s", e)
+            messagebox.showerror("Xử lý chương trình đang chạy", "Chưa xử lý được. Hãy đóng chương trình rồi quét lại.")
+            return
+        if done:
+            outcome.update(quarantined=True, error=None, code=None)
+            self.tv.set(iid, "Xử lý", "đã cách ly")
