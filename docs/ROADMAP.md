@@ -10,9 +10,21 @@ Một trang duy nhất để theo dõi tiến độ. Chi tiết kỹ thuật v�
 | Phe | Ai | Việc |
 |---|---|---|
 | Blue Team | Claude | Viết toàn bộ code, sửa lỗi, test, tài liệu, commit |
-| Red Team | Codex | Review chỉ-đọc, nghiên cứu, viết test trong `tests/codex/**`, làm icon trong `assets/brand/**` |
+| Red Team | Codex | Review chỉ-đọc, nghiên cứu, viết test trong `tests/codex/**`, làm icon trong `assets/brand/**`; **sẽ viết Gate v2** trong nhánh riêng |
 
 Mọi phát hiện của Codex được Claude kiểm chứng rồi mới sửa hoặc từ chối (có lý do).
+
+## Hướng mới (2026-11-02): Gate v2 do Codex viết
+
+Chủ dự án quyết định: Codex nghiên cứu sâu (mã nguồn ClamAV, Malwarebytes và
+các antivirus khác, các loại mã độc — `docs/research/`), rồi viết một cổng quét
+hoàn toàn mới. Claude review, chạy test, tích hợp. Gate v2 gộp luôn Contract v1
+(giai đoạn 3) và phần cổng của giai đoạn 4.
+
+Vì vậy trong giai đoạn 1, các sửa lỗi **bên trong cổng quét cũ** (C3b cache,
+C3c độ phủ ZIP) tạm dừng — Gate v2 định nghĩa lại chúng. Các sửa lỗi **ngoài
+cổng** vẫn làm ngay: native host (C3e, C3j), extension (C3k), mã thoát CLI
+(C3g), cập nhật chữ ký (C3h), `clamd.conf` (C3i).
 
 ## Ba tính năng bắt buộc
 
@@ -26,8 +38,10 @@ Mọi phát hiện của Codex được Claude kiểm chứng rồi mới sửa 
 
 | # | Giai đoạn | Trạng thái |
 |---|---|---|
-| 0 | **Nền tảng**: C1 icon cũ, C2a cổng quét, C2b baseline, giao diện tối, bộ icon | ✅ xong (icon đang làm lại bản 2) |
-| 1 | **Sửa lỗi cổng quét** (C3a–C3k: RT-006, 008–011, 015, 019, 020) | ⏭ việc tiếp theo |
+| 0 | **Nền tảng**: C1 icon cũ, C2a cổng quét, C2b baseline, giao diện tối, bộ icon v2 | ✅ xong |
+| 1 | **Sửa lỗi** (C3a ✅; C3b/C3c tạm dừng vì Gate v2; còn C3d–C3k) | ⏳ đang làm |
+| R | **Nghiên cứu sâu cho Gate v2** (R8a–R11, `docs/research/`) | ⏳ R9, R10 đang chạy; R8 chờ tải mã nguồn ClamAV |
+| G | **Gate v2** do Codex viết theo đặc tả R11, Claude review | chờ R11 |
 | 2 | **Red Team viết test** (Codex vòng 1a, 1b) | chờ giai đoạn 1 |
 | 3 | **Contract v1**: tách trạng thái quét khỏi kết luận; "một phần"/lỗi không bao giờ là "sạch" | chờ |
 | 4 | **Chính sách ClamAV + cách ly an toàn** | chờ |
