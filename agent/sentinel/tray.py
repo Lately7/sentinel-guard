@@ -70,6 +70,7 @@ class App:
         self.window: tk.Toplevel | None = None
         self.logo: theme.LogoMark | None = None
         self.overview: Overview | None = None
+        self._events: dict[str, dict] = {}
         self.icon = None
         self._stop = threading.Event()
 
@@ -240,7 +241,7 @@ class App:
         theme.dark_title_bar(w)
         self.window = w
         gap = theme.px(w, 16)
-        side = tk.Frame(w, bg=theme.BG, width=theme.px(w, 84))
+        side = tk.Frame(w, bg=theme.BG, width=theme.px(w, 72))
         side.pack(side="left", fill="y")
         side.pack_propagate(False)
         self.logo = theme.LogoMark(side, size=26)
@@ -253,11 +254,14 @@ class App:
         hf = ttk.Frame(nb, padding=(gap * 2, gap * 2, gap * 2, gap))
         nb.add(hf, text="Lịch sử", icon="history")
         ttk.Label(hf, text="Lịch sử", style="PageTitle.TLabel").pack(anchor="w", pady=(0, gap))
-        self.events_tv = self._table(hf, None, ("Thời gian", "Nguồn", "Mức", "Nội dung"), (130, 100, 80, 640))
+        self.events_tv = self._table(hf, None, ("Thời gian", "Sự kiện", "Mức"), (112, 640, 96))
+        self.events_tv.bind("<<TreeviewSelect>>", lambda _e: self._show_event_detail())
+        self.event_detail = ttk.Label(hf, style="Muted.TLabel", wraplength=theme.px(w, 760), justify="left")
+        self.event_detail.pack(anchor="w", pady=(10, 0))
         qf = ttk.Frame(nb, padding=(gap * 2, gap * 2, gap * 2, gap))
         nb.add(qf, text="Cách ly", icon="quarantine")
         ttk.Label(qf, text="Cách ly", style="PageTitle.TLabel").pack(anchor="w", pady=(0, gap))
-        self.q_tv = self._table(qf, None, ("ID", "Thời gian", "Vị trí gốc", "Lý do"), (0, 130, 380, 400))
+        self.q_tv = self._table(qf, None, ("Tệp", "Thời gian", "Lý do", "Vị trí gốc"), (220, 112, 300, 400))
         qb = ttk.Frame(qf)
         qb.pack(anchor="w", pady=(10, 0))
         ttk.Button(qb, text="Khôi phục", command=self.restore_selected).pack(side="left", padx=(0, 8))
@@ -283,12 +287,12 @@ class App:
             parent.add(frame, text=tab)
         else:
             frame.pack(fill="both", expand=height is None)
-        tv = ttk.Treeview(frame, columns=cols, show="headings", **({"height": height} if height else {}))
+        tv = ttk.Treeview(frame, columns=cols, show="tree headings", selectmode="browse",
+                          **({"height": height} if height else {}))
+        tv.column("#0", width=theme.px(tv, 10), stretch=False, minwidth=0)
         for c, wdt in zip(cols, widths):
             tv.heading(c, text=c, anchor="w")
             tv.column(c, width=theme.px(tv, wdt), stretch=wdt > 300, minwidth=0, anchor="w")
-        tv.tag_configure("threat", foreground=theme.BAD)
-        tv.tag_configure("warning", foreground=theme.WARN)
         sb = ttk.Scrollbar(frame, orient="vertical", command=tv.yview)
         tv.configure(yscrollcommand=sb.set)
         tv.pack(side="left", fill="both", expand=True)
@@ -305,21 +309,28 @@ class App:
         if self.gate is not None:
             self.gate.refresh_layers()
         self.overview.refresh()
-        _fill(self.events_tv, [(e["id"], (_fmt_ts(e["ts"]), SOURCE_VI.get(e["source"], e["source"]),
-                                          LEVEL_VI.get(e["level"], e["level"]), f"{e['title']} — {e['detail']}"),
-                                e["level"]) for e in self.db.events(300)])
+        self._events = {str(e["id"]): e for e in self.db.events(300)}
+        _fill(self.events_tv, [(e["id"], (_fmt_ts(e["ts"]), f"{SOURCE_VI.get(e['source'], e['source'])} · {e['title']}",
+                                          LEVEL_VI.get(e["level"], e["level"])), e["level"])
+                               for e in self._events.values()])
         items = []
         for q in self.db.quarantine_items():
             try:
                 why = json.loads(q["verdict"])["findings"][0]["detail"]
             except (ValueError, KeyError, IndexError):
                 why = ""
-            items.append((q["id"], (q["id"], _fmt_ts(q["ts"]), q["original_path"], why), ""))
+            items.append((q["id"], (os.path.basename(q["original_path"]), _fmt_ts(q["ts"]), why,
+                                    os.path.dirname(q["original_path"])), "threat"))
         _fill(self.q_tv, items)
         web = [e for e in self.db.events(300) if e["source"] in ("web", "download")]
         _fill(self.web_tv, [(e["id"], (_fmt_ts(e["ts"]), LEVEL_VI.get(e["level"], e["level"]),
-                                       f"{e['title']} — {e['detail']}"), e["level"]) for e in web])
+                                       f"{e['title']} · {e['detail']}"), e["level"]) for e in web])
         _fill(self.allow_tv, [(h, (h,), "") for h in self.db.allowed_hosts()])
+
+    def _show_event_detail(self) -> None:
+        sel = self.events_tv.selection()
+        e = self._events.get(sel[0]) if sel else None
+        self.event_detail.configure(text=f"{e['title']}\n{e['detail']}" if e else "")
 
     def restore_selected(self) -> None:
         sel = self.q_tv.selection()
@@ -363,8 +374,10 @@ LEVEL_VI = {"threat": "đe dọa", "warning": "cảnh báo", "info": "thông tin
 def _fill(tv: ttk.Treeview, rows) -> None:
     keep = tv.selection()
     tv.delete(*tv.get_children())
-    for iid, values, tag in rows:
-        tv.insert("", "end", iid=str(iid), values=values, tags=(tag,) if tag else ())
+    for iid, values, level in rows:
+        # Only a 3 px leading mark carries severity; the text stays neutral.
+        color = {"threat": theme.BAD, "warning": theme.WARN}.get(level)
+        tv.insert("", "end", iid=str(iid), values=values, **({"image": theme.row_mark(tv, color)} if color else {}))
     present = [i for i in keep if tv.exists(i)]
     if present:
         tv.selection_set(present)

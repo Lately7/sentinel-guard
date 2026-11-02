@@ -1,4 +1,4 @@
-"""Scan tab: start/stop scans, progress, items that need attention; engine details on request."""
+"""Scan page: idle / running / finished states, items that need attention, engine layers on request."""
 
 from __future__ import annotations
 
@@ -16,14 +16,11 @@ from .scanjob import ScanJob, ScanProgress, describe_paths, fixed_drives
 if TYPE_CHECKING:
     from .tray import App
 
-LAYERS = (
-    ("sentinel", "Lõi Sentinel", "hash, EICAR, tên tệp đánh lừa, cấu trúc PE, tệp ZIP"),
-    ("rules+yara", "Luật + YARA-X", "gói luật và luật YARA trong thư mục rules"),
-    ("clamav", "ClamAV", "engine mã nguồn mở, mở 7z/RAR/CAB/ISO/PDF/Office"),
-    ("defender", "Microsoft Defender", "chỉ khi Defender là phần mềm diệt virus đang chạy"),
-)
+LAYERS = (("sentinel", "Lõi Sentinel"), ("rules+yara", "Luật + YARA-X"), ("clamav", "ClamAV"),
+          ("defender", "Microsoft Defender"))
 LABEL_VI = {"clean": "sạch", "suspicious": "nghi ngờ", "malicious": "mối đe dọa"}
 OK, WARN, BAD, OFF = theme.OK, theme.WARN, theme.BAD, theme.OFF
+MAX_ROWS = 6
 
 
 def layer_text(status: str | None) -> str:
@@ -35,81 +32,106 @@ def layer_text(status: str | None) -> str:
             "trusted by the user": "tin cậy"}.get(head, status[:20])
 
 
+def short_reason(v: dict[str, Any]) -> str:
+    """A few words for the table row; the full finding stays in the detail dialog."""
+    if not v.get("findings"):
+        return ""
+    f = v["findings"][0]
+    rule, name = f.get("rule", ""), v.get("name", "")
+    if rule == "eicar.test_file":
+        return "EICAR kiểm thử"
+    if rule in ("filetype.double_extension", "filetype.mismatch"):
+        parts = name.lower().rsplit(".", 2)
+        return f"Giả dạng {parts[-2].upper()}" if len(parts) == 3 else "Đuôi tệp đánh lừa"
+    return {"filetype.rtlo": "Tên tệp đảo chiều", "filetype.padded_name": "Tên tệp độn khoảng trắng",
+            "pe.inflated": "Tệp chạy được bị độn", "pe.malformed": "Cấu trúc PE hỏng", "office.macros": "Có macro",
+            "origin.blocklisted_source": "Tải từ nguồn độc hại", "archive.encrypted_executable": "Tệp chạy được có mật khẩu",
+            "archive.bomb": "Bom giải nén", "defender.detection": "Defender phát hiện",
+            }.get(rule, (f["detail"][:40] + "…") if len(f["detail"]) > 40 else f["detail"])
+
+
 def _n(x: int) -> str:
     return f"{x:,}".replace(",", ".")
 
 
 class GatePanel:
-    def __init__(self, nb: ttk.Notebook, app: "App") -> None:
+    def __init__(self, nb: ttk.Frame, app: "App") -> None:
         self.app = app
         self.nb = nb
         self.job: ScanJob | None = None
-        gap = theme.px(nb, 12)
-        frame = self.frame = ttk.Frame(nb, padding=(gap * 2, gap * 2, gap * 2, gap))
+        pad, gap = theme.px(nb, 24), theme.px(nb, 16)
+        frame = self.frame = ttk.Frame(nb, padding=(pad, pad, pad, pad))
         nb.add(frame, text="Quét", icon="scan")
 
         ttk.Label(frame, text="Quét", style="PageTitle.TLabel").pack(anchor="w", pady=(0, gap))
-        ctl = ttk.Frame(frame)
+        ctl = self.ctl = ttk.Frame(frame)
         ctl.pack(fill="x")
-        self.buttons = []
-        for text, cmd, style in (("Quét ngay", self.scan_quick, "Primary.TButton"),
-                                 ("Chọn tệp…", self.scan_file, "TButton"),
-                                 ("Chọn thư mục…", self.scan_folder, "TButton"),
-                                 ("Quét sâu…", self.scan_full, "TButton")):
-            b = ttk.Button(ctl, text=text, command=cmd, style=style)
-            b.pack(side="left", padx=(0, 8))
-            self.buttons.append(b)
-        self.stop_btn = ttk.Button(ctl, text="Dừng", command=self.stop, state="disabled")
-        self.stop_btn.pack(side="left", padx=(8, 0))
-        self.details_btn = ttk.Button(ctl, text="Các lớp", command=self.toggle_layers)
+        self.scan_btn = ttk.Button(ctl, text="Quét ngay", style="Primary.TButton", command=self.scan_quick, width=12)
+        self.scan_btn.pack(side="left", ipady=theme.px(nb, 4))
+        self.pick = ttk.Menubutton(ctl, text="Chọn mục")
+        menu = theme.dark_menu(self.pick)
+        menu.add_command(label="Tệp…", command=self.scan_file)
+        menu.add_command(label="Thư mục…", command=self.scan_folder)
+        menu.add_separator()
+        menu.add_command(label="Quét sâu (toàn bộ ổ đĩa)…", command=self.scan_full)
+        self.pick["menu"] = menu
+        self.pick.pack(side="left", padx=(8, 0), ipady=theme.px(nb, 4))
+        self.details_btn = ttk.Button(ctl, text="Lớp kiểm tra", style="Quiet.TButton", command=self.toggle_layers)
         self.details_btn.pack(side="right")
+        self.stop_btn = ttk.Button(ctl, text="Dừng", command=self.stop)
 
-        # Engine-by-engine status is for people who want it; hidden by default.
-        self.layers = ttk.Frame(frame, style="Card.TFrame", padding=(gap, gap))
+        # Engine layers: one short status each; hidden unless asked for.
+        self.layers = ttk.Frame(frame, style="Card.TFrame", padding=(gap, theme.px(nb, 6)))
         self.lights: dict[str, tuple[theme.Dot, ttk.Label]] = {}
-        for row, (key, title, hint) in enumerate(LAYERS):
-            dot = theme.Dot(self.layers)
-            dot.grid(row=row, column=0, padx=(0, 8), pady=3)
-            ttk.Label(self.layers, text=title, style="CardValue.TLabel", width=18).grid(row=row, column=1, sticky="w")
-            st = ttk.Label(self.layers, text="…", style="Card.TLabel", width=46)
+        for row, (key, title) in enumerate(LAYERS):
+            dot = theme.Dot(self.layers, size=8)
+            dot.grid(row=row, column=0, padx=(0, 10), pady=theme.px(nb, 8))
+            ttk.Label(self.layers, text=title, style="CardValue.TLabel", width=20).grid(row=row, column=1, sticky="w")
+            st = ttk.Label(self.layers, style="Card.TLabel")
             st.grid(row=row, column=2, sticky="w")
-            ttk.Label(self.layers, text=hint, style="CardMuted.TLabel").grid(row=row, column=3, sticky="w", padx=8)
             self.lights[key] = (dot, st)
-        cb = ttk.Frame(self.layers, style="Card.TFrame")
-        cb.grid(row=len(LAYERS), column=0, columnspan=4, sticky="w", pady=(8, 0))
-        self.update_btn = ttk.Button(cb, text="Cập nhật chữ ký ClamAV", command=self.update_clamav)
+        self.clam_actions = ttk.Frame(self.layers, style="Card.TFrame")
+        self.update_btn = ttk.Button(self.clam_actions, text="Cập nhật chữ ký", command=self.update_clamav)
         self.update_btn.pack(side="left", padx=(0, 8))
-        ttk.Button(cb, text="Khởi động ClamAV", command=self.start_clamav).pack(side="left")
+        ttk.Button(self.clam_actions, text="Khởi động ClamAV", command=self.start_clamav).pack(side="left")
         self.layers_shown = False
 
-        self.bar = theme.ActivityBar(frame)
-        self.bar.pack(fill="x", pady=(gap, 0))
-        self.bar_widget = self.bar.canvas
-        self.progress_var = tk.StringVar(value="Sẵn sàng")
-        ttk.Label(frame, textvariable=self.progress_var, justify="left").pack(anchor="w", pady=(8, 2))
-        self.current_var = tk.StringVar(value="")
-        ttk.Label(frame, textvariable=self.current_var, style="Muted.TLabel").pack(anchor="w", pady=(0, gap))
+        # Status area: exactly one of idle / progress is shown.
+        self.status = ttk.Frame(frame)
+        self.status.pack(fill="x", pady=(gap, 0))
+        self.idle = ttk.Frame(self.status, style="Card.TFrame", height=theme.px(nb, 96))
+        self.idle.pack_propagate(False)
+        self.idle_label = ttk.Label(self.idle, text="Sẵn sàng quét", style="CardMuted.TLabel")
+        self.idle_label.place(relx=0.5, rely=0.5, anchor="center")
+        self.progress = ttk.Frame(self.status)
+        self.heading = ttk.Label(self.progress, style="Outcome.TLabel")
+        self.heading.pack(anchor="w")
+        self.bar = theme.ActivityBar(self.progress)
+        self.bar.pack(fill="x", pady=(theme.px(nb, 8), 0))
+        self.counts = ttk.Frame(self.progress)
+        self.counts.pack(fill="x", pady=(theme.px(nb, 8), 0))
+        self.count_labels: dict[str, ttk.Label] = {}
+        for key in ("scanned", "threats", "suspicious", "quarantined", "unreadable"):
+            lbl = ttk.Label(self.counts)
+            self.count_labels[key] = lbl
+        self.current_var = tk.StringVar()
+        ttk.Label(self.progress, textvariable=self.current_var, style="Muted.TLabel").pack(anchor="w", pady=(4, 0))
+        self.idle.pack(fill="x")
 
-        ttk.Label(frame, text="Cần xem", style="Section.TLabel").pack(anchor="w", pady=(0, 6))
-        cols = ("Tệp", "Kết luận", "Xử lý", "Lý do", "Thư mục")
-        widths = (220, 90, 100, 330, 260)
-        box = ttk.Frame(frame, style="Card.TFrame")
-        box.pack(fill="both", expand=True)
-        self.tv = ttk.Treeview(box, columns=cols, show="headings", height=8)
-        for c, w in zip(cols, widths):
+        self.results_title = ttk.Label(frame, text="Cần xem", style="Section.TLabel")
+        self.box = ttk.Frame(frame, style="Card.TFrame")
+        cols = ("Tệp", "Kết luận", "Xử lý", "Lý do")
+        self.tv = ttk.Treeview(self.box, columns=cols, show="tree headings", height=1, selectmode="browse")
+        self.tv.column("#0", width=theme.px(self.tv, 10), stretch=False, minwidth=0)
+        for c, w in zip(cols, (28, 14, 15, 43)):
             self.tv.heading(c, text=c, anchor="w")
-            self.tv.column(c, width=theme.px(self.tv, w), stretch=c in ("Lý do", "Thư mục"), minwidth=0, anchor="w")
-        self.tv.tag_configure("malicious", foreground=BAD)
-        self.tv.tag_configure("suspicious", foreground=WARN)
-        sb = ttk.Scrollbar(box, orient="vertical", command=self.tv.yview)
-        self.tv.configure(yscrollcommand=sb.set)
+            self.tv.column(c, width=theme.px(self.tv, w * 9), stretch=True, minwidth=0, anchor="w")
+        self.sb = ttk.Scrollbar(self.box, orient="vertical", command=self.tv.yview)
+        self.tv.configure(yscrollcommand=self.sb.set)
         self.tv.pack(side="left", fill="both", expand=True)
-        sb.pack(side="right", fill="y")
-        self.empty = ttk.Label(box, text="Không có mục nào cần xem",
-                               style="CardMuted.TLabel", justify="center")
-        self.empty.place(relx=0.5, rely=0.5, anchor="center")
         self.flash = theme.RowFlash(self.tv)
         self.tv.bind("<Double-1>", self.show_detail)
+        self.tv.bind("<Return>", self.show_detail)
         self.details: dict[str, dict[str, Any]] = {}
         self.refresh_layers()
 
@@ -120,38 +142,43 @@ class GatePanel:
         if self.layers_shown:
             self.layers.pack_forget()
         else:
-            self.layers.pack(fill="x", pady=(theme.px(self.frame, 12), 0), after=self.details_btn.master)
+            self.layers.pack(fill="x", pady=(theme.px(self.frame, 16), 0), after=self.ctl)
         self.layers_shown = not self.layers_shown
-        self.details_btn.configure(text="Ẩn các lớp" if self.layers_shown else "Các lớp")
+        self.details_btn.configure(text="Ẩn lớp kiểm tra" if self.layers_shown else "Lớp kiểm tra")
 
     # -- layer status ------------------------------------------------------
 
     def refresh_layers(self) -> None:
         sc = self.app.scanner
         n_rules, n_yara = len(sc.sigs.pattern_rules), sc.sigs.yara_rules
-        self._set("sentinel", OK, f"bật · {_n(self.app.db.counts()['bad_hashes'])} hash đã biết")
+        self._set("sentinel", OK, "Bật")
         self._set("rules+yara", OK if (n_rules or n_yara) else WARN,
-                  f"{n_rules} luật mẫu, {_n(n_yara)} luật YARA" if (n_rules or n_yara) else "chưa cài bộ luật")
+                  f"{_n(n_rules + n_yara)} luật" if (n_rules or n_yara) else "Chưa có luật")
         # Slow probes (PowerShell, clamd pings) run in EngineStatus; this only reads its snapshot.
         snap = self.app.engine_status.snapshot
+        clam_ready = False
         if sc.clamav is None:
-            msg = "chưa cài ClamAV" if clamav.install_dir() is None else "đang tắt trong cài đặt"
-            self._set("clamav", BAD, msg)
+            self._set("clamav", BAD, "Chưa cài" if clamav.install_dir() is None else "Tắt trong cài đặt")
         elif snap.clamav_status == "ready":
-            self._set("clamav", OK, f"sẵn sàng · {snap.clamav_version or ''}")
+            clam_ready = True
+            self._set("clamav", OK, "Sẵn sàng")
         else:
-            vi = {"no database": "chưa có chữ ký — bấm Cập nhật", "not running": "đang khởi động…",
-                  "not installed": "chưa cài", "checking": "đang kiểm tra…"}.get(snap.clamav_status, snap.clamav_status)
+            vi = {"no database": "Chưa có chữ ký", "not running": "Đang khởi động",
+                  "not installed": "Chưa cài", "checking": "Đang kiểm tra"}.get(snap.clamav_status, snap.clamav_status)
             busy = snap.clamav_status in ("not running", "checking")
             self._set("clamav", WARN if busy else BAD, vi, busy=busy)
         if not self.app.settings.use_defender:
-            self._set("defender", OFF, "tắt trong cài đặt")
+            self._set("defender", OFF, "Tắt trong cài đặt")
         elif not snap.checked:
-            self._set("defender", OFF, "đang kiểm tra…", busy=True)
+            self._set("defender", OFF, "Đang kiểm tra", busy=True)
         elif snap.defender_active:
-            self._set("defender", OK, "đang hoạt động · ý kiến thứ hai cho tệp rủi ro")
+            self._set("defender", OK, "Đang hoạt động")
         else:
-            self._set("defender", OFF, "không hoạt động (phần mềm diệt virus khác đang chạy)")
+            self._set("defender", OFF, "Không hoạt động")
+        if sc.clamav is not None and not clam_ready:
+            self.clam_actions.grid(row=len(LAYERS), column=0, columnspan=3, sticky="w", pady=(4, 8))
+        else:
+            self.clam_actions.grid_forget()
 
     def _set(self, key: str, color: str, text: str, busy: bool = False) -> None:
         dot, st = self.lights[key]
@@ -171,7 +198,7 @@ class GatePanel:
         threading.Thread(target=work, daemon=True).start()
 
     def _update_done(self, res: str) -> None:
-        self.update_btn.configure(state="normal", text="Cập nhật chữ ký ClamAV")
+        self.update_btn.configure(state="normal", text="Cập nhật chữ ký")
         if res != "ok":
             messagebox.showwarning("Sentinel Guard", f"Không cập nhật được chữ ký ClamAV:\n{res}")
         self.refresh_layers()
@@ -179,7 +206,6 @@ class GatePanel:
     def start_clamav(self) -> None:
         eng = self.app.scanner.clamav
         if eng is None:
-            messagebox.showinfo("Sentinel Guard", "ClamAV chưa được cài hoặc đang tắt trong cài đặt.")
             return
         threading.Thread(target=lambda: (eng.start(wait=120), self.app.engine_status.refresh_soon()), daemon=True).start()
 
@@ -200,24 +226,27 @@ class GatePanel:
 
     def scan_full(self) -> None:
         drives = fixed_drives()
-        if messagebox.askyesno("Quét sâu",
-                               f"Quét toàn bộ ổ {', '.join(drives)}?\n\nCó thể mất nhiều giờ. Máy vẫn dùng bình thường "
-                               "trong lúc quét và bạn có thể dừng bất cứ lúc nào."):
+        if messagebox.askyesno("Quét sâu", f"Quét toàn bộ ổ {', '.join(drives)}?\n\nCó thể mất nhiều giờ. "
+                                             "Bạn có thể dừng bất cứ lúc nào."):
             self.run(drives, "Quét sâu")
 
     def run(self, paths: list[str], title: str) -> None:
         if self.job and self.job.progress.running:
-            messagebox.showinfo("Sentinel Guard", "Đang có một lượt quét. Hãy dừng nó trước.")
             return
         self.tv.delete(*self.tv.get_children())
         self.details.clear()
-        self.empty.place(relx=0.5, rely=0.5, anchor="center")
+        self._show_results()
         self.job = ScanJob(self.app.scanner, self.app.db, self.app.settings, paths, title,
                            on_result=lambda v, o: self.app.ui(self.add_row, v, o),
                            on_done=lambda p: self.app.ui(self.finished, p)).start()
-        for b in self.buttons:
-            b.configure(state="disabled")
+        self.scan_btn.configure(state="disabled")
+        self.pick.configure(state="disabled")
         self.stop_btn.configure(state="normal")
+        self.stop_btn.pack(side="right", padx=(0, 8), before=self.details_btn)
+        self.idle.pack_forget()
+        self.progress.pack(fill="x")
+        self.heading.configure(text=f"{title} · {describe_paths(paths)}")
+        self.bar.canvas.pack(fill="x", pady=(theme.px(self.frame, 8), 0), after=self.heading)
         self.bar.start()
         self.app.scanning(True)
         self.tick()
@@ -227,56 +256,80 @@ class GatePanel:
             self.job.cancel()
             self.stop_btn.configure(state="disabled")
 
-    @staticmethod
-    def counts_text(p: ScanProgress) -> str:
-        parts = [f"{_n(p.scanned)} tệp đã kiểm tra"]
-        if p.threats:
-            parts.append(f"{p.threats} mối đe dọa")
-        if p.suspicious:
-            parts.append(f"{p.suspicious} nghi ngờ")
-        if p.quarantined:
-            parts.append(f"{p.quarantined} đã cách ly")
-        if p.unreadable or p.errors:
-            parts.append(f"{_n(p.unreadable + len(p.errors))} chưa đọc được")
-        return " · ".join(parts)
+    def _set_counts(self, p: ScanProgress) -> None:
+        values = {"scanned": (f"{_n(p.scanned)} tệp", theme.TEXT),
+                  "threats": (f"{p.threats} mối đe dọa", BAD) if p.threats else None,
+                  "suspicious": (f"{p.suspicious} nghi ngờ", WARN) if p.suspicious else None,
+                  "quarantined": (f"{p.quarantined} đã cách ly", theme.TEXT) if p.quarantined else None,
+                  "unreadable": (f"{_n(p.unreadable + len(p.errors))} chưa đọc được", theme.MUTED)
+                  if (p.unreadable or p.errors) else None}
+        for key, lbl in self.count_labels.items():
+            v = values[key]
+            if v is None:
+                lbl.pack_forget()
+            else:
+                lbl.configure(text=v[0], foreground=v[1])
+                lbl.pack(side="left", padx=(0, theme.px(self.frame, 16)))
 
     def tick(self) -> None:
         if not self.job or not self.job.progress.running:
             return
         p = self.job.progress
-        self.progress_var.set(f"{p.title} · {describe_paths(p.paths)} — {self.counts_text(p)}")
-        cur = p.current
-        self.current_var.set(cur if len(cur) < 120 else "…" + cur[-118:])
+        self._set_counts(p)
+        name = os.path.basename(p.current)
+        self.current_var.set(name if len(name) <= 64 else name[:63] + "…")
         self.tv.after(250, self.tick)
 
     def finished(self, p: ScanProgress) -> None:
         self.bar.stop()
+        self.bar.canvas.pack_forget()
         self.app.scanning(False)
-        for b in self.buttons:
-            b.configure(state="normal")
-        self.stop_btn.configure(state="disabled")
+        self.scan_btn.configure(state="normal")
+        self.pick.configure(state="normal")
+        self.stop_btn.pack_forget()
         took = time.strftime("%H:%M:%S", time.gmtime((p.finished or time.time()) - p.started))
-        head = "Đã dừng" if p.cancelled else "Xong"
-        self.progress_var.set(f"{head} sau {took} — {self.counts_text(p)}")
+        if p.cancelled:
+            head = f"Đã dừng sau {took}"
+        elif p.detections:
+            head = f"Cần xem {p.detections} mục"
+        else:
+            head = "Không phát hiện mối đe dọa"
+        self.heading.configure(text=head)
+        self._set_counts(p)
         note = []
         if p.unverified:
-            note.append(f"{_n(p.unverified)} tệp chỉ được lõi Sentinel kiểm tra (ClamAV và Defender không chạy).")
+            note.append(f"{_n(p.unverified)} tệp chỉ được lõi Sentinel kiểm tra.")
         if p.unreadable or p.errors:
-            note.append("Tệp chưa đọc được thường đang bị khoá hoặc cần quyền quản trị.")
+            note.append("Tệp chưa đọc được thường đang bị khoá.")
         self.current_var.set(" ".join(note))
+        self._show_results()
         self.app.refresh()
+
+    def _show_results(self) -> None:
+        n = len(self.tv.get_children())
+        if n:
+            self.results_title.pack(anchor="w", pady=(theme.px(self.frame, 16), 6))
+            self.tv.configure(height=min(n, MAX_ROWS))
+            if n > MAX_ROWS:
+                self.sb.pack(side="right", fill="y")
+            else:
+                self.sb.pack_forget()
+            self.box.pack(fill="x")
+        else:
+            self.results_title.pack_forget()
+            self.box.pack_forget()
 
     def add_row(self, v: dict[str, Any], outcome: dict[str, Any]) -> None:
         action = ("đã cách ly" if outcome.get("quarantined") else
                   "lỗi cách ly" if outcome.get("error") else "chỉ báo")
-        reason = v["findings"][0]["detail"] if v.get("findings") else ""
         path = v.get("path") or v["name"]
         iid = str(len(self.details))
         self.details[iid] = {**v, "outcome": outcome}
-        self.empty.place_forget()
-        self.tv.insert("", 0, iid=iid, tags=(v["label"],), values=(
-            os.path.basename(path), LABEL_VI.get(v["label"], v["label"]), action, reason, os.path.dirname(path)))
-        self.flash.add(iid, "bad" if v["label"] == "malicious" else "warn")
+        bad = v["label"] == "malicious"
+        self.tv.insert("", 0, iid=iid, image=theme.row_mark(self.tv, BAD if bad else WARN), values=(
+            os.path.basename(path), LABEL_VI.get(v["label"], v["label"]), action, short_reason(v)))
+        self._show_results()
+        self.flash.add(iid, "bad" if bad else "warn")
 
     def show_detail(self, _event: object = None) -> None:
         sel = self.tv.selection()

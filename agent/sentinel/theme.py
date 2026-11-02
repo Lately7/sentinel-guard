@@ -19,6 +19,8 @@ TEXT = "#ececee"
 MUTED = "#9a9aa1"
 FAINT = "#5f5f66"
 SELECT = "#34343a"
+NAV_ON = "#1b1b1f"      # selected sidebar cell
+INDICATOR = "#c7c8cc"   # selected sidebar bar, state-mark core
 OK, WARN, BAD, OFF = "#4caf7a", "#d4a32a", "#e0524a", "#5f5f66"
 
 FONT = "Segoe UI"
@@ -121,12 +123,14 @@ def apply(root: tk.Tk) -> ttk.Style:
     s.configure("Title.TLabel", font=(FONT_STRONG, 14) if FONT_STRONG != FONT else (FONT, 14, "bold"))
     s.configure("State.TLabel", font=strong)
     s.configure("Section.TLabel", foreground=MUTED, font=(FONT, SMALL))
-    s.configure("Nav.TLabel", background=BG, foreground=MUTED, font=(FONT, 8))
-    s.configure("NavOn.TLabel", background=BG, foreground=TEXT, font=(FONT, 8))
-    s.configure("Hero.TLabel", background=SURFACE, font=(FONT_STRONG, 22) if FONT_STRONG != FONT else (FONT, 22, "bold"))
+    s.configure("Nav.TLabel", background=BG, foreground=MUTED, font=(FONT, SMALL))
+    s.configure("NavOn.TLabel", background=NAV_ON, foreground=TEXT, font=(FONT, SMALL))
+    s.configure("Hero.TLabel", background=SURFACE, font=(FONT_STRONG, 20) if FONT_STRONG != FONT else (FONT, 20, "bold"))
     s.configure("HeroSub.TLabel", background=SURFACE, foreground=MUTED, font=(FONT, SIZE))
     s.configure("TileTitle.TLabel", background=SURFACE, foreground=MUTED, font=(FONT, SMALL))
-    s.configure("TileValue.TLabel", background=SURFACE, font=(FONT_STRONG, 13) if FONT_STRONG != FONT else (FONT, 13, "bold"))
+    s.configure("TileValue.TLabel", background=SURFACE, font=(FONT_STRONG, 14) if FONT_STRONG != FONT else (FONT, 14, "bold"))
+    s.configure("Stat.TLabel", font=(FONT_STRONG, 16) if FONT_STRONG != FONT else (FONT, 16, "bold"))
+    s.configure("Outcome.TLabel", font=(FONT_STRONG, 13) if FONT_STRONG != FONT else (FONT, 13, "bold"))
     s.configure("PageTitle.TLabel", font=(FONT_STRONG, 15) if FONT_STRONG != FONT else (FONT, 15, "bold"))
     s.configure("Big.Primary.TButton", font=(FONT_STRONG, 12) if FONT_STRONG != FONT else (FONT, 12, "bold"), padding=(28, 10))
 
@@ -146,6 +150,10 @@ def apply(root: tk.Tk) -> ttk.Style:
     s.configure("Link.TButton", background=SURFACE, foreground=MUTED, bordercolor=SURFACE, lightcolor=SURFACE,
                 darkcolor=SURFACE, padding=(0, 2), font=(FONT, SMALL))
     s.map("Link.TButton", foreground=[("active", TEXT)], background=[("active", SURFACE)])
+    s.configure("Quiet.TButton", background=BG, foreground=MUTED, bordercolor=BG, lightcolor=BG, darkcolor=BG,
+                padding=(4, 5), font=(FONT, SMALL))
+    s.map("Quiet.TButton", foreground=[("active", TEXT)], background=[("active", BG)],
+          lightcolor=[("active", BG)], darkcolor=[("active", BG)], bordercolor=[("active", BG)])
     s.configure("TMenubutton", background=RAISED, foreground=TEXT, bordercolor=RAISED, lightcolor=RAISED,
                 darkcolor=RAISED, relief="flat", padding=(12, 5), arrowcolor=MUTED)
     s.map("TMenubutton", background=[("active", HOVER)], arrowcolor=[("active", TEXT)])
@@ -159,8 +167,11 @@ def apply(root: tk.Tk) -> ttk.Style:
           lightcolor=[("selected", BG)], bordercolor=[("selected", BG)])
 
     s.configure("Treeview", background=SURFACE, fieldbackground=SURFACE, foreground=TEXT,
-                bordercolor=SURFACE, lightcolor=SURFACE, darkcolor=SURFACE, rowheight=px(root, 24), borderwidth=0)
+                bordercolor=SURFACE, lightcolor=SURFACE, darkcolor=SURFACE, rowheight=px(root, 34), borderwidth=0, indent=0)
     s.map("Treeview", background=[("selected", SELECT)], foreground=[("selected", TEXT)])
+    # Flat lists only: drop the expand indicator so the narrow tree column can show the row's severity mark.
+    s.layout("Treeview.Item", [("Treeitem.padding", {"sticky": "nswe", "children": [
+        ("Treeitem.image", {"side": "left", "sticky": ""}), ("Treeitem.text", {"sticky": "nswe"})]})])
     s.configure("Treeview.Heading", background=SURFACE, foreground=MUTED, bordercolor=SURFACE, lightcolor=SURFACE,
                 darkcolor=SURFACE, relief="flat", font=(FONT, SMALL), padding=(8, 5))
     s.map("Treeview.Heading", background=[("active", SURFACE)], foreground=[("active", TEXT)])
@@ -389,35 +400,36 @@ class RowFlash:
 
 # -- icons and navigation ----------------------------------------------------
 
-def draw_icon(c: tk.Canvas, name: str, x: float, y: float, s: float, color: str, w: float = 1.6) -> None:
-    """Simple line icons drawn on a canvas; (x, y) is the top-left of an s x s box."""
-    w = max(1.0, w * s / 24)
-    cx, cy, r = x + s / 2, y + s / 2, s * 0.38
+def draw_icon(c: tk.Canvas, name: str, x: float, y: float, s: float, color: str, w: float = 1.7) -> None:
+    """Line icons on a 22-unit grid (Codex r13 geometry), scaled to an s x s box at (x, y)."""
+    k = s / 22
+    w = max(1.0, w * k)
+
+    def P(*pts: float) -> list[float]:
+        return [x + v * k if i % 2 == 0 else y + v * k for i, v in enumerate(pts)]
+
     if name == "home":
-        o = s * 0.2
-        c.create_rectangle(x + o, y + o, x + s - o, y + s - o, outline=color, width=w)
-        c.create_rectangle(cx - s * 0.1, cy - s * 0.1, cx + s * 0.1, cy + s * 0.1, fill=color, outline="")
+        for ox, oy in ((3, 3), (13, 3), (3, 13), (13, 13)):
+            c.create_rectangle(*P(ox, oy, ox + 6, oy + 6), outline=color, width=w)
     elif name == "scan":
-        rr = s * 0.28
-        c.create_oval(cx - rr - s * 0.08, cy - rr - s * 0.08, cx + rr - s * 0.08, cy + rr - s * 0.08, outline=color, width=w)
-        c.create_line(cx + rr * 0.55, cy + rr * 0.55, x + s * 0.86, y + s * 0.86, fill=color, width=w * 1.4, capstyle="round")
+        c.create_oval(*P(3.5, 3.5, 14.5, 14.5), outline=color, width=w)
+        c.create_line(*P(13, 13, 19, 19), fill=color, width=max(w, 2 * k), capstyle="projecting")
     elif name == "history":
-        c.create_oval(cx - r, cy - r, cx + r, cy + r, outline=color, width=w)
-        c.create_line(cx, cy - r * 0.6, cx, cy, cx + r * 0.45, cy + r * 0.3, fill=color, width=w, capstyle="round")
+        c.create_oval(*P(3, 3, 19, 19), outline=color, width=w)
+        c.create_line(*P(11, 6, 11, 11, 15, 13), fill=color, width=w)
     elif name == "quarantine":
-        o = s * 0.2
-        c.create_rectangle(x + o, y + s * 0.38, x + s - o, y + s - o, outline=color, width=w)
-        c.create_line(x + o - s * 0.04, y + s * 0.38, x + s - o + s * 0.04, y + s * 0.38, fill=color, width=w)
-        c.create_arc(cx - s * 0.17, y + s * 0.14, cx + s * 0.17, y + s * 0.56, start=0, extent=180, style="arc",
-                     outline=color, width=w)
+        c.create_rectangle(*P(4, 10, 18, 19), outline=color, width=w)
+        c.create_line(*P(3, 8, 19, 8), fill=color, width=w)
+        c.create_rectangle(*P(9, 12, 13, 14), outline=color, width=w)
     elif name == "web":
-        c.create_oval(cx - r, cy - r, cx + r, cy + r, outline=color, width=w)
-        c.create_oval(cx - r * 0.42, cy - r, cx + r * 0.42, cy + r, outline=color, width=w)
-        c.create_line(cx - r, cy, cx + r, cy, fill=color, width=w)
+        c.create_oval(*P(3, 3, 19, 19), outline=color, width=w)
+        c.create_line(*P(11, 3, 11, 19), fill=color, width=w)
+        c.create_line(*P(3, 11, 19, 11), fill=color, width=w)
     elif name == "realtime":
-        c.create_oval(cx - r, cy - r, cx + r, cy + r, outline=color, width=w)
-        c.create_oval(cx - r * 0.55, cy - r * 0.55, cx + r * 0.55, cy + r * 0.55, outline=color, width=w)
-        c.create_oval(cx - r * 0.16, cy - r * 0.16, cx + r * 0.16, cy + r * 0.16, fill=color, outline="")
+        for (ax, ay, bx, by, cx2, cy2) in ((3, 8, 3, 3, 8, 3), (14, 3, 19, 3, 19, 8),
+                                            (19, 14, 19, 19, 14, 19), (8, 19, 3, 19, 3, 14)):
+            c.create_line(*P(ax, ay, bx, by, cx2, cy2), fill=color, width=w)
+        c.create_rectangle(*P(9, 9, 13, 13), fill=color, outline="")
 
 
 class Icon:
@@ -436,7 +448,7 @@ class Switch:
     """On/off switch; the knob slides in 167 ms. Calls `command(new_state)` on click."""
 
     def __init__(self, parent: tk.Misc, command, bg: str = SURFACE) -> None:
-        self.w, self.h = px(parent, 40), px(parent, 22)
+        self.w, self.h = px(parent, 44), px(parent, 24)
         self.canvas = tk.Canvas(parent, width=self.w, height=self.h, bg=bg, highlightthickness=0, bd=0, cursor="hand2")
         self.command = command
         self.on = False
@@ -468,11 +480,11 @@ class Switch:
         # Square track and knob: flat and technical rather than a rounded pill.
         c, w, h, p = self.canvas, self.w, self.h, self._pos
         c.delete("all")
-        c.create_rectangle(0, 0, w - 1, h - 1, fill=mix(RAISED, OK, p), outline=mix(LINE, OK, p))
-        pad = px(c, 3)
+        c.create_rectangle(0, 0, w - 1, h - 1, fill=mix("#2b2b30", "#244231", p), outline="")
+        pad = px(c, 4)
         k = h - 2 * pad
         kx = pad + p * (w - k - 2 * pad)
-        c.create_rectangle(kx, pad, kx + k, pad + k, fill=TEXT if p > 0.5 else MUTED, outline="")
+        c.create_rectangle(kx, pad, kx + k, pad + k, fill=TEXT, outline="")
 
 
 class Pages(ttk.Frame):
@@ -482,24 +494,25 @@ class Pages(ttk.Frame):
         super().__init__(parent)
         self.sidebar = sidebar
         self._frames: list[tk.Misc] = []
-        self._buttons: dict[str, tuple[tk.Frame, Icon, ttk.Label, tk.Frame]] = {}
+        self._buttons: dict[str, tuple[tk.Frame, Icon, ttk.Label, tk.Frame, tk.Frame]] = {}
         self._current: tk.Misc | None = None
 
     def add(self, frame: tk.Misc, text: str = "", icon: str = "home") -> None:
         self._frames.append(frame)
-        cell = tk.Frame(self.sidebar, bg=BG, cursor="hand2")
-        cell.pack(fill="x", pady=px(self, 2))
-        mark = tk.Frame(cell, bg=BG, width=px(self, 3))
+        cell = tk.Frame(self.sidebar, bg=BG, cursor="hand2", height=px(self, 64))
+        cell.pack(fill="x")
+        cell.pack_propagate(False)
+        mark = tk.Frame(cell, bg=BG, width=px(self, 2))
         mark.pack(side="left", fill="y")
         inner = tk.Frame(cell, bg=BG)
-        inner.pack(side="left", fill="x", expand=True, pady=px(self, 6))
-        ic = Icon(inner, icon, 22, MUTED, BG)
+        inner.place(relx=0.5, rely=0.5, anchor="center")
+        ic = Icon(inner, icon, 20, MUTED, BG)
         ic.canvas.pack()
         lbl = ttk.Label(inner, text=text, style="Nav.TLabel")
-        lbl.pack(pady=(px(self, 3), 0))
+        lbl.pack(pady=(px(self, 5), 0))
         for wdg in (cell, inner, ic.canvas, lbl):
             wdg.bind("<Button-1>", lambda _e, f=frame: self.select(f))
-        self._buttons[str(frame)] = (cell, ic, lbl, mark)
+        self._buttons[str(frame)] = (cell, ic, lbl, mark, inner)
 
     def tabs(self) -> list[str]:
         return [str(f) for f in self._frames]
@@ -513,8 +526,26 @@ class Pages(ttk.Frame):
             self._current.pack_forget()
         frame.pack(fill="both", expand=True)
         self._current = frame
-        for key, (_cell, ic, lbl, mark) in self._buttons.items():
+        for key, (cell, ic, lbl, mark, inner) in self._buttons.items():
             on = key == str(frame)
+            fill = NAV_ON if on else BG
+            for wdg in (cell, inner):
+                wdg.configure(bg=fill)
+            ic.canvas.configure(bg=fill)
             ic.set_color(TEXT if on else MUTED)
             lbl.configure(style="NavOn.TLabel" if on else "Nav.TLabel")
-            mark.configure(bg=TEXT if on else BG)
+            mark.configure(bg=INDICATOR if on else fill)
+
+
+_marks: dict[tuple[str, int], tk.PhotoImage] = {}
+
+
+def row_mark(widget: tk.Misc, color: str) -> tk.PhotoImage:
+    """A 3 px severity bar for the tree column of a Treeview row (cells cannot be coloured one by one)."""
+    h = px(widget, 34)
+    key = (color, h)
+    if key not in _marks:
+        img = tk.PhotoImage(master=widget, width=px(widget, 3), height=h)
+        img.put(color, to=(0, px(widget, 8), px(widget, 3), h - px(widget, 8)))
+        _marks[key] = img
+    return _marks[key]
