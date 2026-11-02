@@ -55,6 +55,9 @@ class EventStream:
         if terminal_slots < 1:
             raise ValueError("terminal_slots must be positive")
         with self._lock:
+            # More than the whole capacity: draining will never make room.
+            if terminal_slots > self.terminal_capacity:
+                return False
             while True:
                 if cancel is not None and cancel.cancelled():
                     return False

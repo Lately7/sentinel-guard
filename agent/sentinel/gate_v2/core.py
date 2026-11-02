@@ -83,7 +83,8 @@ class CoreAdapter:
         def add(code: str, category: Category, strength: Strength, *,
                 test: bool = False, member_path: str | None = None) -> None:
             span = reader.ranges[:1]
-            if span:
+            # An empty file has no byte to point at, and a hit on it still counts.
+            if span or not measured.size:
                 evidence.append(Evidence(f"core.{code.lower()}", self.engine_id, code, None,
                                          category, strength, "member" if member_path else "outer",
                                          member_path, span, "sentinel-core",

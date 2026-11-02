@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import time
-from concurrent.futures import ThreadPoolExecutor
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable, Iterator
 
 from . import identity
 from .content import BoundReader, ContentError
@@ -233,9 +234,11 @@ def scan(
             decision = replace(_unknown(request, gate_generation, exc.code, auto_quarantine, measured), engine_results=tuple(results))
         current_generation = (current_protection_generation() if current_protection_generation is not None
                               else request.protection_generation)
+        # Bytes held in memory have no file to quarantine or to revalidate first.
+        may_quarantine = auto_quarantine and request.path is not None
         action: ActionDecision = should_auto_quarantine(
             decision, policy_version=request.action_policy_version,
-            auto_quarantine=auto_quarantine, protection_generation=request.protection_generation,
+            auto_quarantine=may_quarantine, protection_generation=request.protection_generation,
             current_protection_generation=current_generation,
             identity_reverified=True,
         )
@@ -263,7 +266,7 @@ def scan(
             emit.release(request.file_id)
 
 
-def scan_many(
+def scan_stream(
     requests: Iterable[ScanRequest], *, adapters: Iterable[EngineAdapter],
     stages: RequiredStages | None = None, cancel: CancellationToken | None = None,
     gate_generation: str, auto_quarantine: bool,
@@ -272,7 +275,9 @@ def scan_many(
     clock: Clock = time.monotonic_ns, workers: int = 2,
     max_bytes: int = 512 * 1024 * 1024,
     skip_after_conclusive: bool = True,
-) -> tuple[FinalDecision, ...]:
+) -> Iterator[FinalDecision]:
+    """Decisions in request order, pulling requests only as workers free up, so a
+    whole-machine source never becomes an unbounded backlog (invariant 8)."""
     if not 1 <= workers <= 4:
         raise ValueError("workers must be between 1 and 4")
     ordered_adapters = tuple(adapters)
@@ -282,12 +287,22 @@ def scan_many(
             admitted = emit.wait_for_admission(request.file_id, terminal_slots=len(ordered_adapters) + 2,
                                                cancel=cancel)
             if not admitted:
-                return _unknown(request, gate_generation, "CANCELLED", auto_quarantine)
+                code = "CANCELLED" if cancel is not None and cancel.cancelled() else "ADMISSION_FULL"
+                return _unknown(request, gate_generation, code, auto_quarantine)
         return scan(request, adapters=ordered_adapters, stages=stages, cancel=cancel,
                     gate_generation=gate_generation, auto_quarantine=auto_quarantine,
                     current_protection_generation=current_protection_generation,
                     emit=emit, clock=clock, max_bytes=max_bytes,
                     skip_after_conclusive=skip_after_conclusive, _admitted=admitted)
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(scan_admitted, request) for request in requests]
-        return tuple(future.result() for future in futures)
+        pending: deque[Future[FinalDecision]] = deque()
+        for request in requests:
+            if len(pending) >= workers * 2:
+                yield pending.popleft().result()
+            pending.append(pool.submit(scan_admitted, request))
+        while pending:
+            yield pending.popleft().result()
+
+
+def scan_many(requests: Iterable[ScanRequest], **options: Any) -> tuple[FinalDecision, ...]:
+    return tuple(scan_stream(requests, **options))

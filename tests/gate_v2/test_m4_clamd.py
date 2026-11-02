@@ -155,7 +155,8 @@ def test_fake_reply_matrix(reply: bytes, status: StageStatus,
         if reply.startswith(b"stream: Win.Trojan.Test"):
             assert stage.evidence[0].raw_name == "Win.Trojan.Test"
             assert stage.evidence[0].source_digest == stage.generation_digest
-            assert result.action_decision.action is ActionCode.QUARANTINE
+            # These bytes are in memory: there is no file to quarantine (R15-12).
+            assert result.action_decision.action is ActionCode.NOTIFY
         if status is StageStatus.COMPLETED and not stage.evidence:
             assert result.trusted_clean
         if status in (StageStatus.ERROR, StageStatus.PARTIAL):

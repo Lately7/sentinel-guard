@@ -1,0 +1,12 @@
+Implemented the four allowed files on `codex/gate-v2-m6` at `0215d8e`; no callers were changed and nothing was committed.
+
+| File | Lines | API or coverage |
+|---|---:|---|
+| [cache.py](</C:/Users/lately07/Desktop/Folder Group/sentinel-guard-gate-v2-m6/agent/sentinel/gate_v2/cache.py>) | 140 | `GenerationInputs`, generation and key digests, cache classification, `CacheStore`, `store`, `lookup` |
+| [legacy.py](</C:/Users/lately07/Desktop/Folder Group/sentinel-guard-gate-v2-m6/agent/sentinel/gate_v2/legacy.py>) | 175 | `GateVerdict`, `UNKNOWN`, `project`, additive `scan_result` |
+| [test_m6_cache.py](</C:/Users/lately07/Desktop/Folder Group/sentinel-guard-gate-v2-m6/tests/gate_v2/test_m6_cache.py>) | 171 | Cache table, generation changes, rebinding, expiry, corruption and size limits |
+| [test_m6_legacy.py](</C:/Users/lately07/Desktop/Folder Group/sentinel-guard-gate-v2-m6/tests/gate_v2/test_m6_legacy.py>) | 176 | Stage, reason and finding tables; caller prefixes; appended critical finding; summary size |
+
+**Invariant → test mapping:** 1 and 7: stage and incomplete-reason cases in `test_m6_legacy.py`; 10 and 11: cached action omission and ID rebinding in `test_m6_cache.py`; 12: reduced-clean, generation, identity and corrupt-payload cases; 13: exception-generation change case. Static syntax and LF checks passed. Pytest was not run in this sandbox, as directed.
+
+**Part 2 must:** wire `Scanner`’s existing signatures to Gate v2 and `project`; calculate generation from current rule digests, engine readiness, policy and exceptions; recheck availability before cache reuse; implement `CacheStore` and expiry/pruning in `Database`; recompute action on every scan or cache hit and revalidate identity before quarantine; update `protection.act_on`, watcher, `scanjob`, CLI, native host, tray/UI and their regression tests for typed decisions, `unknown`, `scan_result` and the native host’s appended URL-blocklist critical finding. It must also resolve the old allowlist behavior. Current Gate v2 evidence cannot project some old findings, notably `pe.inflated`, several `archive.*` and `office.macros` findings, and MotW `origin.*` findings; those need producers or an explicit compatibility decision.

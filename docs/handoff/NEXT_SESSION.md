@@ -3,6 +3,11 @@
 You have no memory of earlier sessions. Everything you need is in this repo.
 Code beats documents: when they disagree, trust the code and say so.
 
+**Update 2026-11-02, later that evening.** The owner approved the ≈7/10 target and
+full autonomy, except what §7 forbids. `gate-baseline` is now `main`, pushed to
+`origin`. M5 and M6 part 1 are merged; R15 is fixed except R15-2 (A3) and R15-8
+(M7). Claude never elevates: this session runs unelevated.
+
 **Update 2026-11-02 ~20:20 — read `docs/handoff/PLAN.md` next.** It replaces the
 order of work in §3–§5 below. Owner decision: Claude owns all the work; Codex only
 uses up its remaining quota on long background tasks, and no step may wait for it.
@@ -175,8 +180,11 @@ tests because an earlier brief said "report it and stop".)
 
 ## 7. Rules (owner-approved; do not relax)
 
-* Commit freely on `gate-baseline`; **never push**, never force, never
-  rewrite history.
+* Commit freely on `main` (renamed from `gate-baseline` on 2026-11-02) and push
+  each finished step to `origin` (`github.com/Lately7/sentinel-guard`, owner
+  decision 2026-11-02; this replaces the old "never push"). Only `main` is
+  pushed. Never force, never rewrite history, and check for secrets first:
+  everything pushed is published.
 * Claude never elevates, never changes system/security settings, never
   touches Defender settings, never downloads anything, never writes outside
   the repo except the `..\sentinel-guard-*` worktrees and `%TEMP%`. Anything

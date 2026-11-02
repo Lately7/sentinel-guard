@@ -267,3 +267,79 @@ Process note: round 2 stopped after writing the tests because the brief said
 tests against round 1 (all fail) and after 2b (all pass), and removed two
 unused imports. Tests after the merge: pytest 393 passed, 4 skipped (real
 clamd), 2 xfailed (RT-001, RT-002); node --test 39 passed.
+
+## Flaky test found on 2026-11-02 evening
+
+`test_identity_changed_and_cancelled_between_chunks` failed 6 of 12 runs, so the
+earlier "393 passed" was luck. A write in the same system-clock tick as file
+creation leaves NTFS timestamps equal (204 of 300 measured; 0 of 50 with 30 ms
+between the writes). Fixed in `31a7df4`: the test moves the timestamps itself.
+Metadata cannot see a same-tick write; real scans close that window with the
+deny-write `BoundReader` handle (H2).
+
+## Gate v2 milestone 5 (Codex rounds 1–2, Claude reviews and finishes)
+
+Round 1 was cut off when the previous session ended (no answer, committed as
+`3cdb0de`: 236 passed, 1 failed). Task files `CODEX_TASK_GATE_V2_M5.md`, `_R2.md`.
+New `gate_v2/defender.py`, `gate_v2/analyzers/` (`lnk`, `signer`, `motw`). Scope
+clean in both rounds. Merged `86dd3e5`. Claude reproduced K1–K5, K7, K8, K10–K12
+and K14 with synthetic input before round 2; 17 of the 19 round-2 tests fail on
+`3cdb0de` (the two job-kill tests pass there: that code was already right).
+
+| # | Finding by Claude | Outcome |
+|---|---|---|
+| K1 | Two named threats, or one listed twice, became `ERROR` and lost the detection | Fixed r2: dedupe, cap 16, unique evidence ids |
+| K2 | UTF-8 decode plus a U+FFFD check: every file under a non-ASCII path would be `ERROR` | Fixed r2: `latin-1` in the runner; real output unverified, Defender is passive here |
+| K3 | A named threat followed by the file vanishing lost its evidence in adapter and orchestrator | Fixed r2: kept with status `CHANGED`, gives `UNACCEPTED_DETECTION` |
+| K4 | A named threat after the deadline was discarded (G2 again) | Fixed r2: parsed first, only a late negative is `TIMEOUT` |
+| K5 | LNK starting `cmd.exe`: stage suspicious, final trusted clean; blocklisted origin lost | Fixed r2: explicit `CONTEXT_RULES`, reason `CONTEXT_RULE`, `MotwAdapter(url_check=)` |
+| K6 | `PUA:` names were conclusive (invariant 6) | Fixed r2: `classify_defender_name`. Behaviour change from legacy: owner question 9 |
+| K7 | `reader.ranges` was the union over all stages: signer claimed 2 MiB read for 4 KiB (H1) | Fixed r2: `BoundReader.begin_stage()` |
+| K8 | One hung trust call made every later scan wait its whole deadline | Fixed r2: slot taken without blocking |
+| K9 | Unbounded, uncancellable rehashing (J1) | Fixed r2: deadline token, metadata-only for adapters, trust uses the measured handle |
+| K10 | Every ordinary file was "malformed LNK", so nothing would be cacheable | Fixed r2: `NOT_LNK` |
+| K11 | Padded arguments hid the target; only one target candidate was tested | Fixed r2, then K19 |
+| K12 | No MotW treated as an unavailable engine | Fixed r2: `NO_ORIGIN`, read errors distinct, UTF-16 BOM |
+| K13–K17 | Policy carve-out untested; a swap test that never swapped; real runner untested and ctypes per call (G8); applicability seam, PASSIVE cached on a failure, string sort of platform versions; argv path and one-slot pool | Fixed r2 |
+| K18 | (r2) analyzer `certainty` default changed to `verified`, so an analyzer alone gave trusted clean, and a test was edited to accept it; `policy.py` named `motw` | Fixed by Claude |
+| K19 | (r2) a string past the window made the link malformed and lost the target; ID-list match hit a `cmdline` folder | Fixed by Claude: `found()` survives a damaged tail, flag answers "has arguments", whole file name required |
+| K20 | (r2) the pre-action check became cancellable by the deadline, breaking invariant 9 | Fixed by Claude |
+| K21 | (r2) `CONTEXT_RULE` replaced `PUA_DETECTION`, which routes the review action | Fixed by Claude |
+| K22 | (r2) `UNCERTAIN_COVERAGE` spread to stages not completed | Fixed by Claude |
+| K23 | (r2) a cancel during the last check read as `CHANGED` | Fixed by Claude |
+
+Known limit: `WinVerifyTrust` runs without catalog lookup, so catalog-signed Windows
+files report `unsigned` (`notepad.exe` here; `python.exe`, `explorer.exe`, `wintrust.dll`
+report `valid`). It is context only and cannot lower a detection.
+
+## Gate v2 milestone 6 part 1 (Codex writes, Claude reviews)
+
+Task file `CODEX_TASK_GATE_V2_M6_P1.md`; `gate_v2/cache.py`, `gate_v2/legacy.py`.
+Scope clean. Merged `404447e`. New tests fail on `4771a9a`.
+
+| # | Finding by Claude | Outcome |
+|---|---|---|
+| L1 | Context evidence made a layer "detected": every signed executable | Fixed: detections only, as the old layer status |
+| L2 | Evidence on a failed stage hidden behind the status | Fixed: detection text first |
+| L3 | `changed while scanning` lost to an earlier reason; the watcher would not requeue | Fixed |
+| L4 | An unaccepted hit displayed as CRITICAL 100, structure as MEDIUM | Fixed: `_grade` |
+| L5 | A failing cache write failed the scan | Fixed |
+
+## R15 — independent code review by Codex (read-only)
+
+Answer in `docs/research/R15-code-review-gate-service.md`. Claude checked each finding.
+
+| # | Finding | Verified | Outcome |
+|---|---|---|---|
+| R15-1 | Worker told the file's location | code; Claude found a second leak through `identity.canonical_path` | Fixed `aed0bb0` |
+| R15-2 | A same-user process can squat the pipe and answer clients | code | Open → A3 (client must verify the server) |
+| R15-3 | ZIP local and central headers disagree: inspected, could be trusted clean | test | Fixed `aed0bb0` |
+| R15-4 | Clean stop reported with the action barrier open; a test locked it | code | Fixed `aed0bb0` |
+| R15-5 | `scan_many` pulled every request up front | test | Fixed: `scan_stream` |
+| R15-6 | A file needing more slots than capacity waited forever | test (hung pytest) | Fixed: `ADMISSION_FULL` |
+| R15-7 | A call waited past its deadline; worker start used its own 30 s | test | Fixed `aed0bb0` |
+| R15-8 | Quarantining one hard link leaves the bytes reachable | code | Open → M7 |
+| R15-9 | Concurrent scan requests overshoot the job cap | test | Fixed `aed0bb0` |
+| R15-10 | A hit on an empty file lost its evidence | test | Fixed |
+| R15-11 | `decide` with no results gave trusted clean | test | Fixed |
+| R15-12 | In-memory bytes produced a quarantine action | test | Fixed; `test_m4_clamd` had locked it |

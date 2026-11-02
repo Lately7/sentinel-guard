@@ -126,7 +126,8 @@ def decide(
                 result.status in _BAD_STATUSES or identity_mismatch):
                 unaccepted_detection = True
                 continue
-            if evidence.scope != "origin" and (not evidence.ranges or any(not contains_range(result.coverage.inspected, span) for span in evidence.ranges)):
+            unbound_ok = evidence.scope == "origin" or result.identity.size == 0
+            if not unbound_ok and (not evidence.ranges or any(not contains_range(result.coverage.inspected, span) for span in evidence.ranges)):
                 if result.engine_id in stages.required:
                     unbound_evidence = True
                 unaccepted_detection = True
@@ -140,6 +141,8 @@ def decide(
 
     missing = stages.required - stages.disabled_by_policy - set(ids)
     incomplete: list[str] = []
+    if not results:
+        incomplete.append("NO_ENABLED_STAGES")  # nobody looked, so nothing is clean
     if missing:
         incomplete.append("MISSING_STAGE")
     if identity_mismatch:
