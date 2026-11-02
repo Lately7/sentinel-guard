@@ -1,5 +1,7 @@
 # TASKS.md
 
+> Tiến độ hiện tại và kế hoạch: **`docs/ROADMAP.md`**. Mục dưới đây là tiêu chí gốc của Milestone 1.
+
 ## Milestone 1 — working agent + extension
 
 Acceptance:
