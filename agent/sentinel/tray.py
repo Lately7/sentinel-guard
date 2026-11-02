@@ -292,8 +292,7 @@ class App:
         return tv
 
     def scanning(self, on: bool) -> None:
-        if self.logo is not None:
-            (self.logo.start if on else self.logo.stop)()
+        pass  # hook for scan-state UI outside the scan tab; the activity bar shows progress
 
     def refresh(self) -> None:
         if self.gate is not None:

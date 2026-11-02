@@ -128,29 +128,25 @@ def apply(root: tk.Tk) -> ttk.Style:
 
 # -- logo ------------------------------------------------------------------
 
-def logo_image(size: int = 64, ring: tuple[int, int, int] | None = None):
-    """A small black-to-grey square inside a thin outline; the outline colour can carry state."""
+def logo_image(size: int = 64, ring: tuple[int, int, int] | None = None,
+               core: tuple[int, int, int] = (10, 10, 11)):
+    """A small flat square inside a detached thin frame; the frame colour can carry state.
+
+    Same geometry and rounding as assets/brand/make_icons.py, drawn at the final
+    size so edges land on whole pixels instead of being blurred by resampling.
+    """
     from PIL import Image, ImageDraw
 
-    scale = 4  # draw large and downsample so the thin outline stays crisp at 16 px
-    n = size * scale
+    n = size
+    inset = int(3 * n / 32 + 0.5)
+    stroke = max(1, int(n / 16 + 0.5))
+    side = (7 * n) // 16
+    o = (n - side) // 2
     img = Image.new("RGBA", (n, n), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    stroke = max(scale, round(n * 0.045))
-    gap = round(n * 0.09)
-    d.rectangle([0, 0, n - 1, n - 1], outline=(ring or (116, 116, 122)) + (255,), width=stroke)
-    # Same values as assets/brand (core #050506 -> #707076, outline #74747a).
-    top, bottom = (5, 5, 6), (112, 112, 118)
-    x0 = y0 = stroke + gap
-    x1 = y1 = n - 1 - stroke - gap
-    h = max(1, y1 - y0)
-    for y in range(y0, y1 + 1):
-        t = (y - y0) / h
-        # Ease the gradient so most of the square stays black and only the bottom turns grey.
-        t = t * t
-        c = tuple(round(a + (b - a) * t) for a, b in zip(top, bottom))
-        d.line([(x0, y), (x1, y)], fill=c + (255,))
-    return img.resize((size, size), Image.LANCZOS)
+    d.rectangle([inset, inset, n - 1 - inset, n - 1 - inset], outline=(ring or (116, 116, 122)) + (255,), width=stroke)
+    d.rectangle([o, o, o + side - 1, o + side - 1], fill=core + (255,))
+    return img
 
 
 # -- animation -------------------------------------------------------------
@@ -249,41 +245,18 @@ class ActivityBar:
 
 
 class LogoMark:
-    """The logo in the header; a light sweep crosses it while a scan runs."""
+    """The logo in the header. Static on purpose: scan progress has its own bar."""
 
     def __init__(self, parent: tk.Misc, size: int = 22, bg: str = BG) -> None:
         from PIL import ImageTk
 
         size = px(parent, size)
-        self.size = size
         self.canvas = tk.Canvas(parent, width=size, height=size, bg=bg, highlightthickness=0, bd=0)
         self._photo = ImageTk.PhotoImage(logo_image(size))
         self.canvas.create_image(0, 0, anchor="nw", image=self._photo)
-        self.sweep = self.canvas.create_line(0, 0, 0, 0, fill=MUTED, width=1, state="hidden")
-        self._job: str | None = None
-        self._y = 0
 
     def pack(self, **kw) -> None:
         self.canvas.pack(**kw)
-
-    def start(self) -> None:
-        if self._job is None:
-            self.canvas.itemconfigure(self.sweep, state="normal")
-            self._tick()
-
-    def stop(self) -> None:
-        if self._job is not None:
-            self.canvas.after_cancel(self._job)
-            self._job = None
-        self.canvas.itemconfigure(self.sweep, state="hidden")
-
-    def _tick(self) -> None:
-        inset = max(3, round(self.size * 0.2))
-        span = self.size - 2 * inset
-        self._y = (self._y + 1) % max(1, span)
-        y = inset + self._y
-        self.canvas.coords(self.sweep, inset, y, self.size - inset, y)
-        self._job = self.canvas.after(40, self._tick)
 
 
 class RowFlash:
