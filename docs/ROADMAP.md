@@ -3,7 +3,7 @@
 Một trang duy nhất để theo dõi tiến độ. Chi tiết kỹ thuật vẫn nằm trong
 `docs/handoff/PROJECT_CONTEXT.md`; khi hai nơi khác nhau thì code là đúng.
 
-**Cập nhật:** 2026-11-02 đêm · **Nhánh:** `gate-baseline` (chưa push) · **Bàn giao:** `docs/handoff/NEXT_SESSION.md`
+**Cập nhật:** 2026-11-02 đêm (≈19:50) · **Nhánh:** `gate-baseline` (chưa push) · **Bàn giao:** `docs/handoff/NEXT_SESSION.md`
 
 ## Ai làm gì
 
@@ -69,6 +69,25 @@ tiến trình bằng chụp danh sách 500 ms trước, ETW để sau.
 
 Cài và chạy dịch vụ cần quyền admin: chủ dự án tự chạy; Claude không tự nâng
 quyền và không đổi cài đặt Defender.
+
+## Đề xuất: mục tiêu ≈7/10 so với Malwarebytes (chờ chủ dự án đồng ý)
+
+Claude ước lượng (không phải số đo): hiện ≈3/10; xong Gate v2 + A1–A6 ≈4,5–5,5.
+Lên ≈7 làm được trong dự án này, sau mốc 7, theo thứ tự:
+
+1. Danh tiếng hash/URL (MalwareBazaar, URLhaus, ThreatFox; tra VirusTotal chỉ
+   cho tệp mới tải về).
+2. Chống ransomware ở user-mode bằng ETW + tệp mồi: tạm dừng tiến trình và
+   hỏi người dùng (cần dịch vụ admin). Bước đầu: Codex nghiên cứu (R14).
+3. Dùng Defender làm một engine khi nó đang chạy; chủ dự án tự bật Controlled
+   Folder Access nếu muốn (Claude không đổi cài đặt Defender).
+4. Đo báo nhầm thật, rồi mới chuyển `legacy-v0` → `evidence-v1`.
+5. ML tĩnh cho PE, chỉ ở mức "đáng ngờ".
+
+Lên 8 cần thứ ngoài code: driver minifilter ký số (chứng chỉ EV, ký
+attestation của Microsoft, pháp nhân), ELAM/PPL (thành viên Microsoft Virus
+Initiative), feed mối đe doạ trả phí/cloud, lab thử mẫu thật cách ly (dự án
+không tải hay chạy mã độc).
 
 ## Ba tính năng bắt buộc
 
