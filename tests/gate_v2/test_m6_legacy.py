@@ -6,7 +6,7 @@ import json
 from sentinel.engine.verdict import Finding, Severity, Verdict
 from sentinel.gate_v2.contract import (
     ByteRange, Category, Coverage, EngineResult, Evidence, FileIdentity,
-    FinalDecision, ScanRequest, StageStatus, Strength, VerdictCode,
+    ScanRequest, StageStatus, Strength, VerdictCode,
 )
 from sentinel.gate_v2.legacy import UNKNOWN, GateVerdict, project
 from sentinel.gate_v2.policy import RequiredStages, decide
@@ -156,11 +156,42 @@ def test_finding_mapping_strengths_and_appended_critical():
     assert rtlo.findings[0].severity is Severity.HIGH
     unaccepted = projected(result("defender", status=StageStatus.UNVERIFIED, mode="none",
                                   hits=(evidence("defender", "THREAT", name="Example"),)))
-    assert unaccepted.findings[0].severity is Severity.CRITICAL
+    # Nothing was concluded from it, so the display must not read as a certain hit.
+    assert (unaccepted.findings[0].severity, unaccepted.findings[0].score) == (Severity.MEDIUM, 30)
     assert unaccepted.label == UNKNOWN
     unaccepted.findings.append(Finding("origin", "origin.blocklisted_download", Severity.CRITICAL,
                                        "Blocklisted download URL", 100))
     assert unaccepted.label == "malicious"
+
+
+def structural(code, strength):
+    return replace(evidence(code=code, strength=strength), category=Category.STRUCTURE)
+
+
+def test_context_evidence_leaves_the_layer_clean():
+    # Every signed executable carries this; the old layer status ignored anything
+    # below MEDIUM, and tests/test_gate.py:123 relies on that.
+    signed = projected(result(hits=(structural("PE_CERTIFICATE_DECLARED", Strength.CONTEXT),)))
+    assert signed.engines["sentinel"] == "clean"
+    packed = projected(result(hits=(structural("PE_PACKED_SECTION", Strength.SUPPORTING),)))
+    assert packed.engines["sentinel"] == "clean"
+    assert (packed.findings[0].severity, packed.findings[0].score) == (Severity.LOW, 10)
+
+
+def test_evidence_on_a_failed_stage_stays_visible():
+    # K3: a named threat on a file that then vanished keeps its evidence.
+    hit = evidence("defender", "THREAT", name="Example")
+    v = projected(result("defender", status=StageStatus.CHANGED, hits=(hit,), mode="none"))
+    assert v.engines["defender"] == "detected"
+    assert v.label == UNKNOWN
+
+
+def test_changed_wins_over_the_first_reason():
+    # The watcher requeues only on the exact text; reasons arrive in stage order.
+    base = decision(result())
+    mixed = replace(base, engine_results=(), verdict=VerdictCode.UNKNOWN, trusted_clean=False,
+                    cacheable=False, reason_codes=("ENGINE_INCOMPLETE", "CHANGED"))
+    assert project(mixed, name="x", path=None, stage_defaults={}).skipped == "changed while scanning"
 
 
 def test_scan_result_worst_case_is_small_and_private():

@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import asdict, dataclass, replace
 from typing import Literal, Protocol
 
 from .contract import CONTRACT_VERSION, FileIdentity, FinalDecision, ScanRequest, StageStatus, VerdictCode
+
+log = logging.getLogger(__name__)
 
 LONG_TTL = 30 * 24 * 60 * 60
 SHORT_TTL = 60 * 60
@@ -104,7 +107,11 @@ def store(cache: CacheStore, decision: FinalDecision, now: float) -> None:
         "decision": scan_value,
     }, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     if len(payload.encode("utf-8")) <= MAX_PAYLOAD_BYTES:
-        cache.put(key, payload, expires_at)
+        try:
+            cache.put(key, payload, expires_at)
+        except Exception:
+            # An unwritable cache only costs a rescan; it must not fail the scan.
+            log.warning("scan cache write failed", exc_info=True)
 
 
 def lookup(

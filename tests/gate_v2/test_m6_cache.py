@@ -155,6 +155,14 @@ def test_long_ttl_generation_recheck_and_all_misses():
     assert lookup(cache, original.identity, original.gate_generation, request(), 101) is None
 
 
+def test_a_failing_store_does_not_fail_the_scan():
+    class Broken(MemoryCache):
+        def put(self, key, payload, expires_at):
+            raise OSError("disk full")
+
+    store(Broken(), decision(), 100)
+
+
 def test_unknown_and_oversized_payload_are_not_stored():
     cache = MemoryCache()
     store(cache, decision(StageStatus.ERROR, mode="none"), 100)

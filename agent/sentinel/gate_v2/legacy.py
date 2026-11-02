@@ -5,10 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..engine.verdict import Finding, Severity, Verdict
-from .contract import Evidence, FinalDecision, StageStatus, Strength
+from ..engine.verdict import MALICIOUS, Finding, Severity, Verdict
+from .contract import Category, EngineResult, Evidence, FinalDecision, StageStatus, Strength
 
 UNKNOWN = "unknown"
+_DETECTIONS = (Category.MALWARE, Category.PUA, Category.RISKWARE)
+_SIGNALS = (Strength.CONCLUSIVE, Strength.STRONG, Strength.SUPPORTING)
 
 _SKIPPED = {
     "CHANGED": "changed while scanning",
@@ -29,7 +31,7 @@ class GateVerdict(Verdict):
     def label(self) -> str:
         # The native host still appends a critical URL blocklist finding after projection.
         if any(item.severity >= Severity.CRITICAL for item in self.findings[self._projected_findings:]):
-            return "malicious"
+            return MALICIOUS
         return self.decision.verdict.value if self.decision is not None else super().label
 
     def to_dict(self, max_findings: int = 200) -> dict[str, Any]:
@@ -58,9 +60,13 @@ class GateVerdict(Verdict):
         return value
 
 
-def _stage_text(result: Any) -> str:
+def _stage_text(result: EngineResult) -> str:
     status = result.status
     code = result.readiness_code.lower()
+    # Before the status: a named threat on a file that then vanished must stay
+    # visible. Context such as a declared certificate is not a detection.
+    if any(item.category in _DETECTIONS and item.strength in _SIGNALS for item in result.evidence):
+        return "detected"
     if status is StageStatus.UNVERIFIED:
         return "unavailable: unverified daemon"
     if status in (StageStatus.ERROR, StageStatus.CHANGED):
@@ -73,8 +79,6 @@ def _stage_text(result: Any) -> str:
         return f"unavailable: {code}"
     if status is StageStatus.SKIPPED:
         return "skipped: already detected" if result.readiness_code == "CONCLUSIVE_HIT" else f"skipped: {code}"
-    if result.evidence:
-        return "detected"
     if status is StageStatus.PARTIAL:
         return f"partial: {code}"
     return "clean"
@@ -87,7 +91,20 @@ def _stage_worst(texts: list[str]) -> str:
     return max(texts, key=lambda text: rank.get(text.split(":", 1)[0], 0))
 
 
-def _finding(item: Evidence) -> Finding:
+def _grade(item: Evidence, accepted: bool, rule: str) -> tuple[Severity, int]:
+    if item.strength not in _SIGNALS:
+        return Severity.INFO, 0
+    if not accepted:
+        # Nothing was concluded from it, so it must not read as a certain hit.
+        return (Severity.MEDIUM, 30) if item.category in _DETECTIONS else (Severity.LOW, 10)
+    if item.strength is Strength.CONCLUSIVE:
+        return Severity.CRITICAL, 100
+    if item.strength is Strength.STRONG:
+        return Severity.HIGH, 50
+    return (Severity.HIGH if rule == "filetype.rtlo" else Severity.MEDIUM), 30
+
+
+def _finding(item: Evidence, accepted: bool) -> Finding:
     code = item.detail_code.upper()
     engine = item.engine_id
     if engine == "core":
@@ -120,24 +137,19 @@ def _finding(item: Evidence) -> Finding:
         kind, rule, detail = engine, f"{engine}.{code.lower()}", f"{engine}: {code.lower()}"
     if item.member_path:
         detail = f"{item.member_path}: {detail}"
-    severity, score = {
-        Strength.CONCLUSIVE: (Severity.CRITICAL, 100),
-        Strength.STRONG: (Severity.HIGH, 50),
-        Strength.SUPPORTING: (Severity.MEDIUM, 30),
-        Strength.CONTEXT: (Severity.INFO, 0),
-        Strength.COVERAGE: (Severity.INFO, 0),
-    }[item.strength]
-    if rule == "filetype.rtlo":
-        severity = Severity.HIGH
+    severity, score = _grade(item, accepted, rule)
     return Finding(kind, rule, severity, detail, score)
 
 
 def _skipped(decision: FinalDecision) -> str | None:
     if not decision.reason_codes:
         return None
+    # Callers match these exact texts (the watcher requeues on "changed while
+    # scanning"), so they win wherever they fall among the reasons.
+    known = next((text for code, text in _SKIPPED.items() if code in decision.reason_codes), None)
+    if known is not None:
+        return known
     top = decision.reason_codes[0]
-    if top in _SKIPPED:
-        return _SKIPPED[top]
     if top in ("FIXED_PARTIAL", "REDUCED_POLICY"):
         return f"partial: {top.lower()}"
     if decision.verdict.value in ("clean", "malicious", "suspicious"):
@@ -153,13 +165,14 @@ def project(
     if "clamav" in stage_defaults:
         layers["clamav"] = []
     findings: list[Finding] = []
+    accepted = set(decision.accepted_evidence_ids)
     for result in decision.engine_results:
         layer = {"core": "sentinel", "json_rules": "rules+yara", "yara_x": "rules+yara"}.get(result.engine_id)
         if layer is None and result.engine_id in ("clamav", "defender"):
             layer = result.engine_id
         if layer is not None:
             layers.setdefault(layer, []).append(_stage_text(result))
-        findings.extend(_finding(item) for item in result.evidence)
+        findings.extend(_finding(item, item.evidence_id in accepted) for item in result.evidence)
     engines = {
         layer: _stage_worst(texts) if texts else stage_defaults.get(layer, "unavailable: not run")
         for layer, texts in layers.items()
