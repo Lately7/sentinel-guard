@@ -18,7 +18,8 @@ pytestmark = pytest.mark.skipif(os.name != "nt", reason="restricted workers need
 from sentinel.gate_v2.contract import ScanRequest, StageStatus, VerdictCode  # noqa: E402
 from sentinel.gate_v2.orchestrator import scan  # noqa: E402
 from sentinel.gate_v2.policy import RequiredStages  # noqa: E402
-from sentinel.service.workerclient import WorkerAdapter, WorkerSession  # noqa: E402
+from sentinel.service import workerclient  # noqa: E402
+from sentinel.service.workerclient import WorkerAdapter, WorkerFailure, WorkerSession  # noqa: E402
 
 
 class Token:
@@ -130,6 +131,90 @@ def test_cancel_and_deadline_are_typed_never_clean(session, tmp_path):
     finally:
         reader.close()
     assert r.status is StageStatus.TIMEOUT and r.verdict is VerdictCode.UNKNOWN
+
+
+class Capture:
+    def __init__(self) -> None:
+        self.args: dict = {}
+
+    def call(self, op, args, *, deadline_ns, cancel=None, handle_from=None):
+        self.args = args
+        raise WorkerFailure(StageStatus.ERROR, "STOP_HERE")
+
+
+def test_the_worker_learns_the_file_name_but_not_where_it_is(tmp_path):
+    # R15-1: it was told the whole path twice (request and identity), although
+    # R13b P5 gives it only the measured handle. The name is what core's
+    # deceptive-name check needs.
+    p = tmp_path / "doc.bin"
+    p.write_bytes(b"nothing")
+    capture = Capture()
+    run(capture, request(path=str(p)), engines=("core",))
+    assert capture.args["request"]["path"] == "doc.bin"
+    assert capture.args["identity"]["canonical_path"] is None
+    assert tmp_path.name not in str(capture.args)
+
+
+def test_the_measured_identity_comes_back_with_its_path(session, tmp_path):
+    p = tmp_path / "doc.bin"
+    p.write_bytes(b"nothing")
+    d = run(session, request(path=str(p)), engines=("core",))
+    assert d.engine_results[0].status is StageStatus.COMPLETED
+    assert d.engine_results[0].identity.canonical_path == str(p.resolve())
+
+
+def test_a_busy_session_does_not_outlast_the_deadline_or_a_cancel():
+    # R15-7: the wait for the session lock ignored both.
+    s = WorkerSession()
+    s._lock.acquire()
+    try:
+        began = time.monotonic()
+        with pytest.raises(WorkerFailure) as late:
+            s.call("scan", {}, deadline_ns=time.monotonic_ns() + 100_000_000)
+        with pytest.raises(WorkerFailure) as stopped:
+            s.call("scan", {}, deadline_ns=time.monotonic_ns() + 5_000_000_000, cancel=Token(True))
+    finally:
+        s._lock.release()
+    assert late.value.status is StageStatus.TIMEOUT and stopped.value.status is StageStatus.CANCELLED
+    assert time.monotonic() - began < 1
+
+
+class MuteWorker:
+    """Starts, then never answers."""
+
+    def __init__(self) -> None:
+        import threading
+
+        self.stdin = __import__("io").BytesIO()
+        self.dead = threading.Event()
+
+    class _Out:
+        def __init__(self, dead) -> None:
+            self.dead = dead
+
+        def read(self, n):
+            self.dead.wait(10)
+            return b""
+
+    @property
+    def stdout(self):
+        return self._Out(self.dead)
+
+    def wait(self, timeout):
+        return None
+
+    def kill(self):
+        self.dead.set()
+
+
+def test_worker_start_is_bounded_by_the_callers_deadline(monkeypatch):
+    # R15-7: start-up used its own 30 s budget.
+    monkeypatch.setattr(workerclient.worker_mod, "launch", lambda *a, **k: MuteWorker())
+    monkeypatch.setattr(workerclient.worker_mod, "bootstrap", lambda *a: ["python"])
+    began = time.monotonic()
+    with pytest.raises(WorkerFailure):
+        WorkerSession().call("scan", {}, deadline_ns=time.monotonic_ns() + 200_000_000)
+    assert time.monotonic() - began < 2
 
 
 def test_garbage_or_misbound_worker_output_is_rejected(session, tmp_path, monkeypatch):

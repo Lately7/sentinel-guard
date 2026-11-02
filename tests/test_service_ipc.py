@@ -213,6 +213,53 @@ def test_jobs_belong_to_their_caller(svc):
     assert code(call(core, OTHER_USER, "cancel_job", job_id=jid)) == "NOT_FOUND"
 
 
+def test_concurrent_requests_cannot_overshoot_the_job_cap(svc, monkeypatch):
+    # R15-9: the cap was checked before the slot was taken.
+    core, backend, _ = svc
+    monkeypatch.setattr(service_core, "MAX_JOBS_PER_CALLER", 4)
+    entered, release, lock = [], threading.Event(), threading.Lock()
+    submit = backend.submit_scan
+
+    def slow(path, *, reason, url):
+        with lock:
+            entered.append(path)
+        assert release.wait(5)
+        return f"{submit(path, reason=reason, url=url)}-{threading.get_ident()}"
+
+    backend.submit_scan = slow
+    replies: list[dict] = []
+
+    def one(i: int) -> None:
+        replies.append(call(core, USER, "scan_request", rid=i, path="C:\\Users\\u\\Downloads\\setup.exe"))
+
+    threads = [threading.Thread(target=one, args=(i,), daemon=True) for i in range(8)]
+    for t in threads:
+        t.start()
+    for _ in range(300):
+        if len(entered) + len(replies) >= 8:
+            break
+        threading.Event().wait(0.01)
+    release.set()
+    for t in threads:
+        t.join(5)
+    assert sum(1 for r in replies if r["ok"]) == 4
+    assert sum(1 for r in replies if code(r) == "BUSY") == 4
+
+
+def test_a_failed_submit_gives_its_slot_back(svc, monkeypatch):
+    core, backend, _ = svc
+    monkeypatch.setattr(service_core, "MAX_JOBS_PER_CALLER", 1)
+    submit = backend.submit_scan
+
+    def fails(path, *, reason, url):
+        raise OSError("queue unavailable")
+
+    backend.submit_scan = fails
+    assert code(call(core, USER, "scan_request", path="C:\\Users\\u\\Downloads\\setup.exe")) == "INTERNAL"
+    backend.submit_scan = submit
+    assert call(core, USER, "scan_request", path="C:\\Users\\u\\Downloads\\setup.exe")["ok"]
+
+
 def test_queued_scans_per_caller_are_capped(svc, monkeypatch):
     core, _, _ = svc
     monkeypatch.setattr(service_core, "MAX_JOBS_PER_CALLER", 3)

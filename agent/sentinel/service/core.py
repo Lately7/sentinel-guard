@@ -151,12 +151,22 @@ class ServiceCore:
             raise ProtocolError("NOT_FOUND", "no such job")
 
     def _submit(self, caller: Caller, path: str, reason: str, url: str | None) -> dict[str, Any]:
+        slot = "pending-" + secrets.token_hex(8)
         with self._lock:
             mine = sum(1 for o in self._jobs.values() if o == caller.key)
             if mine >= MAX_JOBS_PER_CALLER or len(self._jobs) >= MAX_JOBS:
                 raise ProtocolError("BUSY", "too many scans waiting")
-        job_id = self.backend.submit_scan(path, reason=reason, url=url)
+            # Taken here, not after submitting: otherwise callers arriving
+            # together all pass the check above.
+            self._jobs[slot] = caller.key
+        try:
+            job_id = self.backend.submit_scan(path, reason=reason, url=url)
+        except BaseException:
+            with self._lock:
+                del self._jobs[slot]
+            raise
         with self._lock:
+            del self._jobs[slot]
             self._jobs[job_id] = caller.key
         # Accepted for scanning, not scanned: the result comes from job_status.
         return {"job_id": job_id, "accepted": True}

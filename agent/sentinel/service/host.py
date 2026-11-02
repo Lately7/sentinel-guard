@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from collections.abc import Callable
 from typing import Protocol
 
@@ -29,19 +30,27 @@ SERVICE_CONTROL_PRESHUTDOWN = 0xF
 NO_ERROR = 0
 ERROR_CALL_NOT_IMPLEMENTED = 120
 ERROR_SERVICE_SPECIFIC_ERROR = 1066
+# dwServiceSpecificExitCode: without one SCM can only show a bare 1066.
+EXIT_START_FAILED, EXIT_BARRIER_OPEN = 1, 2
 
 STOP_WAIT_HINT_MS = 10_000
 # How long a stop waits for an automatic action that already started (the
-# action barrier, RT-018 / R11 invariant 11) before reporting stopped anyway.
+# action barrier, RT-018 / R11 invariant 11). Past this the process has to go
+# (Windows is shutting down) and the stop is reported as failed, not clean; the
+# next start recovers from the action journal.
 STOP_BARRIER_SECONDS = 25.0
+# SCM treats a checkpoint that stops advancing as a hung service.
+STOP_SLICE_SECONDS = 5.0
 
 
 class Scm(Protocol):
-    def set_status(self, state: int, *, accepted: int, exit_code: int, checkpoint: int, wait_hint_ms: int) -> None: ...
+    def set_status(self, state: int, *, accepted: int, exit_code: int, checkpoint: int, wait_hint_ms: int,
+                   service_code: int = 0) -> None: ...
 
 
 class Service(Protocol):
-    """What the host runs: start listening, stop (returns True when the action barrier closed)."""
+    """What the host runs: start listening, stop (True when the action barrier
+    closed; False to be asked again, so it must be safe to call repeatedly)."""
 
     def start(self) -> None: ...
     def stop(self, timeout: float) -> bool: ...
@@ -57,7 +66,7 @@ class ServiceHost:
         self._lock = threading.Lock()
         self.barrier_closed: bool | None = None
 
-    def _report(self, state: int, *, exit_code: int = NO_ERROR, wait_hint_ms: int = 0) -> None:
+    def _report(self, state: int, *, exit_code: int = NO_ERROR, wait_hint_ms: int = 0, service_code: int = 0) -> None:
         with self._lock:
             self.state = state
             pending = state in (SERVICE_START_PENDING, SERVICE_STOP_PENDING)
@@ -65,8 +74,8 @@ class ServiceHost:
             # Stop/preshutdown are accepted only while running: a stop that
             # arrives during start-up waits until start-up has finished.
             accepted = (SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_PRESHUTDOWN) if state == SERVICE_RUNNING else 0
-            self.scm.set_status(state, accepted=accepted, exit_code=exit_code,
-                                checkpoint=self._checkpoint, wait_hint_ms=wait_hint_ms)
+            self.scm.set_status(state, accepted=accepted, exit_code=exit_code, checkpoint=self._checkpoint,
+                                wait_hint_ms=wait_hint_ms, service_code=service_code)
 
     def control(self, code: int) -> int:
         """HandlerEx: runs on the SCM's thread, so it only signals."""
@@ -86,19 +95,30 @@ class ServiceHost:
             self.service.start()
         except Exception:
             log.exception("service start failed")
-            self._report(SERVICE_STOPPED, exit_code=ERROR_SERVICE_SPECIFIC_ERROR)
+            self._report(SERVICE_STOPPED, exit_code=ERROR_SERVICE_SPECIFIC_ERROR, service_code=EXIT_START_FAILED)
             return
         self._report(SERVICE_RUNNING)
         self._stop_requested.wait()
-        try:
-            self.barrier_closed = self.service.stop(STOP_BARRIER_SECONDS)
-        except Exception:
-            log.exception("service stop failed")
-            self.barrier_closed = False
-        if not self.barrier_closed:
-            log.warning("an automatic action was still running when the service stopped")
-        # "Stopped" is published only after the action barrier (R11 inv. 11).
-        self._report(SERVICE_STOPPED)
+        self.barrier_closed = self._close_barrier()
+        # A clean "stopped" is published only after the action barrier (R11 inv. 11).
+        if self.barrier_closed:
+            self._report(SERVICE_STOPPED)
+        else:
+            log.error("an automatic action was still running when the service had to stop")
+            self._report(SERVICE_STOPPED, exit_code=ERROR_SERVICE_SPECIFIC_ERROR, service_code=EXIT_BARRIER_OPEN)
+
+    def _close_barrier(self) -> bool:
+        deadline = time.monotonic() + STOP_BARRIER_SECONDS
+        while True:
+            try:
+                if self.service.stop(max(0.0, min(STOP_SLICE_SECONDS, deadline - time.monotonic()))):
+                    return True
+            except Exception:
+                log.exception("service stop failed")
+                return False
+            if time.monotonic() >= deadline:
+                return False
+            self._report(SERVICE_STOP_PENDING, wait_hint_ms=STOP_WAIT_HINT_MS)
 
 
 # -- real SCM via ctypes (Windows only; exercised by the owner's elevated script)
@@ -133,9 +153,10 @@ def run_as_service(make_service: Callable[[], Service], name: str = SERVICE_NAME
         def __init__(self, handle: int) -> None:
             self.handle = handle
 
-        def set_status(self, state: int, *, accepted: int, exit_code: int, checkpoint: int, wait_hint_ms: int) -> None:
+        def set_status(self, state: int, *, accepted: int, exit_code: int, checkpoint: int, wait_hint_ms: int,
+                       service_code: int = 0) -> None:
             status = SERVICE_STATUS(SERVICE_WIN32_OWN_PROCESS, state, accepted,
-                                    exit_code, 0, checkpoint, wait_hint_ms)
+                                    exit_code, service_code, checkpoint, wait_hint_ms)
             if not advapi.SetServiceStatus(self.handle, ctypes.byref(status)):
                 log.error("SetServiceStatus failed (Windows error %d)", ctypes.get_last_error())
 

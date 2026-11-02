@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import struct
 import time
 import zipfile
 from collections.abc import Callable
@@ -17,6 +18,21 @@ _METHODS = (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED,
             zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA)
 _PARSE_ERRORS = (OSError, ValueError, RuntimeError, EOFError,
                  zipfile.BadZipFile, NotImplementedError)
+
+
+def _headers_agree(payload: bytes, info: zipfile.ZipInfo) -> bool:
+    """zipfile reads only the central directory, other extractors may trust the
+    local header: when they differ, what we inspected may not be what unpacks."""
+    head = payload[info.header_offset:info.header_offset + 30]
+    if len(head) < 30 or not head.startswith(b"PK\x03\x04"):
+        return False
+    flags, method = struct.unpack_from("<HH", head, 6)
+    if method != info.compress_type or (flags & 1) != (info.flag_bits & 1):
+        return False
+    if flags & 8:  # sizes live in the data descriptor after the member
+        return True
+    sizes = struct.unpack_from("<II", head, 18)
+    return 0xffffffff in sizes or sizes == (info.compress_size, info.file_size)
 
 
 def walk(data: bytes, ledger: CoverageLedger, cancel: CancellationToken,
@@ -54,6 +70,8 @@ def walk(data: bytes, ledger: CoverageLedger, cancel: CancellationToken,
                         ledger.child("omitted", "MEMBER_SIZE_LIMIT")
                     elif declared > config.MAX_ARCHIVE_TOTAL_BYTES:
                         ledger.child("omitted", "EXPANSION_LIMIT")
+                    elif not _headers_agree(payload, info):
+                        ledger.child("opaque", "HEADER_MISMATCH")
                     else:
                         try:
                             with archive.open(info) as member:
