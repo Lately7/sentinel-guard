@@ -12,6 +12,7 @@ chạy thật; chỗ nào chưa chạy được thì ghi rõ.
 | 3a. Gate v2 mốc 2 | ✅ Merge `e186184` sau 2 vòng review |
 | 3b. RT-016/017/018 (watcher) | ✅ `d03ea88` |
 | 3c. RT-021 (allowlist) | ✅ `8135706` |
+| 3d. Gate v2 mốc 3 (thêm) | ✅ Merge `7226927` sau 3 vòng review |
 | 4. ROADMAP + báo cáo này | ✅ |
 | Thêm (anh/chị yêu cầu lúc thức): thiết kế xoay quanh quyền admin | ✅ Codex nghiên cứu R13 + thảo luận R13b với tôi; chưa có code chạy quyền admin |
 
@@ -126,6 +127,17 @@ Tôi còn một điểm dè dặt với Codex: không chụp bản sao tệp cho
 sao có thể bị chính Defender/Malwarebytes cách ly), dùng kiểm tra identity
 trước/sau.
 
+## 2e. Gate v2 mốc 3 (Codex viết, 3 vòng review)
+
+Bộ đọc tệp giữ handle cấm ghi; adapter lõi (hash EICAR/known-bad, tên tệp, PE,
+script), luật JSON của user, YARA-X; quét cả **từng tệp bên trong ZIP**. Lỗi
+tôi bắt được: vòng 1 một **ZIP chứa EICAR ra "sạch đáng tin"** (tệp con được
+đánh dấu đã kiểm mà không kiểm gì); vòng 2 lộ ra **EICAR ở tệp con thứ 81 bị
+cắt mất** vì chỉ giữ 64 bằng chứng đầu (tôi tái hiện được), và không có hạn
+chót tổng cho tệp con; vòng 3 sửa, nhưng cách gộp bằng chứng mới lại gộp nhầm
+hai luật YARA khác namespace — tôi sửa thẳng. Test H7/H8 mới fail trên code cũ
+và đạt sau khi sửa.
+
 ## 2d. A1 — ranh giới dịch vụ có quyền (tôi viết, không cần admin)
 
 Anh/chị bảo làm tiếp, nên tôi làm A1 song song khi Codex viết mốc 3:
@@ -172,12 +184,12 @@ thư mục sau khi hàng đợi tràn (R12d).
 
 ## Kết quả test thật
 
-Lệnh chạy trên `gate-baseline` sau lần merge cuối (`e186184`):
+Lệnh chạy trên `gate-baseline` sau lần merge cuối (`7226927`):
 
-* `.\.venv\Scripts\python -m pytest -q` → **283 passed, 4 skipped, 2 xfailed**
+* `.\.venv\Scripts\python -m pytest -q` → **347 passed, 4 skipped, 2 xfailed** (lần cuối, sau merge mốc 3 `7226927`; sau mốc 2 là 283)
   (đầu đêm: 119 passed). 4 skip = test với clamd thật, clamd không chạy.
   2 xfail = RT-001, RT-002 (lỗi đã biết, chưa sửa — có chủ đích).
-  Gate v2: 154 test trong `tests/gate_v2/`.
+  Gate v2: 177 test trong `tests/gate_v2/`; dịch vụ A1: 41 test.
 * `node --test "extension/test/*.test.mjs"` → **39 passed** (đầu đêm: 32).
 * Helium 156 e2e (`node tools/helium_e2e.mjs extension`, `SENTINEL_HOME` tạm
   trong `%TEMP%`, đã chặn `blocked-selftest.sentinelguard.invalid`): mọi kiểm
