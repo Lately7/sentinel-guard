@@ -37,6 +37,16 @@ def _unaccepted(v: Verdict) -> bool:
     return decision is not None and "UNACCEPTED_DETECTION" in decision.reason_codes
 
 
+NOT_QUARANTINED_VI = {
+    "CHANGED": "tệp đã đổi sau khi quét, sẽ quét lại",
+    "IN_USE": "tệp đang chạy hoặc đang được dùng, hãy đóng chương trình rồi quét lại",
+    "MISSING": "tệp không còn ở đó",
+    "ACCESS_DENIED": "không có quyền với tệp này",
+    "PROTECTED_PATH": "tệp nằm trong thư mục hệ thống, không tự cách ly",
+    "REPARSE_POINT": "đường dẫn là liên kết, không cách ly qua liên kết",
+}
+
+
 def act_on(db: Database, v: Verdict, settings: Settings, source: str) -> dict[str, Any]:
     """Record and (for malicious files) quarantine. Returns {label, quarantined, quarantine_id, error}."""
     out: dict[str, Any] = {"label": v.label, "quarantined": False, "quarantine_id": None, "error": None}
@@ -53,14 +63,17 @@ def act_on(db: Database, v: Verdict, settings: Settings, source: str) -> dict[st
     wanted = _wants_quarantine(v)
     if wanted and settings.auto_quarantine:
         try:
-            qid = quarantine.quarantine(db, v.path, data)
+            decision = getattr(v, "decision", None)
+            qid = quarantine.quarantine(db, v.path, data, expected=decision.identity if decision else None)
             out.update(quarantined=True, quarantine_id=qid)
             db.add_event(source, "threat", "Đã cách ly mối đe dọa",
                          f"{v.name}: {top_reason(v)}", {**data, "quarantine_id": qid})
         except quarantine.QuarantineError as e:
-            out["error"] = str(e)
+            why = NOT_QUARANTINED_VI.get(e.code, "không cách ly được")
+            out["error"] = why
+            log.warning("quarantine of %s failed: %s", v.name, e)
             db.add_event(source, "threat", "Phát hiện mối đe dọa (chưa cách ly được)",
-                         f"{v.name}: {top_reason(v)} — {e}", data)
+                         f"{v.name}: {top_reason(v)} — {why}", data)
     elif wanted or v.label == MALICIOUS:
         db.add_event(source, "threat", "Phát hiện mối đe dọa", f"{v.name}: {top_reason(v)}", data)
     else:

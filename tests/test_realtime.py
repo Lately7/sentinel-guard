@@ -192,7 +192,7 @@ def test_stop_waits_for_an_action_in_progress(queue_parts):
     held, release = threading.Event(), threading.Event()
 
     def acting():
-        with q._action_lock:
+        with q.barrier.action():
             held.set()
             release.wait(5)
 

@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from .. import config, urlintel
 from ..db import Database
 from ..gate_v2 import cache, legacy
+from ..gate_v2.actions import ProtectionBarrier
 from ..gate_v2.analyzers.lnk import LnkAdapter
 from ..gate_v2.analyzers.motw import MotwAdapter
 from ..gate_v2.analyzers.signer import SignerAdapter
@@ -166,27 +167,30 @@ class Scanner:
 
     # -- public API --------------------------------------------------------
 
-    def scan_file(self, path: str | os.PathLike[str], *, use_cache: bool = True) -> legacy.GateVerdict:
+    def scan_file(self, path: str | os.PathLike[str], *, use_cache: bool = True,
+                  barrier: ProtectionBarrier | None = None) -> legacy.GateVerdict:
         real = os.path.realpath(path)
         try:
             with open(real, "rb") as stream:
                 head = stream.read(HEAD_BYTES)
         except OSError:
             head = b""  # the gate reports why, through its own open
-        return self._scan(os.path.basename(real), real, None, head, use_cache)
+        return self._scan(os.path.basename(real), real, None, head, use_cache, barrier)
 
     def scan_bytes(self, data: bytes, name: str = "<memory>") -> legacy.GateVerdict:
         return self._scan(name, None, data, data[:HEAD_BYTES], False)
 
     # -- internals ---------------------------------------------------------
 
-    def _scan(self, name: str, path: str | None, data: bytes | None, head: bytes, use_cache: bool) -> legacy.GateVerdict:
+    def _scan(self, name: str, path: str | None, data: bytes | None, head: bytes, use_cache: bool,
+              barrier: ProtectionBarrier | None = None) -> legacy.GateVerdict:
         plan = self._plan(name, head, path is not None)
         generation = cache.gate_generation(plan.inputs)
         request = ScanRequest(CONTRACT_VERSION, uuid.uuid4().hex, "file", path, data, "on_demand",
                               "single_file" if path else "memory", EVIDENCE_POLICY_VERSION,
                               LEGACY_POLICY_VERSION,
-                              time.monotonic_ns() + int(config.SCAN_DEADLINE_SECONDS * 1e9), None, use_cache)
+                              time.monotonic_ns() + int(config.SCAN_DEADLINE_SECONDS * 1e9),
+                              barrier.stamp() if barrier else None, use_cache)
         served: list[str] = []
 
         def known(measured: FileIdentity) -> FinalDecision | None:
@@ -202,7 +206,8 @@ class Scanner:
 
         decision = run_gate(request, adapters=plan.adapters, stages=plan.stages, gate_generation=generation,
                             auto_quarantine=True, max_bytes=config.MAX_SCAN_BYTES,
-                            resident_limit=config.MAX_DEEP_SCAN_BYTES, short_circuit=known)
+                            resident_limit=config.MAX_DEEP_SCAN_BYTES, short_circuit=known,
+                            current_protection_generation=barrier.current if barrier else None)
         if not served:
             cache.store(self.db, decision, time.time())
         verdict = legacy.project(decision, name=name, path=path, stage_defaults=plan.defaults)

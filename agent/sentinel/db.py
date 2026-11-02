@@ -51,6 +51,12 @@ CREATE TABLE IF NOT EXISTS restore_exceptions (
     added  REAL NOT NULL,
     PRIMARY KEY (path, sha256)
 );
+CREATE TABLE IF NOT EXISTS action_journal (
+    qid     TEXT PRIMARY KEY,
+    path    TEXT NOT NULL,
+    sha256  TEXT NOT NULL,
+    started REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS gate_cache (
     key     TEXT PRIMARY KEY,  -- file generation + gate generation, see gate_v2/cache.py
     payload TEXT NOT NULL,     -- the decision as JSON, revalidated on every read
@@ -110,7 +116,8 @@ class _Rows:
 # filter. Feed data lives in snapshots and is simply re-downloaded; the user's
 # own blocklist entries (source='user') are kept.
 SALVAGE: dict[str, str] = {
-    "allow_hosts": "", "allow_hashes": "", "restore_exceptions": "", "quarantine": "", "events": "", "meta": "",
+    "allow_hosts": "", "allow_hashes": "", "restore_exceptions": "", "action_journal": "", "quarantine": "",
+    "events": "", "meta": "",
     "bad_hosts": "WHERE source='user'", "bad_urls": "WHERE source='user'", "bad_hashes": "WHERE source='user'",
 }
 
@@ -513,6 +520,16 @@ class Database:
 
     def remove_quarantine(self, qid: str) -> None:
         self._exec("DELETE FROM quarantine WHERE id=?", (qid,))
+
+    def open_action(self, qid: str, path: str, sha256: str) -> None:
+        self._exec("INSERT INTO action_journal(qid,path,sha256,started) VALUES(?,?,?,?)",
+                   (qid, path, sha256, time.time()))
+
+    def close_action(self, qid: str) -> None:
+        self._exec("DELETE FROM action_journal WHERE qid=?", (qid,))
+
+    def open_actions(self, started_before: float) -> list[dict[str, Any]]:
+        return [dict(r) for r in self._exec("SELECT * FROM action_journal WHERE started<?", (started_before,)).fetchall()]
 
     # -- feeds -------------------------------------------------------------
 

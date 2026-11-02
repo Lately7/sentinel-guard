@@ -14,6 +14,7 @@ from .config import Settings
 from .db import Database
 from .engine.scanner import Scanner
 from .engine.verdict import Verdict
+from .gate_v2.actions import ProtectionBarrier, ProtectionStopped
 from .gate_v2.legacy import UNKNOWN
 from .protection import act_on
 
@@ -42,8 +43,6 @@ RETRY_DELAYS = (0.5, 2.0, 8.0, 30.0)
 SIZE_RECHECK_SECONDS = 0.3
 # How long stop() waits for an automatic action that is already running.
 ACTION_BARRIER_SECONDS = 30.0
-# Our own in-flight quarantine claims (see quarantine.py) must not be rescanned.
-CLAIM_MARK = ".sentinel-"
 
 
 @dataclasses.dataclass
@@ -71,9 +70,9 @@ class ScanQueue:
         self._incomplete_unreported = 0
         self._incomplete_reported_at = float("-inf")
         self._lock = threading.Lock()
-        # Held around every automatic action; stop() takes it to know that no
-        # action of this run is still in progress (RT-018).
-        self._action_lock = threading.Lock()
+        # Every automatic action runs inside it; stop() revokes it, so no action
+        # of this run can start afterwards or still be in progress (RT-018).
+        self.barrier = ProtectionBarrier()
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="scan-queue", daemon=True)
@@ -91,16 +90,10 @@ class ScanQueue:
             self._stop.set()
             self._pending.clear()
         self._wake.set()
-        if not self._action_lock.acquire(timeout=timeout):
-            return False
-        self._action_lock.release()
-        return True
+        return self.barrier.revoke(timeout)
 
     def submit(self, path: str) -> None:
-        lowered = path.lower()
-        if CLAIM_MARK in lowered and lowered.endswith(".claim"):
-            return
-        partial = lowered.endswith(PARTIAL_SUFFIXES)
+        partial = path.lower().endswith(PARTIAL_SUFFIXES)
         settle = PARTIAL_SETTLE_SECONDS if partial else SETTLE_SECONDS
         max_age = PARTIAL_MAX_AGE_SECONDS if partial else MAX_AGE_SECONDS
         now = self._clock()
@@ -231,13 +224,13 @@ class ScanQueue:
                           {"path": path, "reason": reason[:300], "attempts": attempts})
 
     def _act(self, v: Verdict) -> dict:
-        with self._action_lock:
-            settings = self.settings
-            if self._stop.is_set():
-                # Switched off while this file was being scanned: the finding is
-                # still recorded, but a stopped run must not quarantine (RT-018).
-                settings = dataclasses.replace(settings, auto_quarantine=False)
-            return act_on(self.db, v, settings, "watcher")
+        try:
+            with self.barrier.action():
+                return act_on(self.db, v, self.settings, "watcher")
+        except ProtectionStopped:
+            # Switched off while this file was being scanned: the finding is
+            # still recorded, but a stopped run must not quarantine (RT-018).
+            return act_on(self.db, v, dataclasses.replace(self.settings, auto_quarantine=False), "watcher")
 
 
 class FileWatcher:
