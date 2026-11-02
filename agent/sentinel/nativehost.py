@@ -21,8 +21,8 @@ from typing import Any, BinaryIO
 from . import __version__, config, urlintel
 from .db import Database
 from .engine.scanner import Scanner
-from .engine.verdict import MALICIOUS, Finding, Severity
-from .protection import act_on, top_reason
+from .protection import act_on, escalate_origin, top_reason
+from .service.bridge import ServiceLease, install
 
 log = logging.getLogger("sentinel.nativehost")
 
@@ -31,7 +31,8 @@ MAX_OUT = 1024 * 1024  # Chromium's limit for host -> browser messages
 PAGE_LIMIT = 20_000
 PAGE_BYTES = 600_000
 _MAX_STR = 8192
-SLOW_TYPES = {"scan_download"}
+# A confirmation can wait on the user for minutes; URL lookups must not.
+SLOW_TYPES = {"scan_download", "allow_host"}
 
 
 class BadRequest(Exception):
@@ -55,9 +56,10 @@ def _int(msg: dict[str, Any], key: str, default: int, lo: int, hi: int) -> int:
 
 
 class Host:
-    def __init__(self, db: Database, settings: config.Settings) -> None:
+    def __init__(self, db: Database, settings: config.Settings, lease: ServiceLease | None = None) -> None:
         self.db = db
         self.settings = settings
+        self.lease = lease  # while a service answers, it decides; this process only asks
         self._scanner: Scanner | None = None
         self._bl_cache: tuple[str, list[tuple[str, str]]] | None = None
 
@@ -93,13 +95,16 @@ class Host:
     def on_hello(self, msg: dict[str, Any]) -> dict[str, Any]:
         # The dashboard shows when the browser extension last checked in.
         self.db.set_meta("extension_seen", str(time.time()))
+        service = self.lease.status() if self.lease is not None else None
         return {"version": __version__, "blocklist_version": self.db.get_meta("blocklist_version", "0"),
-                "allow_version": self.db.allow_version(), "counts": self.db.counts()}
+                "allow_version": f"s{service['allow_version']}" if service else self.db.allow_version(),
+                "counts": self.db.counts()}
 
     def on_check_url(self, msg: dict[str, Any]) -> dict[str, Any]:
         url = _str(msg, "url")
         assert url is not None
-        return {"result": urlintel.check(self.db, url)}
+        answer = self.lease.check_url(url) if self.lease is not None else None
+        return {"result": answer if answer is not None else urlintel.check(self.db, url)}
 
     def _blocklist(self) -> tuple[str, list[tuple[str, str]]]:
         # One snapshot per (blocklist, allowlist) version: paging through
@@ -129,6 +134,9 @@ class Host:
         # hosts). Callers without an offset get the first page.
         offset = _int(msg, "offset", 0, 0, 10_000_000)
         limit = _int(msg, "limit", PAGE_LIMIT, 1, PAGE_LIMIT)
+        service = self.lease.allowed_hosts(offset, limit) if self.lease is not None else None
+        if service is not None:
+            return {**service, "allow_version": f"s{service['allow_version']}"}
         version = self.db.allow_version()
         everything = self.db.allowed_hosts()
         hosts: list[str] = []
@@ -147,14 +155,16 @@ class Host:
         p = Path(path)
         if not p.is_absolute() or not p.is_file():
             raise BadRequest("path must be an existing absolute file path")
+        done = self.lease.scan_download(path, url) if self.lease is not None else None
+        if done is not None:
+            # A scan the service could not finish must not read as a result.
+            if done.get("state") != "done" or "verdict" not in done:
+                raise BadRequest(f"the service did not finish this scan ({done.get('code', 'unknown')})")
+            return {k: done.get(k) for k in ("verdict", "reason", "url_reputation", "label", "quarantined",
+                                             "quarantine_id", "error")}
         rep = urlintel.check(self.db, url) if url else None
         v = self.scanner.scan_file(p, use_cache=False)
-        if rep and rep["verdict"] == "malicious" and v.label != MALICIOUS:
-            # The browser tried to cancel this download because of the same
-            # URL verdict and lost the race; the verdict stays authoritative
-            # whatever the list's kind (phishing kits ship droppers too).
-            v.findings.append(Finding("origin", "origin.blocklisted_download", Severity.CRITICAL,
-                                      f"downloaded from {rep['matched']} ({rep['kind']}, {rep['source']})", 100))
+        escalate_origin(v, rep)
         outcome = act_on(self.db, v, self.settings, "download")
         return {"verdict": v.to_dict(max_findings=30), "reason": top_reason(v), "url_reputation": rep, **outcome}
 
@@ -180,6 +190,11 @@ class Host:
         host = host.lower().strip(".")
         if not host or "/" in host or " " in host:
             raise BadRequest("invalid host")
+        if self.lease is not None and self.lease.available():
+            # A page can ask for this; only an administrator's confirmation grants it.
+            if not self.lease.approve("trust_host", {"host": host}):
+                raise BadRequest("not approved")
+            return {}
         self.db.allow_host(host)
         self.db.add_event("web", "warning", "Đã tin cậy trang web", host, {"host": host})
         return {}
@@ -268,7 +283,7 @@ def main(argv: list[str]) -> int:
 
         msvcrt.setmode(sys.stdin.fileno(), os.O_BINARY)  # type: ignore[attr-defined]
         msvcrt.setmode(sys.stdout.fileno(), os.O_BINARY)  # type: ignore[attr-defined]
-    host = Host(Database(), config.Settings.load())
+    host = Host(Database(), config.Settings.load(), install())
     stdin, stdout = sys.stdin.buffer, sys.stdout.buffer
     # File scans can take a minute (Defender); they run on workers so URL
     # lookups for the next navigation are answered immediately.

@@ -16,6 +16,7 @@ PROTOCOL_VERSION = 1
 MAX_FRAME = 1024 * 1024
 MAX_STR = 8192
 MAX_PATH = 4096
+MAX_PAGE = 20_000
 
 
 class ProtocolError(Exception):
@@ -127,7 +128,8 @@ def _job(args: dict[str, Any]) -> dict[str, Any]:
     return {"job_id": text(args, "job_id", max_len=64)}
 
 
-PLAN_KINDS = ("disable_protection", "trust_host", "restore_quarantine", "add_exclusion", "approve_repair")
+PLAN_KINDS = ("disable_protection", "trust_host", "restore_quarantine", "delete_quarantine", "add_exclusion",
+              "approve_repair")
 
 
 def _plan_request(args: dict[str, Any]) -> dict[str, Any]:
@@ -139,7 +141,7 @@ def _plan_request(args: dict[str, Any]) -> dict[str, Any]:
         raise ProtocolError("BAD_REQUEST", "'params' must be an object")
     if kind == "trust_host":
         params = {"host": text(params, "host", max_len=253)}
-    elif kind == "restore_quarantine":
+    elif kind in ("restore_quarantine", "delete_quarantine"):
         params = {"quarantine_id": text(params, "quarantine_id", max_len=64)}
     elif kind == "add_exclusion":
         params = {"path": text(params, "path", max_len=MAX_PATH), "sha256": text(params, "sha256", max_len=64)}
@@ -148,6 +150,11 @@ def _plan_request(args: dict[str, Any]) -> dict[str, Any]:
     else:
         params = {}
     return {"kind": kind, "params": params}
+
+
+def _page(args: dict[str, Any]) -> dict[str, Any]:
+    return {"offset": integer(args, "offset", 0, 10_000_000, default=0),
+            "limit": integer(args, "limit", 1, MAX_PAGE, default=MAX_PAGE)}
 
 
 def _plan_ref(args: dict[str, Any]) -> dict[str, Any]:
@@ -166,6 +173,10 @@ OPS: dict[str, Op] = {op.name: op for op in (
     Op("scan_request", "user", frozenset({"path"}), _path),
     Op("job_status", "user", frozenset({"job_id"}), _job),
     Op("cancel_job", "user", frozenset({"job_id"}), _job),
+    # Only ever makes protection stronger, so it needs no confirmation.
+    Op("enable_protection", "user", frozenset(), _none),
+    Op("list_quarantine", "user", frozenset(), _none),
+    Op("allowed_hosts", "user", frozenset({"offset", "limit"}), _page),
     # Asking is harmless: a plan does nothing until an elevated caller approves it.
     Op("request_plan", "user", frozenset({"kind", "params"}), _plan_request),
     Op("get_plan", "elevated", frozenset({"plan_id"}), _plan_ref),

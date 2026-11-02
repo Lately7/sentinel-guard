@@ -28,6 +28,7 @@ PLAN_TTL_SECONDS = 120.0
 MAX_PLANS_PER_CALLER = 8
 MAX_JOBS_PER_CALLER = 64
 MAX_JOBS = 4096
+FINISHED_JOB_STATES = ("done", "cancelled", "failed")
 RATE_CAPACITY = 60.0
 RATE_PER_SECOND = 20.0
 
@@ -39,9 +40,13 @@ class Backend(Protocol):
     # so a user can never make the service scan (and later act on) a file that
     # user cannot read themselves (R13 §4).
     def can_read(self, caller: Caller, path: str) -> bool: ...
-    def submit_scan(self, path: str, *, reason: str, url: str | None) -> str: ...
+    def submit_scan(self, path: str, *, reason: str, url: str | None, caller: Caller) -> str: ...
     def job(self, job_id: str) -> dict[str, Any] | None: ...
     def cancel_job(self, job_id: str) -> bool: ...
+    def enable_protection(self) -> dict[str, Any]: ...
+    # Only what this caller may know about: another user's file paths stay theirs.
+    def quarantine_items(self, caller: Caller) -> list[dict[str, Any]]: ...
+    def allowed_hosts(self, offset: int, limit: int) -> dict[str, Any]: ...
     # Vietnamese summary built by the service from its own state, or None when
     # the target does not exist (unknown quarantine id, ...).
     def describe_plan(self, kind: str, params: dict[str, Any]) -> str | None: ...
@@ -155,8 +160,22 @@ class ServiceCore:
             # other users are not disclosed.
             raise ProtocolError("NOT_FOUND", "no such job")
 
+    def _forget_finished(self, caller: Caller) -> None:
+        # The limit is on work waiting, not on work ever done: without this a
+        # caller would be refused for good after its 64th scan. Oldest first, so
+        # a client still reading a recent result keeps it.
+        with self._lock:
+            mine = [job_id for job_id, owner in self._jobs.items()
+                    if owner == caller.key and not job_id.startswith("pending-")]
+        for job_id in mine[:max(0, len(mine) - MAX_JOBS_PER_CALLER // 2)]:
+            info = self.backend.job(job_id)
+            if info is None or info.get("state") in FINISHED_JOB_STATES:
+                with self._lock:
+                    self._jobs.pop(job_id, None)
+
     def _submit(self, caller: Caller, path: str, reason: str, url: str | None) -> dict[str, Any]:
         slot = "pending-" + secrets.token_hex(8)
+        self._forget_finished(caller)
         with self._lock:
             mine = sum(1 for o in self._jobs.values() if o == caller.key)
             if mine >= MAX_JOBS_PER_CALLER or len(self._jobs) >= MAX_JOBS:
@@ -165,7 +184,7 @@ class ServiceCore:
             # together all pass the check above.
             self._jobs[slot] = caller.key
         try:
-            job_id = self.backend.submit_scan(path, reason=reason, url=url)
+            job_id = self.backend.submit_scan(path, reason=reason, url=url, caller=caller)
         except BaseException:
             with self._lock:
                 del self._jobs[slot]
@@ -206,6 +225,15 @@ class ServiceCore:
     def _op_cancel_job(self, caller: Caller, args: dict[str, Any]) -> dict[str, Any]:
         self._own_job(caller, args["job_id"])
         return {"cancelled": self.backend.cancel_job(args["job_id"])}
+
+    def _op_enable_protection(self, caller: Caller, args: dict[str, Any]) -> dict[str, Any]:
+        return self.backend.enable_protection()
+
+    def _op_list_quarantine(self, caller: Caller, args: dict[str, Any]) -> dict[str, Any]:
+        return {"items": self.backend.quarantine_items(caller)}
+
+    def _op_allowed_hosts(self, caller: Caller, args: dict[str, Any]) -> dict[str, Any]:
+        return self.backend.allowed_hosts(args["offset"], args["limit"])
 
     def _op_request_plan(self, caller: Caller, args: dict[str, Any]) -> dict[str, Any]:
         summary = self.backend.describe_plan(args["kind"], args["params"])

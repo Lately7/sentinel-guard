@@ -2,10 +2,47 @@
 
 from __future__ import annotations
 
+import logging
+import os
+import threading
 from collections.abc import Callable
+from typing import Any
 
+from .core import ServiceCore
 from .integrity import IntegrityError, startup_check
-from .paths import installed_paths
+from .paths import InstalledPaths, active_version, installed_paths
+from .winpipe import PIPE_NAME, SERVICE_SDDL, PipeServer
+
+log = logging.getLogger(__name__)
+
+
+class ProductService:
+    """Listens on the pipe; stop answers True only once the action barrier is closed."""
+
+    def __init__(self, make_backend: Callable[[], Any], *, name: str = PIPE_NAME, sddl: str = SERVICE_SDDL) -> None:
+        self.make_backend = make_backend
+        self.name, self.sddl = name, sddl
+        self.backend: Any = None
+        self.server: PipeServer | None = None
+
+    def start(self) -> None:
+        self.backend = self.make_backend()
+        # Crash recovery and the saved on/off state settle before any client is heard.
+        self.backend.start()
+        self.server = PipeServer(ServiceCore(self.backend), name=self.name, sddl=self.sddl)
+        threading.Thread(target=self.server.serve_forever, name="pipe-server", daemon=True).start()
+
+    def stop(self, timeout: float) -> bool:
+        if self.server is not None:
+            self.server.stop()
+            self.server = None
+        return self.backend.stop(timeout) if self.backend is not None else True
+
+
+def _state_backend(paths: InstalledPaths) -> Any:
+    from .backend import build
+
+    return build(paths.state("db") / "sentinel.db")
 
 
 def run(factory: Callable[[], object], version_id: str) -> None:
@@ -16,8 +53,15 @@ def run(factory: Callable[[], object], version_id: str) -> None:
 
 
 def main() -> None:
-    # M7 supplies a backend factory; fail rather than start an empty service.
-    raise IntegrityError("INSTALL_INTEGRITY", "service backend is not wired")
+    version = active_version()
+    if version is None:
+        raise IntegrityError("INSTALL_INTEGRITY", "not running from the installed runtime")
+    paths = installed_paths(version.name)
+    # The service keeps its own state in the protected tree, never in a profile.
+    os.environ["SENTINEL_HOME"] = str(paths.state_root)
+    logging.basicConfig(filename=str(paths.state("journal") / "service.log"), level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    run(lambda: ProductService(lambda: _state_backend(paths)), version.name)
 
 
 if __name__ == "__main__":

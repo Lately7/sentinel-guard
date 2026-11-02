@@ -17,6 +17,7 @@ import os
 import queue
 import threading
 import time
+from collections.abc import Callable
 from ctypes import wintypes
 from dataclasses import replace
 from typing import Any
@@ -194,6 +195,27 @@ class WorkerSession:
         return int(dst.value)
 
 
+class Isolation:
+    """What the Scanner uses to run file parsing outside the privileged process."""
+
+    def __init__(self) -> None:
+        self.session: WorkerSession | None = None
+
+    def load(self, json_packs: tuple[tuple[str, bytes, bool], ...],
+             yara_sources: tuple[tuple[str, str, str], ...]) -> None:
+        self.close()  # new rules: the running worker holds the old ones
+        self.session = WorkerSession(json_packs=json_packs, yara_sources=yara_sources)
+
+    def adapter(self, engine_id: str, known_bad: Callable[[str], str | None] | None = None) -> WorkerAdapter:
+        assert self.session is not None
+        return WorkerAdapter(self.session, engine_id, known_bad)
+
+    def close(self) -> None:
+        if self.session is not None:
+            self.session.close()
+            self.session = None
+
+
 def _failed(engine_id: str, request: ScanRequest, identity: FileIdentity,
             status: StageStatus, code: str, start: int) -> EngineResult:
     return EngineResult(
@@ -208,9 +230,11 @@ class WorkerAdapter:
 
     reopens_path = False
 
-    def __init__(self, session: WorkerSession, engine_id: str) -> None:
+    def __init__(self, session: WorkerSession, engine_id: str,
+                 known_bad: Callable[[str], str | None] | None = None) -> None:
         self.session = session
         self.engine_id = engine_id
+        self.known_bad = known_bad
 
     def readiness(self) -> str:
         return "READY"
@@ -223,6 +247,8 @@ class WorkerAdapter:
         # is all that deceptive-name checks need.
         unplaced = replace(identity, canonical_path=None)
         args: dict[str, Any] = {"engine": self.engine_id, "identity": unplaced.to_dict()}
+        if self.known_bad is not None:
+            args["known_bad"] = self.known_bad(identity.sha256)
         handle_from = None
         if stream is not None:
             import msvcrt

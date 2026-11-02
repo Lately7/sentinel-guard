@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from . import quarantine
 from .config import Settings
 from .db import Database
-from .engine.verdict import CLEAN, MALICIOUS, Verdict
+from .engine.verdict import CLEAN, MALICIOUS, Finding, Severity, Verdict
 from .gate_v2.contract import ActionCode
 from .gate_v2.legacy import UNKNOWN
 
 log = logging.getLogger(__name__)
+
+# Set in processes that run beside the service: while it answers, the action is
+# its own, decided on its own scan (R13b P9). Returns None when no service answers.
+delegate: Callable[[Verdict], dict[str, Any] | None] | None = None
 
 
 def top_reason(v: Verdict) -> str:
@@ -37,7 +42,18 @@ def _unaccepted(v: Verdict) -> bool:
     return decision is not None and "UNACCEPTED_DETECTION" in decision.reason_codes
 
 
+def escalate_origin(v: Verdict, reputation: dict[str, Any] | None) -> None:
+    # The browser tried to cancel this download because of the same URL verdict
+    # and lost the race; the verdict stays authoritative whatever the list's kind
+    # (phishing kits ship droppers too).
+    if reputation and reputation["verdict"] == "malicious" and v.label != MALICIOUS:
+        v.findings.append(Finding("origin", "origin.blocklisted_download", Severity.CRITICAL,
+                                  f"downloaded from {reputation['matched']} ({reputation['kind']}, {reputation['source']})",
+                                  100))
+
+
 NOT_QUARANTINED_VI = {
+    "NOT_CONFIRMED": "dịch vụ quét lại không xác nhận được phát hiện này",
     "CHANGED": "tệp đã đổi sau khi quét, sẽ quét lại",
     "IN_USE": "tệp đang chạy hoặc đang được dùng, hãy đóng chương trình rồi quét lại",
     "MISSING": "tệp không còn ở đó",
@@ -47,12 +63,26 @@ NOT_QUARANTINED_VI = {
 }
 
 
-def act_on(db: Database, v: Verdict, settings: Settings, source: str) -> dict[str, Any]:
-    """Record and (for malicious files) quarantine. Returns {label, quarantined, quarantine_id, error}."""
+def _quarantine(db: Database, v: Verdict, data: dict[str, Any], authority: bool) -> str:
+    done = delegate(v) if delegate is not None and not authority else None
+    if done is not None:
+        if done.get("quarantine_id"):
+            return str(done["quarantine_id"])
+        raise quarantine.QuarantineError(str(done.get("error") or "not confirmed"), str(done.get("code") or "NOT_CONFIRMED"))
+    decision = getattr(v, "decision", None)
+    return quarantine.quarantine(db, str(v.path), data, expected=decision.identity if decision else None)
+
+
+def act_on(db: Database, v: Verdict, settings: Settings, source: str,
+           *, extra: dict[str, Any] | None = None, authority: bool = False) -> dict[str, Any]:
+    """Record and (for malicious files) quarantine. Returns {label, quarantined, quarantine_id, error}.
+
+    `authority` is the service acting for itself: there is nobody left to ask.
+    """
     out: dict[str, Any] = {"label": v.label, "quarantined": False, "quarantine_id": None, "error": None}
     if v.label == CLEAN or not v.path:
         return out
-    data = v.to_dict()
+    data = {**v.to_dict(), **(extra or {})}
     if v.label == UNKNOWN:
         # Not checked is not an event per file; an engine that spoke but could not
         # be believed is, because someone should look at that file.
@@ -63,8 +93,7 @@ def act_on(db: Database, v: Verdict, settings: Settings, source: str) -> dict[st
     wanted = _wants_quarantine(v)
     if wanted and settings.auto_quarantine:
         try:
-            decision = getattr(v, "decision", None)
-            qid = quarantine.quarantine(db, v.path, data, expected=decision.identity if decision else None)
+            qid = _quarantine(db, v, data, authority)
             out.update(quarantined=True, quarantine_id=qid)
             db.add_event(source, "threat", "Đã cách ly mối đe dọa",
                          f"{v.name}: {top_reason(v)}", {**data, "quarantine_id": qid})

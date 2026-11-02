@@ -13,6 +13,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
+from typing import Any
 
 from .. import config, urlintel
 from ..db import Database
@@ -23,8 +24,8 @@ from ..gate_v2.analyzers.motw import MotwAdapter
 from ..gate_v2.analyzers.signer import SignerAdapter
 from ..gate_v2.clamd import ClamdAdapter
 from ..gate_v2.contract import (
-    CONTRACT_VERSION, EVIDENCE_POLICY_VERSION, LEGACY_POLICY_VERSION, EngineAdapter,
-    FileIdentity, FinalDecision, ScanRequest, VerdictCode,
+    CONTRACT_VERSION, EVIDENCE_POLICY_VERSION, LEGACY_POLICY_VERSION, CancellationToken,
+    EngineAdapter, FileIdentity, FinalDecision, ScanRequest, VerdictCode,
 )
 from ..gate_v2.core import CoreAdapter
 from ..gate_v2.defender import DefenderAdapter
@@ -54,8 +55,10 @@ class _Plan:
 class Scanner:
     def __init__(self, db: Database, *, use_defender: bool = True, use_clamav: bool = False,
                  clamav_engine: ClamAVEngine | None = None, signatures: SignatureEngine | None = None,
-                 defender_runner: defender.Runner | None = None) -> None:
+                 defender_runner: defender.Runner | None = None, isolation: Any | None = None) -> None:
         self.db = db
+        # Set in the service: parsing then runs in the restricted worker.
+        self.isolation = isolation
         self._sigs = signatures or SignatureEngine(db)
         self.want_defender = use_defender
         if clamav_engine is None and use_clamav and clamav.install_dir() is not None:
@@ -92,7 +95,10 @@ class Scanner:
         with self._lock:
             if self._rules is None:
                 packs = JsonRulesAdapter.from_directories(config.user_rules_dir(), tuple(self._sigs.bundled_dirs))
-                self._rules = (packs, YaraXAdapter(self._sigs.yara_sources()))
+                sources = self._sigs.yara_sources()
+                self._rules = (packs, YaraXAdapter(sources))
+                if self.isolation is not None:
+                    self.isolation.load(packs.sources, sources)
             return self._rules
 
     def _clamd_adapter(self) -> ClamdAdapter:
@@ -112,16 +118,22 @@ class Scanner:
 
     def _plan(self, name: str, head: bytes, has_path: bool) -> _Plan:
         packs, compiled = self._rule_adapters()
-        adapters: list[EngineAdapter] = [CoreAdapter(self._known_bad, name)]
+        iso = self.isolation
+
+        def contained(adapter: EngineAdapter) -> EngineAdapter:
+            return iso.adapter(adapter.engine_id) if iso is not None else adapter
+
+        adapters: list[EngineAdapter] = [iso.adapter("core", self._known_bad) if iso is not None
+                                         else CoreAdapter(self._known_bad, name)]
         required = {"core"}
         defaults: dict[str, str] = {}
         digests: list[tuple[str, str]] = []
         if packs.rules:
-            adapters.append(packs)
+            adapters.append(contained(packs))
             required.add("json_rules")
             digests.append(("json_rules", packs.ruleset_digest))
         if compiled.readiness() != "YARA_UNAVAILABLE":
-            adapters.append(compiled)
+            adapters.append(contained(compiled))
             required.add("yara_x")
             digests.append(("yara_x", compiled.ruleset_digest))
         if not digests:
@@ -154,7 +166,7 @@ class Scanner:
         else:
             defaults["defender"] = "skipped: not a risky file type"
 
-        adapters += [LnkAdapter(), SignerAdapter(), MotwAdapter(url_check=self._origin_listed)]
+        adapters += [contained(LnkAdapter()), contained(SignerAdapter()), MotwAdapter(url_check=self._origin_listed)]
         generation = str(self.db.generation())
         inputs = cache.GenerationInputs(
             EVIDENCE_POLICY_VERSION, CONTRACT_VERSION, "core-v2", ANALYZER_VERSIONS, tuple(digests),
@@ -168,14 +180,14 @@ class Scanner:
     # -- public API --------------------------------------------------------
 
     def scan_file(self, path: str | os.PathLike[str], *, use_cache: bool = True,
-                  barrier: ProtectionBarrier | None = None) -> legacy.GateVerdict:
+                  barrier: ProtectionBarrier | None = None, cancel: CancellationToken | None = None) -> legacy.GateVerdict:
         real = os.path.realpath(path)
         try:
             with open(real, "rb") as stream:
                 head = stream.read(HEAD_BYTES)
         except OSError:
             head = b""  # the gate reports why, through its own open
-        return self._scan(os.path.basename(real), real, None, head, use_cache, barrier)
+        return self._scan(os.path.basename(real), real, None, head, use_cache, barrier, cancel)
 
     def scan_bytes(self, data: bytes, name: str = "<memory>") -> legacy.GateVerdict:
         return self._scan(name, None, data, data[:HEAD_BYTES], False)
@@ -183,7 +195,7 @@ class Scanner:
     # -- internals ---------------------------------------------------------
 
     def _scan(self, name: str, path: str | None, data: bytes | None, head: bytes, use_cache: bool,
-              barrier: ProtectionBarrier | None = None) -> legacy.GateVerdict:
+              barrier: ProtectionBarrier | None = None, cancel: CancellationToken | None = None) -> legacy.GateVerdict:
         plan = self._plan(name, head, path is not None)
         generation = cache.gate_generation(plan.inputs)
         request = ScanRequest(CONTRACT_VERSION, uuid.uuid4().hex, "file", path, data, "on_demand",
@@ -207,7 +219,7 @@ class Scanner:
         decision = run_gate(request, adapters=plan.adapters, stages=plan.stages, gate_generation=generation,
                             auto_quarantine=True, max_bytes=config.MAX_SCAN_BYTES,
                             resident_limit=config.MAX_DEEP_SCAN_BYTES, short_circuit=known,
-                            current_protection_generation=barrier.current if barrier else None)
+                            current_protection_generation=barrier.current if barrier else None, cancel=cancel)
         if not served:
             cache.store(self.db, decision, time.time())
         verdict = legacy.project(decision, name=name, path=path, stage_defaults=plan.defaults)

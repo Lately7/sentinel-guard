@@ -46,7 +46,7 @@ class FakeBackend:
     def can_read(self, caller: Caller, path: str) -> bool:
         return path in self.readable
 
-    def submit_scan(self, path: str, *, reason: str, url: str | None) -> str:
+    def submit_scan(self, path: str, *, reason: str, url: str | None, caller: Caller) -> str:
         self.submitted.append((path, reason, url))
         return f"job{len(self.submitted)}"
 
@@ -220,11 +220,11 @@ def test_concurrent_requests_cannot_overshoot_the_job_cap(svc, monkeypatch):
     entered, release, lock = [], threading.Event(), threading.Lock()
     submit = backend.submit_scan
 
-    def slow(path, *, reason, url):
+    def slow(path, *, reason, url, caller):
         with lock:
             entered.append(path)
         assert release.wait(5)
-        return f"{submit(path, reason=reason, url=url)}-{threading.get_ident()}"
+        return f"{submit(path, reason=reason, url=url, caller=caller)}-{threading.get_ident()}"
 
     backend.submit_scan = slow
     replies: list[dict] = []

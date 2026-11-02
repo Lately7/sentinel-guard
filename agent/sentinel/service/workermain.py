@@ -14,13 +14,16 @@ import os
 import sys
 from typing import Any
 
+from ..gate_v2.analyzers.lnk import LnkAdapter
+from ..gate_v2.analyzers.signer import SignerAdapter
 from ..gate_v2.content import BoundReader, ContentError
 from ..gate_v2.contract import ContractError, FileIdentity, ScanRequest
 from ..gate_v2.core import CoreAdapter
 from ..gate_v2.rules import JsonRulesAdapter, YaraXAdapter
 from .protocol import ProtocolError, read_frame, write_frame
 
-ENGINES = ("core", "json_rules", "yara_x")
+# MotW is not here: it reads a stream by name, and this process never gets one.
+ENGINES = ("core", "json_rules", "yara_x", "lnk", "signer")
 
 
 class _NeverCancel:
@@ -46,7 +49,8 @@ class Worker:
     def init(self, args: dict[str, Any]) -> dict[str, Any]:
         packs = tuple((str(n), base64.b64decode(b), bool(u)) for n, b, u in args.get("json_packs", []))
         sources = tuple((str(ns), str(n), str(s)) for ns, n, s in args.get("yara_sources", []))
-        self.adapters = {"core": CoreAdapter(), "json_rules": JsonRulesAdapter(packs)}
+        self.adapters = {"core": CoreAdapter(), "json_rules": JsonRulesAdapter(packs),
+                         "lnk": LnkAdapter(), "signer": SignerAdapter()}
         if sources:
             self.adapters["yara_x"] = YaraXAdapter(sources)
         return {"engines": sorted(self.adapters),
@@ -56,6 +60,10 @@ class Worker:
         adapter = self.adapters.get(args.get("engine"))
         if adapter is None:
             raise ProtocolError("UNKNOWN_ENGINE")
+        if args["engine"] == "core":
+            # The hash lists live with the service; this process has no database.
+            feed = args.get("known_bad")
+            adapter = CoreAdapter(lambda digest: feed)
         request = ScanRequest.from_dict(args["request"])
         identity = FileIdentity.from_dict(args["identity"])
         handle = args.get("handle")

@@ -14,6 +14,7 @@ import os
 import secrets
 import threading
 from ctypes import wintypes
+from dataclasses import replace
 from typing import Any
 
 from .authz import Caller
@@ -29,8 +30,13 @@ PIPE_NAME = r"\\.\pipe\SentinelGuard\v1"
 SERVICE_SDDL = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x0012008B;;;IU)"
 MAX_CONNECTIONS = 32
 BUFFER = 64 * 1024
-SE_KERNEL_OBJECT = 6
+SE_FILE_OBJECT, SE_KERNEL_OBJECT = 1, 6
 OWNER_SECURITY_INFORMATION = 0x1
+FILE_OBJECT_SECURITY = 0x7  # owner, group and DACL: what AccessCheck needs
+FILE_READ_DATA, FILE_READ_ATTRIBUTES, READ_CONTROL = 0x1, 0x80, 0x00020000
+FILE_SHARE_ALL = 0x7
+FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_GENERIC_EXECUTE, FILE_ALL_ACCESS = 0x120089, 0x120116, 0x1200A0, 0x1F01FF
 
 if os.name == "nt":
     _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -49,7 +55,7 @@ if os.name == "nt":
     ERROR_BROKEN_PIPE = 109
     ERROR_NO_DATA = 232
     ERROR_PIPE_NOT_CONNECTED = 233  # the other side disconnected: end of stream
-    TOKEN_QUERY = 0x8
+    TOKEN_QUERY, TOKEN_DUPLICATE = 0x8, 0x2
     TokenUser, TokenElevation, TokenIntegrityLevel, TokenSessionId = 1, 20, 25, 12
     INVALID_HANDLE = wintypes.HANDLE(-1).value
 
@@ -95,6 +101,9 @@ if os.name == "nt":
     _adv.CreateWellKnownSid.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD)]
     _adv.DuplicateToken.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.POINTER(wintypes.HANDLE)]
     _adv.CheckTokenMembership.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.POINTER(wintypes.BOOL)]
+    _adv.AccessCheck.argtypes = [ctypes.c_void_p, wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p, ctypes.c_void_p,
+                                 ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD),
+                                 ctypes.POINTER(wintypes.BOOL)]
 
 
 class PipeError(OSError):
@@ -226,17 +235,66 @@ def server_pipe_owner(stream: PipeStream) -> str:
         _k32.LocalFree(descriptor)
 
 
+def duplicate_token(token: int) -> int:
+    """A token of our own, for work that outlives the connection it came from."""
+    dup = wintypes.HANDLE()
+    if not _adv.DuplicateToken(token, 1, ctypes.byref(dup)):  # SecurityIdentification
+        raise _fail("DuplicateToken")
+    return int(dup.value)
+
+
+def close_token(token: int) -> None:
+    _k32.CloseHandle(token)
+
+
+class GENERIC_MAPPING(ctypes.Structure):
+    _fields_ = [("read", wintypes.DWORD), ("write", wintypes.DWORD),
+                ("execute", wintypes.DWORD), ("all", wintypes.DWORD)]
+
+
+def client_can_read(token: int | None, path: str) -> bool:
+    """Whether the file's own DACL lets this client read it.
+
+    AccessCheck rather than impersonation: clients connect at identification
+    level, so that a squatter on the pipe name can never act as them, and at
+    that level the service can ask about a token but not open files with it.
+    """
+    if os.name != "nt" or token is None:
+        return False
+    handle = _k32.CreateFileW(path, READ_CONTROL | FILE_READ_ATTRIBUTES, FILE_SHARE_ALL, None, OPEN_EXISTING,
+                              FILE_FLAG_BACKUP_SEMANTICS, None)
+    if handle in (None, INVALID_HANDLE):
+        return False
+    descriptor = ctypes.c_void_p()
+    try:
+        if _adv.GetSecurityInfo(handle, SE_FILE_OBJECT, FILE_OBJECT_SECURITY, None, None, None, None,
+                                ctypes.byref(descriptor)):
+            return False
+        mapping = GENERIC_MAPPING(FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_GENERIC_EXECUTE, FILE_ALL_ACCESS)
+        privileges = ctypes.create_string_buffer(256)
+        size, granted, allowed = wintypes.DWORD(len(privileges)), wintypes.DWORD(0), wintypes.BOOL(False)
+        if not _adv.AccessCheck(descriptor, token, FILE_READ_DATA, ctypes.byref(mapping), privileges,
+                                ctypes.byref(size), ctypes.byref(granted), ctypes.byref(allowed)):
+            return False
+        return bool(allowed.value)
+    finally:
+        if descriptor:
+            _k32.LocalFree(descriptor)
+        _k32.CloseHandle(handle)
+
+
 def _identify_client(handle: int) -> Caller:
     if not _adv.ImpersonateNamedPipeClient(handle):
         raise _fail("ImpersonateNamedPipeClient")
     try:
         token = wintypes.HANDLE()
-        if not _adv.OpenThreadToken(_k32.GetCurrentThread(), TOKEN_QUERY, True, ctypes.byref(token)):
+        if not _adv.OpenThreadToken(_k32.GetCurrentThread(), TOKEN_QUERY | TOKEN_DUPLICATE, True, ctypes.byref(token)):
             raise _fail("OpenThreadToken")
         try:
-            return caller_from_token(token.value)
-        finally:
+            return replace(caller_from_token(token.value), token=int(token.value))
+        except BaseException:
             _k32.CloseHandle(token)
+            raise
     finally:
         # Never keep running as the client, whatever happened above.
         if not _adv.RevertToSelf():
@@ -316,6 +374,8 @@ class PipeServer:
         except PipeError:
             return
         finally:
+            if caller is not None and caller.token is not None:
+                close_token(caller.token)
             _k32.DisconnectNamedPipe(handle)
             stream.close()
             self._slots.release()

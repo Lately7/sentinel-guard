@@ -126,6 +126,7 @@ class JsonRulesAdapter:
     reopens_path = False
 
     def __init__(self, packs: tuple[tuple[str, bytes, bool], ...]) -> None:
+        self.sources = packs
         self.rules: list[_Pattern] = []
         records: list[SourceRecord] = []
         for name, raw, user in packs:

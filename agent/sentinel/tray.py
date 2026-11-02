@@ -21,6 +21,7 @@ from .engine.signatures import SignatureEngine
 from .gate_ui import GatePanel
 from .engine_status import EngineStatus
 from .overview_ui import Overview
+from .service.bridge import install as install_lease
 from .singleton import AppInstance
 from .watcher import RealtimeProtection
 
@@ -57,6 +58,9 @@ class App:
             self.db.add_event("system", "warning", "Cơ sở dữ liệu bị hỏng và đã được tạo lại",
                               f"Bản hỏng được giữ tại {moved}. Danh sách mối đe dọa sẽ được tải lại.")
         self.db.prune_cache()
+        quarantine.reconcile(self.db)
+        self.lease = install_lease()
+        self._service_items: set[str] = set()
         self.scanner = Scanner(self.db, use_defender=self.settings.use_defender, use_clamav=self.settings.use_clamav)
         self.gate: GatePanel | None = None
         self.engine_status = EngineStatus(self.scanner, on_change=lambda: self.ui(self.refresh))
@@ -142,6 +146,9 @@ class App:
 
     def toggle_realtime(self) -> None:
         if self.realtime and self.realtime.running:
+            # Turning protection off is the service's to allow, if there is one.
+            if self.lease.available() and not self.lease.approve("disable_protection", {}):
+                return
             # Called on the Tk thread: wait briefly. A quarantine that already
             # started finishes on its own; none can start after this.
             closed = self.realtime.stop(timeout=2.0)
@@ -152,6 +159,7 @@ class App:
                 detail += " Một thao tác cách ly bắt đầu trước khi tắt vẫn đang chạy cho xong."
             self.db.add_event("system", "warning", "Bảo vệ thời gian thực đã TẮT", detail)
         else:
+            self.lease.enable_protection()
             self.settings.realtime = True
             self.start_realtime()
         self.settings.save()
@@ -319,6 +327,11 @@ class App:
                                           LEVEL_VI.get(e["level"], e["level"])), e["level"])
                                for e in self._events.values()])
         items = []
+        held = self.lease.quarantine_items() or []
+        self._service_items = {q["id"] for q in held}
+        for q in held:
+            items.append((q["id"], (os.path.basename(q["original_path"]), _fmt_ts(q["ts"]), "Do dịch vụ giữ",
+                                    os.path.dirname(q["original_path"])), "threat"))
         for q in self.db.quarantine_items():
             try:
                 why = json.loads(q["verdict"])["findings"][0]["detail"]
@@ -345,6 +358,10 @@ class App:
                                         "khi quét. Bản sao ở nơi khác vẫn bị chặn."):
             return
         for qid in sel:
+            if qid in self._service_items:
+                if not self.lease.approve("restore_quarantine", {"quarantine_id": qid}):
+                    messagebox.showerror(APP, "Chưa khôi phục: cần xác nhận của quản trị viên.")
+                continue
             try:
                 p = quarantine.restore(self.db, qid)
                 self.db.add_event("system", "warning", "Đã khôi phục tệp từ cách ly", str(p))
@@ -356,7 +373,10 @@ class App:
         sel = self.q_tv.selection()
         if sel and messagebox.askyesno(APP, f"Xóa vĩnh viễn {len(sel)} tệp? Không thể hoàn tác."):
             for qid in sel:
-                quarantine.delete(self.db, qid)
+                if qid not in self._service_items:
+                    quarantine.delete(self.db, qid)
+                elif not self.lease.approve("delete_quarantine", {"quarantine_id": qid}):
+                    messagebox.showerror(APP, "Chưa xóa: cần xác nhận của quản trị viên.")
             self.refresh()
 
     def unallow_selected(self) -> None:

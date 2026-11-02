@@ -26,7 +26,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
     from .db import Database
     from .engine.scanner import Scanner
     from .protection import act_on, top_reason
+    from .service.bridge import install as install_lease
 
+    install_lease()
     db = Database()
     settings = config.Settings.load()
     settings.auto_quarantine = args.quarantine
@@ -127,11 +129,20 @@ def cmd_block(args: argparse.Namespace) -> int:
 def cmd_quarantine(args: argparse.Namespace) -> int:
     from . import quarantine
     from .db import Database
+    from .service.bridge import lease
 
     db = Database()
+    quarantine.reconcile(db)
+    held = lease.quarantine_items() or []
     if args.action == "list":
-        for q in db.quarantine_items():
+        for q in [*held, *db.quarantine_items()]:
             print(f"{q['id']}  {q['original_path']}  {q['sha256'][:16]}")
+    elif any(q["id"] == args.id for q in held):
+        # Held by the service: only its confirmation can release it.
+        kind = "restore_quarantine" if args.action == "restore" else "delete_quarantine"
+        if not lease.approve(kind, {"quarantine_id": args.id}):
+            print("Chưa thực hiện: cần xác nhận của quản trị viên.", file=sys.stderr)
+            return 1
     elif args.action == "restore":
         print(quarantine.restore(db, args.id))
     elif args.action == "delete":
@@ -198,8 +209,10 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
     from .db import Database
     from .engine.scanner import Scanner
+    from .service.bridge import install as install_lease
     from .watcher import RealtimeProtection
 
+    install_lease()
     settings = config.Settings.load()
     if args.dirs:
         settings.watch_dirs = args.dirs

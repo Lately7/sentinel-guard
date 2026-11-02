@@ -10,7 +10,7 @@ approve.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .protocol import Op
 
@@ -24,6 +24,9 @@ class Caller:
     integrity: str
     is_admin: bool  # an elevated token with the Administrators group enabled
     remote: bool = False
+    # The pipe client's token, alive for the connection: what the service checks
+    # file access against. Never part of who the caller is.
+    token: int | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.integrity not in INTEGRITY_LEVELS:
