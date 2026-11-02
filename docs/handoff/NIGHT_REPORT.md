@@ -126,6 +126,31 @@ Tôi còn một điểm dè dặt với Codex: không chụp bản sao tệp cho
 sao có thể bị chính Defender/Malwarebytes cách ly), dùng kiểm tra identity
 trước/sau.
 
+## 2d. A1 — ranh giới dịch vụ có quyền (tôi viết, không cần admin)
+
+Anh/chị bảo làm tiếp, nên tôi làm A1 song song khi Codex viết mốc 3:
+
+* `agent/sentinel/service/protocol.py`: khung 4 byte + JSON, tối đa 1 MiB,
+  kiểm schema từng lệnh, từ chối tham số lạ.
+* `authz.py` + `core.py` (`ServiceCore`): lệnh thường (trạng thái, tra URL,
+  xin quét tệp mà chính người gọi đọc được, báo tệp tải về) không bao giờ làm
+  yếu bảo vệ. **Tắt bảo vệ, "Luôn tin cậy", khôi phục, loại trừ, duyệt sửa**
+  thành *kế hoạch*: ai cũng xin được, nhưng chỉ token admin đã nâng quyền
+  (hộp xác nhận UAC) cùng phiên mới đọc và duyệt được; dùng một lần, hết hạn
+  2 phút, nội dung do dịch vụ viết. Chỉ nhận đường dẫn ổ đĩa cục bộ, giới hạn
+  tốc độ theo người gọi, lỗi không lộ chi tiết.
+* `winpipe.py`: named pipe thật bằng `ctypes`; danh tính lấy từ **token** của
+  client (SID, integrity, admin, phiên), chống chiếm tên pipe, chặn máy khác,
+  client chỉ cho phép mức "nhận diện".
+* `client.py`: client dùng chung cho khay, native host, hộp xác nhận.
+
+36 test đạt, chạy ở mức medium (không admin). Thử phá có chủ đích: tắt luật
+nâng quyền → 2 test đỏ; bỏ ràng buộc phiên → 1 test đỏ. Trong lúc thử phá tôi
+phát hiện một test có thể làm **treo pytest** khi nó fail (socket không
+đóng) — đã sửa. Chưa làm: vỏ dịch vụ Windows, hộp xác nhận UAC, DACL thật cho
+mọi user, script `tools/admin_acceptance.ps1` (cần anh/chị chạy với quyền
+admin).
+
 ## 3. Watcher (RT-016, RT-017, RT-018) và allowlist (RT-021)
 
 * **RT-016**: tệp bị chương trình khác giữ được thử lại sau 0,5 / 2 / 8 /
