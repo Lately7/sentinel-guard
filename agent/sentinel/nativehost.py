@@ -125,14 +125,20 @@ class Host:
         return {"version": version, "total": len(hosts), "offset": offset, "hosts": page}
 
     def on_get_allowlist(self, msg: dict[str, Any]) -> dict[str, Any]:
+        # Paged like the blocklist (RT-021: it used to stop silently at 5,000
+        # hosts). Callers without an offset get the first page.
+        offset = _int(msg, "offset", 0, 0, 10_000_000)
+        limit = _int(msg, "limit", PAGE_LIMIT, 1, PAGE_LIMIT)
+        version = self.db.allow_version()
+        everything = self.db.allowed_hosts()
         hosts: list[str] = []
         size = 0
-        for h in self.db.allowed_hosts()[:5000]:  # 5000 = extension's allow-rule budget
+        for h in everything[offset:offset + limit]:
             size += len(h) + 4
-            if size > PAGE_BYTES:
+            if size > PAGE_BYTES and hosts:
                 break
             hosts.append(h)
-        return {"allow_version": self.db.allow_version(), "hosts": hosts}
+        return {"allow_version": version, "total": len(everything), "offset": offset, "hosts": hosts}
 
     def on_scan_download(self, msg: dict[str, Any]) -> dict[str, Any]:
         path = _str(msg, "path", max_len=4096)

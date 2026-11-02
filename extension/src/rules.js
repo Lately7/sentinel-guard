@@ -65,19 +65,27 @@ export function buildOnceRule(id, host, tabId) {
   };
 }
 
+// Lowercase ASCII labels separated by single dots: Chromium rejects a whole
+// updateDynamicRules call when one requestDomains entry is malformed.
+const VALID_HOST = /^[a-z0-9_-]+(\.[a-z0-9_-]+)*$/;
+
 export function buildAllowRules(hosts) {
-  return hosts
-    .filter((h) => typeof h === "string" && /^[a-z0-9._-]+$/.test(h))
-    .slice(0, 5000)
-    .map((h, i) => ({
-      id: ALLOW_BASE_ID + i,
+  const valid = [...new Set(hosts.filter((h) => typeof h === "string" && VALID_HOST.test(h)))];
+  const rules = [];
+  // Grouped like the block rules, so the number of trusted sites is not
+  // limited by the dynamic-rule budget (RT-021: it was cut at 5,000).
+  for (let i = 0; i < valid.length; i += CHUNK) {
+    rules.push({
+      id: ALLOW_BASE_ID + rules.length,
       priority: 10,
       // "allow" exempts only requests *to* the trusted host. allowAllRequests
       // would also exempt everything a trusted page loads, so a compromised
       // trusted site could pull scripts from blocklisted malware hosts.
       action: { type: "allow" },
-      condition: { requestDomains: [h], resourceTypes: ALL_RESOURCE_TYPES },
-    }));
+      condition: { requestDomains: valid.slice(i, i + CHUNK), resourceTypes: ALL_RESOURCE_TYPES },
+    });
+  }
+  return rules;
 }
 
 export const KIND_LABELS = {

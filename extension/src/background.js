@@ -3,6 +3,7 @@ import { buildBlockRules, buildAllowRules, buildOnceRule, ALLOW_BASE_ID, ONCE_BA
 import * as native from "./native.js";
 import { VALID } from "./messages.js";
 import { recordFailure, recordSuccess, retryable } from "./pending.js";
+import { fetchAllowlist } from "./allowlist.js";
 
 const WARN_AT = 70; // heuristic score that earns a full-page warning
 const NOTE_AT = 40; // heuristic score shown in the popup / in-page banner
@@ -148,9 +149,10 @@ async function doSync(force) {
   if (force || state.pendingAllow.length || hello.allow_version !== state.allowVersion) {
     // The agent's list is authoritative: a site un-trusted in the dashboard
     // must lose its exemption here too.
-    const res = await native.request("get_allowlist");
-    allowHosts = res.hosts.filter((h) => typeof h === "string");
-    await chrome.storage.local.set({ allowHosts, allowVersion: res.allow_version });
+    const res = await fetchAllowlist((offset) => native.request("get_allowlist", { offset }));
+    if (!res) return { ok: false, error: "allowlist kept changing during sync" };
+    allowHosts = res.hosts;
+    await chrome.storage.local.set({ allowHosts, allowVersion: res.version });
   }
   const blocklistChanged = force || hello.blocklist_version !== state.blocklistVersion;
   if (!blocklistChanged) {
