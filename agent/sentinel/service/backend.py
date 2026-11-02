@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import threading
+import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable
@@ -20,29 +21,38 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .. import __version__, config, feeds, quarantine, urlintel
+from .. import __version__, config, feeds, quarantine, urlintel, yarafeed
 from ..db import Database
 from ..engine import clamav
 from ..engine.scanner import Scanner
+from ..engine.signatures import SignatureEngine
 from ..engine.verdict import Verdict
-from ..gate_v2 import identity
+from ..gate_v2 import identity, scope
 from ..gate_v2.actions import ProtectionBarrier, ProtectionStopped
 from ..protection import act_on, escalate_origin, top_reason
 from . import winpipe
 from .authz import Caller
+from .observers import DbCursorStore, Observers
+from .procwatch import ProcessWatcher, windows_resolve, windows_snapshot
 from .protocol import ProtocolError
+from .rescan import DbDownloadStore, Download, RescanQueue
+from .usn import WindowsVolume
 
 log = logging.getLogger(__name__)
 
 SCAN_THREADS = 2
 MAX_KEPT_JOBS = 4096
+# Work nobody asked for waits behind work somebody is waiting on, and it is bounded:
+# past this a burst of changes is counted and left to the next reconciliation.
+MAX_OBSERVED = 2048
 # A stop or an approved "off" waits this long for an action already running.
 OFF_BARRIER_SECONDS = 20.0
 MAINTENANCE_SECONDS = 600.0
 PAGE_BYTES = 600_000  # a frame holds 1 MiB, and a page of long names can exceed that
 HOST = re.compile(r"(?=.{1,253}\Z)[a-z0-9-]+(\.[a-z0-9-]+)*\Z")
 OFF_META = "protection_off"
-SOURCES = {"download": "download", "on_demand": "scan"}
+SOURCES = {"download": "download", "on_demand": "scan", "journal": "realtime", "process": "realtime",
+           "reconcile": "realtime", "rescan": "rescan"}
 
 
 def shown(text: str) -> str:
@@ -76,6 +86,7 @@ class _Job:
     cancel: _Cancel = field(default_factory=_Cancel)
     state: str = "queued"
     result: dict[str, Any] = field(default_factory=dict)
+    use_cache: bool = True
 
 
 class ProductBackend:
@@ -83,7 +94,9 @@ class ProductBackend:
                  barrier: ProtectionBarrier | None = None,
                  readable: Callable[[int | None, str], bool] = winpipe.client_can_read,
                  own_token: Callable[[int], int] = winpipe.duplicate_token,
-                 drop_token: Callable[[int], None] = winpipe.close_token) -> None:
+                 drop_token: Callable[[int], None] = winpipe.close_token,
+                 file_owner: Callable[[str], str | None] = winpipe.file_owner,
+                 observers: Callable[[ProductBackend], Observers | None] = lambda backend: None) -> None:
         self.db = db
         self.settings = settings
         self.scanner = scanner
@@ -91,11 +104,17 @@ class ProductBackend:
         self._readable = readable
         self._own_token = own_token
         self._drop_token = drop_token
+        self._file_owner = file_owner
         self._jobs: OrderedDict[str, _Job] = OrderedDict()
         self._lock = threading.Lock()
         self._pool = ThreadPoolExecutor(max_workers=SCAN_THREADS, thread_name_prefix="service-scan")
+        self._observed_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="service-observed")
+        self._observed = threading.BoundedSemaphore(MAX_OBSERVED)
         self._stop = threading.Event()
         self._maintenance: threading.Thread | None = None
+        self.rescans = RescanQueue(DbDownloadStore(db))
+        self._rule_generation: str | None = None
+        self.observers = observers(self)
 
     # -- lifecycle
 
@@ -107,10 +126,14 @@ class ProductBackend:
             self.barrier.revoke(0)  # "off" was approved; a restart must not undo it
         self._maintenance = threading.Thread(target=self._maintain, name="service-maintenance", daemon=True)
         self._maintenance.start()
+        if self.observers is not None:
+            self.observers.start()
 
     def stop(self, timeout: float) -> bool:
         """True once no action can run. Safe to call again while it answers False."""
         self._stop.set()
+        if self.observers is not None:
+            self.observers.stop()
         closed = self.barrier.revoke(timeout)
         with self._lock:
             jobs = list(self._jobs.values())
@@ -118,6 +141,7 @@ class ProductBackend:
             job.cancel.cancel()
         if closed:
             self._pool.shutdown(wait=False, cancel_futures=True)
+            self._observed_pool.shutdown(wait=False, cancel_futures=True)
             if self.scanner.isolation is not None:
                 self.scanner.isolation.close()
         return closed
@@ -129,15 +153,31 @@ class ProductBackend:
                 self.db.prune_cache()
                 if feeds.is_due(self.db, self.settings.feed_interval_hours):
                     feeds.update_all(self.db)
+                if feeds.engine_update_due(self.db, "yara", 24 * 3600):
+                    res = yarafeed.update()
+                    feeds.record_engine_update(self.db, "yara", res)
+                    if res.startswith("ok"):
+                        self.scanner.sigs = SignatureEngine(self.db)
+                self.rescan_on_new_rules()
             except Exception:
                 log.exception("maintenance failed")
+
+    def rescan_on_new_rules(self) -> None:
+        generation = self.scanner.gate_id()
+        if self._rule_generation not in (None, generation):
+            self.rescans.signatures_changed(generation)
+            while (item := self.rescans.pop()) is not None:
+                self.observe(item.path, "rescan", True)
+        self._rule_generation = generation
 
     # -- reads
 
     def status(self) -> dict[str, Any]:
         return {"version": __version__, "realtime": self.barrier.current() is not None,
                 "quarantined": len(self.db.quarantine_items()), "blocklist_version": self.db.get_meta("blocklist_version", "0"),
-                "allow_version": self.db.allow_version()}
+                "allow_version": self.db.allow_version(),
+                # Said out loud: seeing a file after it appeared is not stopping it.
+                "observation": self.observers.report() if self.observers is not None else {"prevention": "none"}}
 
     def check_url(self, url: str) -> dict[str, Any]:
         return urlintel.check(self.db, url)
@@ -177,6 +217,24 @@ class ProductBackend:
         self._pool.submit(self._run, job)
         return job.job_id
 
+    def observe(self, path: str, reason: str, fresh: bool = False) -> bool:
+        """Work the service gave itself; False when the queue is full."""
+        if self._stop.is_set() or not self._observed.acquire(blocking=False):
+            return False
+        job = _Job(uuid.uuid4().hex, path, reason, None, self._file_owner(path) or "", None, use_cache=not fresh)
+        try:
+            self._observed_pool.submit(self._run_observed, job)
+        except RuntimeError:  # the pool is shutting down
+            self._observed.release()
+            return False
+        return True
+
+    def _run_observed(self, job: _Job) -> None:
+        try:
+            self._run(job)
+        finally:
+            self._observed.release()
+
     def _trim(self) -> None:
         for job_id in list(self._jobs):
             if len(self._jobs) <= MAX_KEPT_JOBS:
@@ -203,7 +261,7 @@ class ProductBackend:
                 job.state = "cancelled"
                 return
             job.state = "running"
-            verdict = self.scanner.scan_file(job.path, barrier=self.barrier, cancel=job.cancel)
+            verdict = self.scanner.scan_file(job.path, barrier=self.barrier, cancel=job.cancel, use_cache=job.use_cache)
             reputation = urlintel.check(self.db, job.url) if job.url else None
             escalate_origin(verdict, reputation)
             if job.cancel.cancelled() and verdict.label != "malicious":
@@ -242,7 +300,15 @@ class ProductBackend:
                   "trusted": bool(decision) and "USER_TRUST" in decision.reason_codes}
         if outcome.get("error"):
             result["code"] = "NOT_QUARANTINED"
+        if job.reason == "download" and decision is not None and not outcome["quarantined"]:
+            self._remember_download(job, decision)
         return result
+
+    def _remember_download(self, job: _Job, decision: Any) -> None:
+        seen = decision.identity
+        if seen.volume_serial is not None and seen.file_id_hex is not None:
+            self.rescans.remember(Download(seen.volume_serial, int(seen.file_id_hex, 16), job.path, seen.sha256,
+                                           self.scanner.gate_id(), time.time()))
 
     # -- plans
 
@@ -325,6 +391,25 @@ def _host(host: str) -> str | None:
     return ascii_host if HOST.fullmatch(ascii_host) else None
 
 
+def _machine_observers(backend: ProductBackend) -> Observers:
+    volumes = []
+    for root in scope.fixed_drives():
+        try:
+            volumes.append(WindowsVolume(root))
+        except OSError:
+            log.warning("no journal for %s", root)
+
+    def reconcile() -> None:
+        # Autostart and what is running now; the folders of each user are the tray's.
+        for target in scope.discover("smart", scope.windows_sources("smart", []), data_root=str(config.data_dir())):
+            if not backend.observe(target.path, "reconcile"):
+                return
+
+    return Observers(backend.observe, volumes, DbCursorStore(backend.db),
+                     processes=ProcessWatcher(windows_snapshot, windows_resolve), rescans=backend.rescans,
+                     reconcile=reconcile, data_root=str(config.data_dir()))
+
+
 def build(state_db: Path | None = None) -> ProductBackend:
     from .workerclient import Isolation
 
@@ -335,4 +420,4 @@ def build(state_db: Path | None = None) -> ProductBackend:
     # Until it can run restricted, a ClamAV hit stays with the user's own process
     # (bridge.ServiceLease.confirm) instead of a parser running with full rights.
     scanner = Scanner(db, use_defender=settings.use_defender, use_clamav=False, isolation=Isolation())
-    return ProductBackend(db, settings, scanner)
+    return ProductBackend(db, settings, scanner, observers=_machine_observers)

@@ -10,7 +10,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from .config import Settings
+from .config import Settings, data_dir
 from .db import Database
 from .engine.scanner import Scanner
 from .engine.verdict import Verdict
@@ -73,6 +73,7 @@ class ScanQueue:
         # Every automatic action runs inside it; stop() revokes it, so no action
         # of this run can start afterwards or still be in progress (RT-018).
         self.barrier = ProtectionBarrier()
+        self._own_data = os.path.normcase(str(data_dir())) + os.sep
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="scan-queue", daemon=True)
@@ -93,6 +94,10 @@ class ScanQueue:
         return self.barrier.revoke(timeout)
 
     def submit(self, path: str) -> None:
+        # Our own data is not news: a feed snapshot or quarantine blob changing
+        # here would otherwise scan itself in a loop (RT-003).
+        if os.path.normcase(path).startswith(self._own_data):
+            return
         partial = path.lower().endswith(PARTIAL_SUFFIXES)
         settle = PARTIAL_SETTLE_SECONDS if partial else SETTLE_SECONDS
         max_age = PARTIAL_MAX_AGE_SECONDS if partial else MAX_AGE_SECONDS

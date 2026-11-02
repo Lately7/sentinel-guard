@@ -15,6 +15,7 @@ from . import config
 from .db import Database
 from .engine.scanner import Scanner
 from .engine.verdict import CLEAN, MALICIOUS, Verdict
+from .gate_v2 import scope
 from .gate_v2.legacy import UNKNOWN
 from .protection import act_on
 
@@ -44,6 +45,12 @@ def _skip_dirs() -> set[str]:
     # The agent's own data holds the quarantine (inert, but still the bytes of
     # threats) and ClamAV's signature database; scanning them only produces noise.
     return {os.path.normcase(str(config.data_dir()))}
+
+
+def discovery(profile: str, settings: config.Settings) -> scope.Discovery:
+    """What a smart or deep scan covers: autostart, what is running, the watched folders."""
+    return scope.discover(profile, scope.windows_sources(profile, list(settings.watch_dirs)),
+                          data_root=str(config.data_dir()))
 
 
 def walk(paths: list[str], cancel: threading.Event, errors: list[str] | None = None) -> Iterator[str]:
@@ -97,6 +104,8 @@ class ScanProgress:
     current: str = ""
     cancelled: bool = False
     errors: list[str] = field(default_factory=list)
+    # Sources a smart or deep scan could not look at, by reason: never the same as nothing there.
+    uncovered: dict[str, int] = field(default_factory=dict)
 
     @property
     def running(self) -> bool:
@@ -110,8 +119,10 @@ class ScanProgress:
 class ScanJob:
     def __init__(self, scanner: Scanner, db: Database, settings: config.Settings, paths: list[str], title: str,
                  on_result: Callable[[dict, dict], None] | None = None,
-                 on_done: Callable[[ScanProgress], None] | None = None) -> None:
+                 on_done: Callable[[ScanProgress], None] | None = None,
+                 found: scope.Discovery | None = None) -> None:
         self.scanner = scanner
+        self.found = found
         self.db = db
         self.settings = settings
         self.progress = ScanProgress(title, list(paths))
@@ -130,10 +141,19 @@ class ScanJob:
     def join(self, timeout: float | None = None) -> None:
         self._thread.join(timeout)
 
+    def _files(self) -> Iterator[str]:
+        if self.found is None:
+            yield from walk(self.progress.paths, self.cancel_event, self.progress.errors)
+            return
+        for target in self.found:
+            if self.cancel_event.is_set():
+                return
+            yield target.path
+
     def _run(self) -> None:
         p = self.progress
         try:
-            for f in walk(p.paths, self.cancel_event, p.errors):
+            for f in self._files():
                 p.current = f
                 try:
                     v = self.scanner.scan_file(f)
@@ -145,13 +165,16 @@ class ScanJob:
                 self._account(v)
             p.cancelled = self.cancel_event.is_set()
         finally:
+            if self.found is not None:
+                p.uncovered = {reason: n for reason, n in self.found.report.reasons.items()
+                               if reason not in scope.NOT_A_GAP}
             p.finished = time.time()
             p.current = ""
             level = "warning" if p.detections else "info"
             self.db.add_event("scan", level, "Đã dừng quét" if p.cancelled else "Quét xong",
                               f"{p.title}: {p.scanned} tệp, {p.detections} phát hiện, {p.quarantined} đã cách ly",
                               {"paths": p.paths, "unverified": p.unverified, "unreadable": p.unreadable,
-                               "unknown": p.unknown})
+                               "unknown": p.unknown, "uncovered": p.uncovered})
             if self.on_done:
                 self.on_done(p)
 

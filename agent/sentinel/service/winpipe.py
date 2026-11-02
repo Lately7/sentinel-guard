@@ -283,6 +283,28 @@ def client_can_read(token: int | None, path: str) -> bool:
         _k32.CloseHandle(handle)
 
 
+def file_owner(path: str) -> str | None:
+    """Whose file this is, for work no client asked for: they should see what happened to it."""
+    if os.name != "nt":
+        return None
+    handle = _k32.CreateFileW(path, READ_CONTROL | FILE_READ_ATTRIBUTES, FILE_SHARE_ALL, None, OPEN_EXISTING,
+                              FILE_FLAG_BACKUP_SEMANTICS, None)
+    if handle in (None, INVALID_HANDLE):
+        return None
+    owner, descriptor = ctypes.c_void_p(), ctypes.c_void_p()
+    try:
+        if _adv.GetSecurityInfo(handle, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, ctypes.byref(owner), None,
+                                None, None, ctypes.byref(descriptor)):
+            return None
+        return _sid_string(owner.value)
+    except PipeError:
+        return None
+    finally:
+        if descriptor:
+            _k32.LocalFree(descriptor)
+        _k32.CloseHandle(handle)
+
+
 def _identify_client(handle: int) -> Caller:
     if not _adv.ImpersonateNamedPipeClient(handle):
         raise _fail("ImpersonateNamedPipeClient")

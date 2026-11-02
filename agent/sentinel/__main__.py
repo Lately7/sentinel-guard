@@ -26,6 +26,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
     from .db import Database
     from .engine.scanner import Scanner
     from .protection import act_on, top_reason
+    from .scanjob import discovery
     from .service.bridge import install as install_lease
 
     install_lease()
@@ -43,7 +44,10 @@ def cmd_scan(args: argparse.Namespace) -> int:
     for p in missing:
         print(f"ERROR      cannot access {p}", file=sys.stderr)
     failures: list[str] = list(missing)
-    for f in _walk([p for p in args.paths if p not in missing], failures):
+    profile = "deep" if args.deep else "smart" if args.smart or not args.paths else None
+    found = discovery(profile, settings) if profile else None
+    files = (t.path for t in found) if found else _walk([p for p in args.paths if p not in missing], failures)
+    for f in files:
         v = scanner.scan_file(f, use_cache=not args.no_cache)
         if v.skipped and v.skipped.startswith(("unreadable", "changed while")):
             failures.append(f"{f}: {v.skipped}")
@@ -282,7 +286,9 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("scan", help="quét tệp/thư mục")
-    s.add_argument("paths", nargs="+")
+    s.add_argument("paths", nargs="*")
+    s.add_argument("--smart", action="store_true", help="quét thông minh: khởi động cùng máy, tiến trình, thư mục theo dõi")
+    s.add_argument("--deep", action="store_true", help="quét sâu: như trên, thêm mọi ổ cố định")
     s.add_argument("--quarantine", action="store_true", help="cách ly tệp độc hại")
     s.add_argument("--no-defender", action="store_true")
     s.add_argument("--no-clamav", action="store_true")

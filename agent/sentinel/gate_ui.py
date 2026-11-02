@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from . import theme
 from .engine import clamav
-from .scanjob import ScanJob, ScanProgress, describe_paths, fixed_drives
+from .scanjob import ScanJob, ScanProgress, describe_paths, discovery, fixed_drives
 
 if TYPE_CHECKING:
     from .tray import App
@@ -222,15 +222,15 @@ class GatePanel:
             self.run([d], f"Quét {os.path.basename(d) or d}")
 
     def scan_quick(self) -> None:
-        self.run(self.app.quick_scan_paths(), "Quét nhanh")
+        self.run(self.app.quick_scan_paths(), "Quét thông minh", "smart")
 
     def scan_full(self) -> None:
         drives = fixed_drives()
         if messagebox.askyesno("Quét sâu", f"Quét toàn bộ ổ {', '.join(drives)}?\n\nCó thể mất nhiều giờ. "
                                              "Bạn có thể dừng bất cứ lúc nào."):
-            self.run(drives, "Quét sâu")
+            self.run(drives, "Quét sâu", "deep")
 
-    def run(self, paths: list[str], title: str) -> None:
+    def run(self, paths: list[str], title: str, profile: str | None = None) -> None:
         if self.job and self.job.progress.running:
             return
         self.tv.delete(*self.tv.get_children())
@@ -238,7 +238,8 @@ class GatePanel:
         self._show_results()
         self.job = ScanJob(self.app.scanner, self.app.db, self.app.settings, paths, title,
                            on_result=lambda v, o: self.app.ui(self.add_row, v, o),
-                           on_done=lambda p: self.app.ui(self.finished, p)).start()
+                           on_done=lambda p: self.app.ui(self.finished, p),
+                           found=discovery(profile, self.app.settings) if profile else None).start()
         self.scan_btn.configure(state="disabled")
         self.pick.configure(state="disabled")
         self.stop_btn.configure(state="normal")
