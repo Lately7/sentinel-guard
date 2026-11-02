@@ -375,6 +375,7 @@ class FinalDecision(WireValue):
     cacheable: bool
     gate_generation: str
     duration_ms: int
+    action_decision: ActionDecision | None = None
 
     def __post_init__(self) -> None:
         _require(self.contract_version == CONTRACT_VERSION, "UNKNOWN_CONTRACT_VERSION")
@@ -394,6 +395,7 @@ class FinalDecision(WireValue):
         ids = [item.engine_id for item in self.engine_results]
         _require(len(ids) == len(set(ids)), "DUPLICATE_ENGINE_ID")
         _nonnegative(self.duration_ms, "duration_ms")
+        _require(self.action_decision is None or isinstance(self.action_decision, ActionDecision), "INVALID_FIELD_TYPE")
         _require(not self.trusted_clean or (self.verdict is VerdictCode.CLEAN and self.policy_scope == "full"), "FALSE_TRUSTED_CLEAN")
         _require(not self.cacheable or self.verdict not in (VerdictCode.UNKNOWN,), "FALSE_CACHEABLE")
 
