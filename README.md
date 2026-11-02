@@ -75,7 +75,9 @@ lên, không chạy bản thứ hai.
 Không cài thì mọi thứ chạy bằng quyền người dùng như trên. Cài rồi thì dịch vụ
 chạy nền là bên duy nhất được hành động: khay, CLI và native host chỉ báo tệp cho
 dịch vụ, dịch vụ tự quét và tự quyết. Khôi phục, tin cậy, tắt bảo vệ, xử lý chương
-trình đang chạy đều phải qua hộp xác nhận quản trị. Trong PowerShell chạy Administrator:
+trình đang chạy đều phải qua hộp xác nhận quản trị. Cách cài: nháy đúp `tools\install_service.cmd`,
+bấm **Có** ở hộp UAC; kết quả kiểm tra nằm ở `%TEMP%\sentinel-install.log`. Làm tay thì trong PowerShell
+chạy Administrator:
 
 ```powershell
 .\.venv\Scripts\python -m sentinel service snapshot --source C:\SentinelSnapshot

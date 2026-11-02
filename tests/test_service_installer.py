@@ -5,13 +5,15 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import uuid
 from pathlib import Path
 
 import pytest
 
-from sentinel.service import installer
+from sentinel.service import entry, installer
 from sentinel.service.paths import STATE_CHILDREN, installed_paths
 from sentinel.service.integrity import IntegrityError, check_runtime
+from sentinel.service.winpipe import current_process_caller
 
 
 def source_tree(root: Path) -> Path:
@@ -201,7 +203,7 @@ def test_scm_layout_and_uninstall_delegation():
 
 def test_service_configuration_values_and_layout():
     values = dict(installer.service_config())
-    assert installer.SERVICE_ACCESS == 0x70036
+    assert installer.SERVICE_ACCESS == 0x70037
     assert installer.SERVICE_SDDL == "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x0002008D;;;IU)"
     assert values[2].dwResetPeriod == 86400
     assert [(values[2].lpsaActions[i].Type, values[2].lpsaActions[i].Delay) for i in range(3)] == [
@@ -228,7 +230,122 @@ def test_registration_failure_requests_cleanup(tmp_path):
     with pytest.raises(OSError):
         installer.install(source, "v1", scm=fake, paths=paths)
     assert ("stop_delete", "SentinelGuard", 5.0) in fake.calls
+    assert ("remove_code", paths.code_root) in fake.calls
     assert fake.calls[-1] == ("close", 7)
+
+
+def test_a_failure_before_the_service_exists_also_clears_the_code_tree(tmp_path, monkeypatch):
+    source = source_tree(tmp_path / "source")
+    paths = installed_paths("v1", program_files=tmp_path / "pf", program_data=tmp_path / "pd")
+    paths.code_root.parent.mkdir()
+    paths.state_root.parent.mkdir()
+
+    def broken(version):
+        raise installer.InstallError("INSTALL_INTEGRITY", "planted")
+
+    monkeypatch.setattr(installer, "verify_runtime", broken)
+    fake = FakeScm()
+    with pytest.raises(installer.InstallError):
+        installer.install(source, "v1", scm=fake, paths=paths)
+    assert fake.calls[-1] == ("remove_code", paths.code_root)
+    assert not any(c[0] in ("create", "stop_delete") for c in fake.calls)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the real service manager")
+def test_a_service_that_is_gone_reports_absent_so_uninstall_can_finish():
+    name = "SentinelGuardTest-" + uuid.uuid4().hex
+    assert installer.WindowsScm().stop_delete(name, 1.0) == "ABSENT"
+
+
+def test_only_a_registration_inside_the_protected_install_names_a_version(tmp_path, monkeypatch):
+    paths = installed_paths("v1", program_files=tmp_path / "pf", program_data=tmp_path / "pd")
+    paths.version.mkdir(parents=True)
+    monkeypatch.setattr(installer, "installed_paths", lambda version: paths)
+    good = f'"{paths.python}" -I -B -m sentinel.service.entry'
+    assert installer.version_from_binary(good) == paths.version
+    elsewhere = tmp_path / "elsewhere" / "versions" / "v1"
+    elsewhere.mkdir(parents=True)
+    for bad in (None, "", good.replace(" -I -B", ""), good + " --extra", good.replace("python.exe", "pythonw.exe"),
+                good.replace(str(paths.version), str(elsewhere)), good.replace('"', "")):
+        assert installer.version_from_binary(bad) is None
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the real service manager")
+def test_an_unregistered_service_has_no_binary_and_no_version():
+    name = "SentinelGuardTest-" + uuid.uuid4().hex
+    assert installer.WindowsScm().binary(name) is None
+    assert installer.registered_version(name) is None
+
+
+@pytest.mark.skipif(os.name != "nt", reason="a real token")
+def test_a_privilege_the_token_lacks_is_reported_not_assumed():
+    installer.enable_privilege("SeChangeNotifyPrivilege")
+    if installer.WindowsScm().elevated():
+        pytest.skip("this token holds SeRestorePrivilege")
+    with pytest.raises(OSError) as caught:
+        installer.enable_privilege("SeRestorePrivilege")
+    assert caught.value.errno == 1300
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real security descriptors")
+def test_what_windows_reads_back_is_what_the_install_checks_for(tmp_path, monkeypatch):
+    # The real calls and the real text; only the owner differs, which needs elevation.
+    me = current_process_caller().sid
+    monkeypatch.setattr(installer, "verify_path_acl", lambda *a, **k: None)
+    monkeypatch.setattr(installer, "enable_privilege", lambda name: None)
+    aces = f"(A;OICI;FA;;;SY)(A;OICI;FA;;;{me})(A;OICI;FRFX;;;BU)"
+    expected = "O:SYG:SYD:P" + aces
+    written = f"O:{me}G:BUD:P" + aces
+    scm = installer.WindowsScm()
+    folder = tmp_path / "folder"
+    scm.create_protected_directory(folder, written)
+    item = folder / "item.bin"
+    item.write_bytes(b"x")
+    scm._secure_path(item, written, directory=False)
+
+    def as_installed(path):
+        return installer.read_sddl(path).replace(f"O:{me}G:BU", "O:SYG:SY")
+
+    assert installer.acl_matches(as_installed(folder), expected, directory=True)
+    assert installer.acl_matches(as_installed(item), expected, directory=False)
+    assert not installer.acl_matches(as_installed(item), expected + "(A;;FA;;;WD)", directory=False)
+    assert not installer.acl_matches(installer.read_sddl(item), expected, directory=False)
+
+
+def test_protected_acl_refuses_what_is_not_exactly_expected():
+    expected = "O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FRFX;;;BU)"
+    good = "O:SYG:SYD:PAI(A;OICI;FA;;;SY)(A;OICI;0x1200a9;;;BU)"
+    assert installer.acl_matches(good, expected, directory=True)
+    assert not installer.acl_matches(good.replace("D:PAI", "D:AI"), expected, directory=True)
+    assert not installer.acl_matches(good.replace("0x1200a9", "0x1301bf"), expected, directory=True)
+    assert not installer.acl_matches(good + "(A;OICI;FA;;;WD)", expected, directory=True)
+    assert not installer.acl_matches(good.replace("(A;OICI;FA", "(A;;FA"), expected, directory=True)
+
+
+def test_a_state_file_may_be_owned_by_either_trusted_owner_and_no_one_else():
+    both = "D:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)"
+    for good in ("O:SYG:SY" + both, "O:BAG:SY" + both, "O:SYG:SYD:AI(A;OICIID;0x1f01ff;;;BA)(A;OICIID;FA;;;SY)"):
+        assert installer.acl_matches(good, "", directory=False, inherited=True)
+    for bad in ("O:S-1-5-21-1-2-3-1001G:SY" + both, "O:SYG:SYD:AI(A;ID;FA;;;SY)",
+                "O:SYG:SY" + both + "(A;ID;FA;;;BU)", "O:SYG:SYD:AI(A;ID;FR;;;SY)(A;ID;FA;;;BA)",
+                "O:SYG:SYD:AI(D;ID;FA;;;SY)(A;ID;FA;;;BA)", "O:SYG:SYD:AI(A;ID;FA;;;SY)(A;ID;FA;;;WD)"):
+        assert not installer.acl_matches(bad, "", directory=False, inherited=True)
+
+
+def test_a_failed_start_leaves_its_reason_in_the_log(monkeypatch, tmp_path, caplog):
+    paths = installed_paths("v1", program_files=tmp_path / "pf", program_data=tmp_path / "pd")
+    paths.state("journal").mkdir(parents=True)
+    monkeypatch.setenv("SENTINEL_HOME", str(tmp_path))
+    monkeypatch.setattr(entry, "active_version", lambda: paths.version)
+    monkeypatch.setattr(entry, "installed_paths", lambda version: paths)
+
+    def refused(factory, version):
+        raise IntegrityError("STATE_ACL_UNSAFE", "planted")
+
+    monkeypatch.setattr(entry, "run", refused)
+    with pytest.raises(IntegrityError):
+        entry.main()
+    assert "service could not start" in caplog.text and "planted" in caplog.text
 
 
 def test_startup_rejects_import_path_and_bytecode_drift(tmp_path):

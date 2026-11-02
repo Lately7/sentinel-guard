@@ -29,7 +29,7 @@ from ..gate_v2.contract import (
 )
 from . import worker as worker_mod
 from .paths import active_version, installed_paths
-from .protocol import MAX_FRAME, ProtocolError, read_frame, write_frame
+from .protocol import MAX_FRAME, MAX_RULES_FRAME, ProtocolError, read_frame, write_frame
 
 POLL_SECONDS = 0.05
 START_SECONDS = 30.0
@@ -87,7 +87,7 @@ class WorkerSession:
         threading.Thread(target=self._pump, args=(self._proc, self._replies), daemon=True,
                          name="worker-reader").start()
         started_by = min(deadline_ns, time.monotonic_ns() + int(START_SECONDS * 1e9))
-        reply = self._send("init", self._init_args, started_by, None)
+        reply = self._send("init", self._init_args, started_by, None, limit=MAX_RULES_FRAME)
         self.engines = list(reply.get("engines", []))
 
     @staticmethod
@@ -113,12 +113,12 @@ class WorkerSession:
     # -- calls
 
     def _send(self, op: str, args: dict[str, Any], deadline_ns: int,
-              cancel: CancellationToken | None) -> dict[str, Any]:
+              cancel: CancellationToken | None, *, limit: int = MAX_FRAME) -> dict[str, Any]:
         assert self._proc is not None
         self._next_id += 1
         rid = self._next_id
         try:
-            write_frame(self._proc.stdin, {"id": rid, "op": op, "args": args})
+            write_frame(self._proc.stdin, {"id": rid, "op": op, "args": args}, limit=limit)
         except (OSError, ProtocolError) as e:
             self._kill()
             raise WorkerFailure(StageStatus.ERROR, "WORKER_DIED") from e

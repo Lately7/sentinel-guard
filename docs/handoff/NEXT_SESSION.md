@@ -22,6 +22,13 @@ merged on `main` and pushed. The real backend runs from a written runtime on a p
 nobody has run it as a service: `sentinel service verify` is the owner's elevated check. Worktrees
 named below are history. `gate-baseline` no longer exists: everything is on `main`.
 
+**Update 2026-11-03, early morning.** Before the first elevated attempt, a fifth review round (`REVIEWS.md`,
+F1–F13) found and fixed thirteen faults the first real start would have hit: seven in the installer, the
+worker dying at start under its restricted token, the rule set not fitting the worker frame, `verify`
+running too early, and the tray unable to find the UAC helper. The owner's one step is now
+`tools\install_service.cmd` (UAC prompt, then snapshot, install, `verify --restart`, log in
+`%TEMP%\sentinel-install.log`). Still never run: the service as LocalSystem, Session 0, a USN read.
+
 ## 1. Where things are
 
 * Repo: `C:\Users\lately07\Desktop\Folder Group\sentinel-guard`, branch

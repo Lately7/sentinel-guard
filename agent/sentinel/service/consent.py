@@ -10,6 +10,7 @@ from ctypes import wintypes
 from pathlib import Path
 
 from .client import ServiceClient
+from .installer import registered_version
 from .paths import active_version, installed_paths
 
 TITLE = "Sentinel Guard - Xác nhận hành động quản trị"
@@ -69,7 +70,9 @@ class SHELLEXECUTEINFOW(ctypes.Structure):
 
 
 def protected_helper() -> tuple[Path, Path]:
-    version = active_version()
+    # The tray runs from the portable install, so the helper's home comes from the
+    # service registration, which only an administrator can have set.
+    version = active_version() or registered_version()
     if version is None:
         raise ConsentError("INSTALL_INTEGRITY")
     expected = installed_paths(version.name).version

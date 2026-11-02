@@ -20,7 +20,7 @@ from ..gate_v2.content import BoundReader, ContentError
 from ..gate_v2.contract import ContractError, FileIdentity, ScanRequest
 from ..gate_v2.core import CoreAdapter
 from ..gate_v2.rules import JsonRulesAdapter, YaraXAdapter
-from .protocol import ProtocolError, read_frame, write_frame
+from .protocol import MAX_RULES_FRAME, ProtocolError, read_frame, write_frame
 
 # MotW is not here: it reads a stream by name, and this process never gets one.
 ENGINES = ("core", "json_rules", "yara_x", "lnk", "signer")
@@ -88,7 +88,8 @@ def main() -> int:
     worker = Worker()
     while True:
         try:
-            frame = read_frame(inp)
+            # The parent is the trusted side; its frames carry the whole rule set.
+            frame = read_frame(inp, limit=MAX_RULES_FRAME)
         except ProtocolError as e:
             _reply(out, None, code=e.code)
             return 2

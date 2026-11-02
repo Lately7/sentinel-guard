@@ -57,6 +57,29 @@ def test_marker_file_on_disk_is_found_by_the_worker(session, tmp_path):
     assert session.starts == 1 and session.engines == ["core", "json_rules", "lnk", "signer", "yara_x"]
 
 
+def harmless_rules(count: int) -> str:
+    # Each rule matches only its own made-up string: nothing on this machine has it.
+    return "\n".join(f'rule harmless_{i} {{ strings: $a = "sentinel-test-rule-{i:06d}-never-present-anywhere" '
+                     f"condition: $a }}" for i in range(count))
+
+
+def test_a_rule_set_past_the_client_frame_limit_still_reaches_the_worker(tmp_path):
+    from sentinel.service.protocol import MAX_FRAME
+
+    source = harmless_rules(12_000)
+    assert len(source) > MAX_FRAME
+    s = WorkerSession(yara_sources=(("big", "big.yar", source),))
+    try:
+        p = tmp_path / "plain.txt"
+        p.write_bytes(b"nothing to see")
+        d = run(s, request(path=str(p)), engines=("core", "yara_x"))
+        assert d.verdict is VerdictCode.CLEAN
+        assert [r.status for r in d.engine_results] == [StageStatus.COMPLETED, StageStatus.COMPLETED]
+        assert "yara_x" in s.engines and s.starts == 1
+    finally:
+        s.close()
+
+
 def test_marker_inside_a_zip_is_found_by_the_worker(session, tmp_path):
     p = tmp_path / "bundle.zip"
     with zipfile.ZipFile(p, "w") as z:

@@ -552,3 +552,39 @@ found: a reconcile during a stalled delete, relinking from an earlier handle, an
 file were all clean. One real loss, in portable mode only: quarantine of a `file:stream` path removed the
 stream and then, seeing the base file's links, rolled the copy back. Such paths are now refused; the
 service never accepted them. An event with no known owner still reaches every local user, by choice.
+
+### Fifth round: what the first real start would have hit
+
+Nobody had started the service through the Service Control Manager; every test used a fake SCM or an
+unelevated process on a private pipe. Before the owner's one elevated attempt, the installer was read
+against the real calls and a fresh reviewer read the start-up path. Measured where an unelevated token
+allows it, in a replica of the installed layout under `%TEMP%` with the code tree's ACL shape.
+
+| # | Finding | Outcome |
+|---|---|---|
+| F1 | `configure()` read every setting back through a handle opened without `SERVICE_QUERY_CONFIG`, so install failed right after `CreateService` | Right added |
+| F2 | Naming SYSTEM as owner is refused with 1307 unless `SeRestorePrivilege` is enabled; an elevated token holds it switched off | Enabled before the first protected directory |
+| F3 | The security descriptor set the owner and DACL but not the group, so `O:SYG:SY` could never read back | Group set with them |
+| F4 | `FRFX` reads back as `0x1200a9`, and a file carries no `OICI`, so every ACL check on the code tree failed | Compared as Windows stores them |
+| F5 | Uninstall raised 1060 once the service was gone, leaving the code tree in place, which refused the next install | `ABSENT`; the code tree goes either way |
+| F6 | A failure before `CreateService` left `Program Files\SentinelGuard` behind, so the second attempt found it occupied | Removed on any failure after it was made |
+| F7 | A start failing before the dispatcher connected left nothing but SCM's 1067 | Logged to `journal\service.log` first |
+| F8 | `verify` ran while the service was still `START_PENDING`, and asked the pipe before the listener was up | Waits for the state to settle, then for the pipe |
+| F9 | The worker's token had only the service SID as a restricting SID, which the runtime grants nothing, so every worker ended in `0xC0000022` and every scan read `unknown` | Users, Everyone and RESTRICTED added; the runtime grants Users read and execute |
+| F10 | With those SIDs the worker ended in `0xC0000142`: a hidden console needs a conhost the token cannot attach to, and user32 needs a desktop it can open | Detached; a private window station and desktop, made by the service with a low-integrity label |
+| F11 | The rule set went to the worker in one frame under the 1 MiB client limit, so YARA Forge would have killed the worker on the first maintenance, after `verify` had passed | 128 MiB in that direction only |
+| F12 | `verify` checked the journal counters about 2 s after start, before the first 5 s tick, so nothing denied read as nothing wrong | Waits for the first tick; none in time is a FAIL |
+| F13 | The tray runs from the portable install, so `active_version()` was None and no approval ever reached UAC | The helper's home comes from the service registration, which only an administrator can set |
+
+Measured, unelevated: the token trials for F9 and F10, exit codes as given, 18 variants, the three SIDs
+being the smallest set that works; a chosen window-station name refused with error 5 below SYSTEM, so the
+station is unnamed; a desktop without the low label ends the worker with exit 1, with it the worker answers
+`init`. Through the real launch path with those SIDs, 12,000 harmless rules, 1.24 MB, reach the worker and
+compile in 0.98 s, and a file handed over as a duplicated handle comes back `completed`, clean. In the replica run from
+`System32` with a minimal environment, the work before the dispatcher takes 0.74 s against SCM's 30 s; the
+snapshot is 769 files, 66 MB, with one unsigned third-party binary, `yara_x.pyd`. The ACL strings Windows
+reads back were taken from real calls; only the owner differs from the real run.
+
+Not measurable here and still unmeasured: the SYSTEM token itself, Session 0, the service window station,
+a USN read, a real client across the pipe DACL. `tools/install_service.cmd` is the one elevated step; it
+writes PASS/FAIL/SKIP per check to `%TEMP%\sentinel-install.log`.

@@ -14,6 +14,9 @@ from typing import Any, BinaryIO, Callable
 
 PROTOCOL_VERSION = 1
 MAX_FRAME = 1024 * 1024
+# The rules go to the worker in one frame, and YARA Forge alone is many megabytes.
+# Only that direction, from the service to a worker it started, may be this large.
+MAX_RULES_FRAME = 128 * 1024 * 1024
 MAX_STR = 8192
 MAX_PATH = 4096
 MAX_PAGE = 20_000
@@ -29,10 +32,10 @@ class ProtocolError(Exception):
 # -- framing: 4-byte little-endian length + UTF-8 JSON, as native messaging
 
 
-def write_frame(stream: BinaryIO, obj: dict[str, Any]) -> None:
+def write_frame(stream: BinaryIO, obj: dict[str, Any], *, limit: int = MAX_FRAME) -> None:
     # Escaped, not UTF-8: a lone surrogate is a legal NTFS name and has no UTF-8 form.
     data = json.dumps(obj, separators=(",", ":")).encode("ascii")
-    if len(data) > MAX_FRAME:
+    if len(data) > limit:
         raise ProtocolError("TOO_LARGE", "response frame over the limit")
     stream.write(struct.pack("<I", len(data)) + data)
     stream.flush()
@@ -48,13 +51,13 @@ def _read_exact(stream: BinaryIO, n: int) -> bytes | None:
     return bytes(buf)
 
 
-def read_frame(stream: BinaryIO) -> dict[str, Any] | None:
+def read_frame(stream: BinaryIO, *, limit: int = MAX_FRAME) -> dict[str, Any] | None:
     """Next frame, or None at a clean end of stream. Oversized frames are not read."""
     head = _read_exact(stream, 4)
     if head is None:
         return None
     (n,) = struct.unpack("<I", head)
-    if n > MAX_FRAME:
+    if n > limit:
         # The connection is dropped rather than drained: a client that sends
         # oversized frames is not worth reading another megabyte from.
         raise ProtocolError("TOO_LARGE", "request frame over the limit")

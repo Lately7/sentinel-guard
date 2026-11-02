@@ -19,10 +19,14 @@ from pathlib import Path
 from typing import Any
 
 from . import installer
-from .client import ServiceClient, ServiceError
+from .client import ServiceClient, ServiceError, ServiceUnavailable
+from .observers import JOURNAL_SECONDS
 from .paths import InstalledPaths, installed_paths
 
 NAME = "SentinelGuard"
+START_WAIT_SECONDS = 60.0
+PIPE_WAIT_SECONDS = 5.0
+OBSERVE_WAIT_SECONDS = 3 * JOURNAL_SECONDS + 5
 # What lets a principal stop, pause, reconfigure or take over a service.
 DANGEROUS_RIGHTS = ("WP", "DT", "DC", "WD", "WO", "SD", "GA", "GW")
 ORDINARY_USERS = ("IU", "BU", "AU", "WD", "SU", "BG")
@@ -126,6 +130,19 @@ def _refuses_unknown(client: ServiceClient) -> tuple[bool, str]:
     return False, "accepted"
 
 
+def _observed(client: ServiceClient) -> tuple[bool | None, str]:
+    """The first journal tick comes JOURNAL_SECONDS after start. Until it has run the
+    counters are empty, which must not read as nothing denied."""
+    deadline = time.monotonic() + OBSERVE_WAIT_SECONDS
+    while True:
+        status = client.request("status")
+        if "records" in status.get("observation", {}):
+            return _observing(status)
+        if time.monotonic() >= deadline:
+            return False, "no journal tick in time"
+        time.sleep(0.5)
+
+
 def _observing(status: dict[str, Any]) -> tuple[bool | None, str]:
     seen = status.get("observation", {})
     if seen.get("prevention") != "none":
@@ -134,6 +151,29 @@ def _observing(status: dict[str, Any]) -> tuple[bool | None, str]:
     if denied:
         return False, f"journal denied {denied} times"
     return True, f"records {seen.get('records', 0)}, failed polls {seen.get('failed_polls', 0)}"
+
+
+def _settled() -> str:
+    """StartService returns while the service is still starting, so this is what a
+    verify right after an install sees first."""
+    deadline = time.monotonic() + START_WAIT_SECONDS
+    while True:
+        query = sc("query", NAME)
+        if "START_PENDING" not in query or time.monotonic() >= deadline:
+            return query
+        time.sleep(0.5)
+
+
+def _hello(client: ServiceClient) -> tuple[bool, str]:
+    # RUNNING is reported a moment after the listening thread is started.
+    deadline = time.monotonic() + PIPE_WAIT_SECONDS
+    while True:
+        try:
+            return client.request("hello").get("protocol") is not None, ""
+        except ServiceUnavailable:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.2)
 
 
 def _restart() -> tuple[bool, str]:
@@ -171,7 +211,7 @@ def run(*, restart: bool = False, client: Callable[[], ServiceClient] = ServiceC
 
     if not check("elevated_token", lambda: (installer.WindowsScm().elevated(), "")):
         return results
-    qc, query = sc("qc", NAME), sc("query", NAME)
+    qc, query = sc("qc", NAME), _settled()
     if not check("service_config", lambda: _config(qc, query)):
         return results
     paths = _version_paths(qc)
@@ -183,10 +223,10 @@ def run(*, restart: bool = False, client: Callable[[], ServiceClient] = ServiceC
     check("state_acl", lambda: (installer.verify_protected_tree(paths.state_root) is None, ""))
     check("isolated_imports", lambda: _imports(str(paths.python), paths.version))
     with client() as service:
-        if check("pipe_owner", lambda: (service.request("hello").get("protocol") is not None, "")):
+        if check("pipe_owner", lambda: _hello(service)):
             check("refuses_unknown_op", lambda: _refuses_unknown(service))
             check("worker_scan", lambda: _own_scan(service))
-            check("observers", lambda: _observing(service.request("status")))
+            check("observers", lambda: _observed(service))
     results.append(Check("medium_token_cannot_approve", None, "needs an unelevated client: the tray's Khôi phục shows it"))
     results.append(Check("remote_client_refused", None, "needs a second machine"))
     if restart:

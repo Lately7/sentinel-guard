@@ -28,6 +28,75 @@ def run(code: str, *, memory_limit: int = 256 * 1024 * 1024, timeout: float = 30
         w.kill()
 
 
+FAKE_SERVICE_SID = "S-1-5-80-1111111111-2222222222-3333333333-4000000000-1234567890"
+
+
+def restricting_sids(token: int) -> set[str]:
+    import ctypes
+    from ctypes import wintypes
+
+    from sentinel.service import worker
+    from sentinel.service.winpipe import _sid_string
+
+    adv = worker._adv
+    adv.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+                                        ctypes.POINTER(wintypes.DWORD)]
+    needed = wintypes.DWORD()
+    adv.GetTokenInformation(token, 11, None, 0, ctypes.byref(needed))  # TokenRestrictedSids
+    buf = ctypes.create_string_buffer(needed.value)
+    assert adv.GetTokenInformation(token, 11, buf, len(buf), ctypes.byref(needed))
+    count = ctypes.cast(buf, ctypes.POINTER(wintypes.DWORD))[0]
+    entries = ctypes.cast(ctypes.addressof(buf) + 8, ctypes.POINTER(worker.SID_AND_ATTRIBUTES * count)).contents
+    return {_sid_string(entry.Sid) for entry in entries}
+
+
+def test_the_service_worker_token_is_restricted_to_what_the_runtime_grants_everyone():
+    from sentinel.service import worker
+
+    token = worker._restricted_low_token(FAKE_SERVICE_SID)
+    try:
+        assert restricting_sids(token) == {*worker.RESTRICTING_SIDS, FAKE_SERVICE_SID}
+    finally:
+        worker._k32.CloseHandle(token)
+    # Portable mode keeps the user's own identity: its files grant nobody else.
+    token = worker._restricted_low_token(None)
+    try:
+        assert restricting_sids(token) == set()
+    finally:
+        worker._k32.CloseHandle(token)
+
+
+def test_the_private_desktop_is_made_once_on_a_station_windows_named():
+    from sentinel.service import worker
+
+    first = worker._private_desktop()
+    assert first == worker._private_desktop()
+    station, desktop = first.split("\\")
+    assert station.startswith("Service-0x") and desktop == "Worker"
+    assert all(worker._desktop_handles)
+
+
+def test_a_service_worker_starts_detached_on_the_private_desktop(monkeypatch):
+    from sentinel.service import worker
+
+    seen = {}
+
+    def refuse(token, exe, cmdline, pa, ta, inherit, flags, env, cwd, si, pi):
+        seen["flags"], seen["desktop"] = flags, si._obj.StartupInfo.lpDesktop
+        return 0
+
+    monkeypatch.setattr(worker, "_private_desktop", lambda: "Station\\Worker")
+    monkeypatch.setattr(worker._adv, "CreateProcessAsUserW", refuse)
+    with pytest.raises(worker.WorkerError):
+        worker.launch(["-c", "0"], service_sid=FAKE_SERVICE_SID)
+    assert seen["desktop"] == "Station\\Worker"
+    assert seen["flags"] & worker.DETACHED_PROCESS and not seen["flags"] & 0x08000000
+    seen.clear()
+    with pytest.raises(worker.WorkerError):
+        worker.launch(["-c", "0"])
+    assert seen["desktop"] is None
+
+
 def test_worker_runs_at_low_integrity_without_admin():
     out, code = run("from sentinel.service import winpipe; c = winpipe.current_process_caller(); "
                     "print(c.integrity, c.is_admin)")

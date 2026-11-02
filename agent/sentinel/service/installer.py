@@ -20,10 +20,19 @@ from .paths import STATE_CHILDREN, InstalledPaths, installed_paths
 SERVICE_SDDL = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x0002008D;;;IU)"
 STATE_SDDL = "O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
 CODE_SDDL = "O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;BU)(A;OICI;FRFX;;;{sid})"
-SERVICE_ACCESS = 0x2 | 0x4 | 0x10 | 0x20 | 0x10000 | 0x20000 | 0x40000
+# QUERY_CONFIG is here because configure() reads every setting back.
+SERVICE_ACCESS = 0x1 | 0x2 | 0x4 | 0x10 | 0x20 | 0x10000 | 0x20000 | 0x40000
 SC_MANAGER_CREATE_SERVICE = 0x2
+SC_MANAGER_CONNECT = 0x1
+SERVICE_QUERY_CONFIG = 0x1
 _PYTHON_DLL = re.compile(r"python\d{2,}\.dll")  # python3.dll is the stable-ABI forwarder, not this
+_REGISTERED = re.compile(r'"([^"]+\\python\.exe)" -I -B -m sentinel\.service\.entry\Z')
+ERROR_SERVICE_DOES_NOT_EXIST = 1060
+ERROR_SERVICE_CANNOT_ACCEPT_CONTROLS = 1061
+ERROR_SERVICE_NOT_ACTIVE = 1062
 ERROR_SERVICE_MARKED_FOR_DELETE = 1072
+# How Windows reads rights back, whichever way they were written.
+_RIGHTS = {"FA": "0X1F01FF", "FRFX": "0X1200A9"}
 
 
 class InstallError(Exception):
@@ -71,10 +80,52 @@ class SERVICE_PRESHUTDOWN_INFO(ctypes.Structure):
     _fields_ = [("dwPreshutdownTimeout", wintypes.DWORD)]
 
 
+class QUERY_SERVICE_CONFIGW(ctypes.Structure):
+    _fields_ = [("dwServiceType", wintypes.DWORD), ("dwStartType", wintypes.DWORD),
+                ("dwErrorControl", wintypes.DWORD), ("lpBinaryPathName", wintypes.LPWSTR),
+                ("lpLoadOrderGroup", wintypes.LPWSTR), ("dwTagId", wintypes.DWORD),
+                ("lpDependencies", wintypes.LPWSTR), ("lpServiceStartName", wintypes.LPWSTR),
+                ("lpDisplayName", wintypes.LPWSTR)]
+
+
+class TOKEN_PRIVILEGES(ctypes.Structure):
+    # One privilege, laid out flat: the LUID is the two fields after the count.
+    _fields_ = [("PrivilegeCount", wintypes.DWORD), ("LowPart", wintypes.DWORD),
+                ("HighPart", wintypes.LONG), ("Attributes", wintypes.DWORD)]
+
+
 CONFIG_SIZES_X64 = {SC_ACTION: 8, SERVICE_FAILURE_ACTIONSW: 40, SERVICE_DESCRIPTIONW: 8,
                     SERVICE_DELAYED_AUTO_START_INFO: 4, SERVICE_FAILURE_ACTIONS_FLAG: 4,
                     SERVICE_SID_INFO: 4, SERVICE_REQUIRED_PRIVILEGES_INFOW: 8,
                     SERVICE_PRESHUTDOWN_INFO: 4}
+
+
+def enable_privilege(name: str) -> None:
+    adv = ctypes.WinDLL("advapi32", use_last_error=True)
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.GetCurrentProcess.restype = wintypes.HANDLE
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    adv.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    adv.OpenProcessToken.restype = wintypes.BOOL
+    adv.LookupPrivilegeValueW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.c_void_p]
+    adv.LookupPrivilegeValueW.restype = wintypes.BOOL
+    adv.AdjustTokenPrivileges.argtypes = [wintypes.HANDLE, wintypes.BOOL, ctypes.c_void_p, wintypes.DWORD,
+                                          ctypes.c_void_p, ctypes.c_void_p]
+    adv.AdjustTokenPrivileges.restype = wintypes.BOOL
+    token = wintypes.HANDLE()
+    if not adv.OpenProcessToken(k32.GetCurrentProcess(), 0x20 | 0x8, ctypes.byref(token)):
+        raise OSError(ctypes.get_last_error(), "OpenProcessToken")
+    try:
+        state = TOKEN_PRIVILEGES(1, 0, 0, 0x2)
+        if not adv.LookupPrivilegeValueW(None, name, ctypes.byref(state, TOKEN_PRIVILEGES.LowPart.offset)):
+            raise OSError(ctypes.get_last_error(), "LookupPrivilegeValueW")
+        done = adv.AdjustTokenPrivileges(token, False, ctypes.byref(state), 0, None, None)
+        # It returns success for a privilege the token lacks; only the last error says so.
+        code = ctypes.get_last_error()
+        if not done or code:
+            raise OSError(code, f"AdjustTokenPrivileges {name}")
+    finally:
+        k32.CloseHandle(token)
 
 
 def check_layout() -> None:
@@ -257,11 +308,11 @@ def install(source: Path, version_id: str, *, scm: Scm | None = None,
         manager.verify_state(locations.state_root)
     # A3 never registers a checkout path. Staging and verification finish first.
     manager.create_protected_directory(locations.code_root, STATE_SDDL)
-    manager.create_protected_directory(locations.code_root / "versions", STATE_SDDL)
-    write_runtime(plan, locations.version)
-    verify_runtime(locations.version)
     service = None
     try:
+        manager.create_protected_directory(locations.code_root / "versions", STATE_SDDL)
+        write_runtime(plan, locations.version)
+        verify_runtime(locations.version)
         service = manager.create(name, "Sentinel Guard", binary_path(locations.version))
         for level, value in service_config():
             manager.configure(service, level, value)
@@ -279,6 +330,12 @@ def install(source: Path, version_id: str, *, scm: Scm | None = None,
                 manager.stop_delete(name, 5.0)
             except (OSError, InstallError):
                 pass
+        # Left behind, this tree would refuse the next install as occupied. It is
+        # ours to remove: code_root was absent when this call began.
+        try:
+            manager.remove_code(locations.code_root)
+        except (OSError, InstallError):
+            pass
         raise
     finally:
         if service is not None:
@@ -303,6 +360,30 @@ def uninstall(*, scm: Scm | None = None, name: str = "SentinelGuard", timeout: f
     # survive: they hold the user's files and the record of what was done.
     manager.remove_code((paths or installed_paths("uninstall")).code_root)
     return outcome
+
+
+def version_from_binary(binary: str | None) -> Path | None:
+    """The protected version a registered command line runs from, if it is one."""
+    match = _REGISTERED.fullmatch(binary or "")
+    if match is None:
+        return None
+    version = Path(match.group(1)).parent
+    try:
+        if version.resolve(strict=True) != installed_paths(version.name).version.resolve(strict=True):
+            return None
+    except (OSError, ValueError):
+        return None
+    return version
+
+
+def registered_version(name: str = "SentinelGuard") -> Path | None:
+    """Where the installed service runs from, for a process that runs elsewhere."""
+    if os.name != "nt":
+        return None
+    try:
+        return version_from_binary(WindowsScm().binary(name))
+    except OSError:
+        return None
 
 
 def snapshot_runtime(target: Path) -> str:
@@ -350,7 +431,15 @@ class WindowsScm:
             raise OSError("Windows required")
         self.adv = ctypes.WinDLL("advapi32", use_last_error=True)
         self.k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        self._may_assign_owner = False
         self._bind()
+
+    def _assign_owner(self) -> None:
+        # Naming SYSTEM as owner is refused (1307) unless this is on, and an elevated
+        # token holds it switched off. The service's own token lacks it, so not in __init__.
+        if not self._may_assign_owner:
+            enable_privilege("SeRestorePrivilege")
+            self._may_assign_owner = True
 
     def _bind(self) -> None:
         a = self.adv
@@ -367,6 +456,9 @@ class WindowsScm:
         a.QueryServiceConfig2W.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p,
                                             wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
         a.QueryServiceConfig2W.restype = wintypes.BOOL
+        a.QueryServiceConfigW.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+                                          ctypes.POINTER(wintypes.DWORD)]
+        a.QueryServiceConfigW.restype = wintypes.BOOL
         a.CloseServiceHandle.argtypes = [wintypes.HANDLE]
         a.CloseServiceHandle.restype = wintypes.BOOL
         a.StartServiceW.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p]
@@ -486,6 +578,29 @@ class WindowsScm:
                        ctypes.byref(domain_size), ctypes.byref(use)), "LookupAccountNameW")
         return _sid_string(ctypes.addressof(sid))
 
+    def binary(self, name: str) -> str | None:
+        """The registered command line, or None without a service. Reading it is
+        open to any local user; setting it is not, which is what makes it trusted."""
+        scm = self._manager(SC_MANAGER_CONNECT)
+        try:
+            service = self.adv.OpenServiceW(scm, name, SERVICE_QUERY_CONFIG)
+            if not service:
+                code = ctypes.get_last_error()
+                if code == ERROR_SERVICE_DOES_NOT_EXIST:
+                    return None
+                raise OSError(code, "OpenServiceW")
+            try:
+                needed = wintypes.DWORD()
+                self.adv.QueryServiceConfigW(service, None, 0, ctypes.byref(needed))
+                buf = ctypes.create_string_buffer(needed.value)
+                self._check(self.adv.QueryServiceConfigW(service, buf, len(buf), ctypes.byref(needed)),
+                            "QueryServiceConfigW")
+                return ctypes.cast(buf, ctypes.POINTER(QUERY_SERVICE_CONFIGW)).contents.lpBinaryPathName
+            finally:
+                self.close(service)
+        finally:
+            self.close(scm)
+
     def start(self, service: object) -> None:
         self._check(self.adv.StartServiceW(service, 0, None), "StartServiceW")
 
@@ -496,11 +611,14 @@ class WindowsScm:
         scm = self._manager(0x1)
         try:
             service = self.adv.OpenServiceW(scm, name, 0x20 | 0x4 | 0x10000)
-            self._check(service, "OpenServiceW")
+            if not service:
+                code = ctypes.get_last_error()
+                # A service already gone must not stop uninstall from removing the code.
+                if code == ERROR_SERVICE_DOES_NOT_EXIST:
+                    return "ABSENT"
+                raise OSError(code, "OpenServiceW")
             try:
                 status = ctypes.create_string_buffer(64)
-                if not self.adv.ControlService(service, 1, status) and ctypes.get_last_error() != 1062:
-                    raise OSError(ctypes.get_last_error(), "ControlService")
                 deadline = time.monotonic() + timeout
                 needed = wintypes.DWORD()
                 while True:
@@ -511,6 +629,10 @@ class WindowsScm:
                         break
                     if time.monotonic() >= deadline:
                         raise InstallError("STOP_TIMEOUT")
+                    # A service still starting accepts no control yet, so this repeats.
+                    if not self.adv.ControlService(service, 1, status) and ctypes.get_last_error() not in (
+                            ERROR_SERVICE_CANNOT_ACCEPT_CONTROLS, ERROR_SERVICE_NOT_ACTIVE):
+                        raise OSError(ctypes.get_last_error(), "ControlService")
                     time.sleep(0.2)
                 if not self.adv.DeleteService(service):
                     code = ctypes.get_last_error()
@@ -527,6 +649,7 @@ class WindowsScm:
         # Existing names are refused before calling CreateDirectoryW.
         if classify_target(os, path) != "absent":
             raise InstallError("INSTALL_PATH_OCCUPIED", str(path))
+        self._assign_owner()
         sd = ctypes.c_void_p()
         self._check(self.adv.ConvertStringSecurityDescriptorToSecurityDescriptorW(
             sddl, 1, ctypes.byref(sd), None), "ConvertStringSecurityDescriptorToSecurityDescriptorW")
@@ -544,6 +667,7 @@ class WindowsScm:
             self.k32.LocalFree(sd)
 
     def protect_code(self, root: Path, sddl: str) -> None:
+        self._assign_owner()
         for path in walk_no_reparse(root):
             self._secure_path(path, sddl, directory=path.is_dir())
 
@@ -579,22 +703,27 @@ class WindowsScm:
             if attributes & 0x400:
                 raise InstallError("INSTALL_PATH_OCCUPIED", str(path))
             owner, owner_default = ctypes.c_void_p(), wintypes.BOOL()
+            group, group_default = ctypes.c_void_p(), wintypes.BOOL()
             dacl, dacl_present, dacl_default = ctypes.c_void_p(), wintypes.BOOL(), wintypes.BOOL()
             get_owner = self.adv.GetSecurityDescriptorOwner
             get_owner.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.BOOL)]
             get_owner.restype = wintypes.BOOL
+            get_group = self.adv.GetSecurityDescriptorGroup
+            get_group.argtypes = get_owner.argtypes
+            get_group.restype = wintypes.BOOL
             get_dacl = self.adv.GetSecurityDescriptorDacl
             get_dacl.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.BOOL),
                                  ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.BOOL)]
             get_dacl.restype = wintypes.BOOL
             self._check(get_owner(desired, ctypes.byref(owner), ctypes.byref(owner_default)), "GetSecurityDescriptorOwner")
+            self._check(get_group(desired, ctypes.byref(group), ctypes.byref(group_default)), "GetSecurityDescriptorGroup")
             self._check(get_dacl(desired, ctypes.byref(dacl_present), ctypes.byref(dacl),
                                  ctypes.byref(dacl_default)), "GetSecurityDescriptorDacl")
             set_info = self.adv.SetSecurityInfo
             set_info.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.DWORD, ctypes.c_void_p,
                                  ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
             set_info.restype = wintypes.DWORD
-            code = set_info(h, 1, 0x1 | 0x4 | 0x80000000, owner, None, dacl, None)
+            code = set_info(h, 1, 0x1 | 0x2 | 0x4 | 0x80000000, owner, group, dacl, None)
             if code:
                 raise OSError(code, "SetSecurityInfo")
         finally:
@@ -604,7 +733,17 @@ class WindowsScm:
         verify_path_acl(path, sddl)
 
 
-def verify_path_acl(path: Path, expected: str, *, inherited: bool = False) -> None:
+def _aces(sddl: str, *, directory: bool) -> set[str]:
+    """ACEs compared as Windows keeps them: rights numeric, and no inheritance
+    flags on a file, which has nothing to pass them on to."""
+    aces = set()
+    for ace in re.findall(r"\(([^)]*)\)", sddl):
+        kind, flags, rights, *rest = ace.split(";")
+        aces.add(";".join((kind, flags if directory else "", _RIGHTS.get(rights.upper(), rights.upper()), *rest)))
+    return aces
+
+
+def read_sddl(path: Path) -> str:
     if os.name != "nt":
         raise InstallError("STATE_ACL_UNSAFE", "Windows required")
     adv = ctypes.WinDLL("advapi32", use_last_error=True)
@@ -626,28 +765,29 @@ def verify_path_acl(path: Path, expected: str, *, inherited: bool = False) -> No
         if not convert(sd, 1, 0x1 | 0x2 | 0x4, ctypes.byref(out), ctypes.byref(length)):
             raise InstallError("STATE_ACL_UNSAFE", str(path))
         try:
-            actual = out.value or ""
-            if not actual.startswith("O:SYG:SY") or (not inherited and "D:P" not in actual):
-                raise InstallError("STATE_ACL_UNSAFE", str(path))
-            actual_aces = re.findall(r"\(([^)]*)\)", actual)
-            if inherited:
-                if len(actual_aces) != 2:
-                    raise InstallError("STATE_ACL_UNSAFE", str(path))
-                seen = set()
-                for ace in actual_aces:
-                    fields = ace.split(";")
-                    if len(fields) != 6 or fields[0] != "A" or fields[2].upper() not in ("FA", "0X1F01FF") \
-                            or fields[5] not in ("SY", "BA"):
-                        raise InstallError("STATE_ACL_UNSAFE", str(path))
-                    seen.add(fields[5])
-                if seen != {"SY", "BA"}:
-                    raise InstallError("STATE_ACL_UNSAFE", str(path))
-            elif set(actual_aces) != set(re.findall(r"\(([^)]*)\)", expected)):
-                raise InstallError("STATE_ACL_UNSAFE", str(path))
+            return out.value or ""
         finally:
             k32.LocalFree(out)
     finally:
         k32.LocalFree(sd)
+
+
+def acl_matches(actual: str, expected: str, *, directory: bool, inherited: bool = False) -> bool:
+    if inherited:
+        # Made by the service at run time, so owned by whichever of these two
+        # LocalSystem's token defaults to; only those two can own anything here.
+        if not actual.startswith(("O:SY", "O:BA")):
+            return False
+        aces = [ace.split(";") for ace in re.findall(r"\(([^)]*)\)", actual)]
+        return (len(aces) == 2 and {ace[5] for ace in aces if len(ace) == 6} == {"SY", "BA"}
+                and all(ace[0] == "A" and ace[2].upper() in ("FA", "0X1F01FF") for ace in aces))
+    return (actual.startswith("O:SYG:SY") and "D:P" in actual
+            and _aces(actual, directory=directory) == _aces(expected, directory=directory))
+
+
+def verify_path_acl(path: Path, expected: str, *, inherited: bool = False) -> None:
+    if not acl_matches(read_sddl(path), expected, directory=path.is_dir(), inherited=inherited):
+        raise InstallError("STATE_ACL_UNSAFE", str(path))
 
 
 def verify_protected_tree(root: Path) -> None:

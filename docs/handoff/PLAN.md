@@ -11,18 +11,16 @@ RT-024. Hai nhánh Codex (`codex/scope-a5`, `codex/reputation-etw`) đã review 
 xem `REVIEWS.md`. ETW, canary, chấm điểm burst có code và test nhưng **chưa nối** và ETW tự từ chối chạy
 cho tới khi schema được kiểm trên máy thật.
 
-**Việc của chủ dự án, cửa sổ PowerShell chạy Administrator:**
+**Việc của chủ dự án:** mở `tools\install_service.cmd` (nháy đúp), bấm **Có** ở hộp UAC. Tệp đó gỡ bản
+cũ nếu có, chụp snapshot vào `%TEMP%\sentinel-snapshot`, cài, rồi chạy `verify --restart`; kết quả
+PASS/FAIL/SKIP từng mục nằm ở `%TEMP%\sentinel-install.log`. Muốn làm tay thì ba lệnh tương ứng là
+`sentinel service snapshot | install | verify`, trong PowerShell chạy Administrator. Gỡ: `sentinel service
+uninstall` (giữ khu cách ly và nhật ký). Khi chưa cài, khay, CLI và native host tự chạy như cũ.
 
-```powershell
-cd "C:\Users\lately07\Desktop\Folder Group\sentinel-guard"
-.\.venv\Scripts\python -m sentinel service snapshot --source C:\SentinelSnapshot
-# xem lại C:\SentinelSnapshot, rồi:
-.\.venv\Scripts\python -m sentinel service install --source C:\SentinelSnapshot
-.\.venv\Scripts\python -m sentinel service verify --restart
-```
-
-`verify` in PASS/FAIL/SKIP từng mục và thoát khác 0 nếu có FAIL. Gỡ: `sentinel service uninstall`
-(giữ khu cách ly và nhật ký). Khi chưa cài, khay, CLI và native host tự chạy như cũ.
+Trước lần cài đầu, vòng rà soát thứ năm (`REVIEWS.md`) tìm và sửa 13 lỗi sẽ làm hỏng lần chạy thật: bộ cài
+(quyền đọc cấu hình, `SeRestorePrivilege`, group, cách Windows ghi lại ACL, gỡ khi dịch vụ đã mất, dọn khi
+cài hỏng, ghi log khi khởi động hỏng), `verify` chạy quá sớm, worker chết ngay khi khởi động dưới token hạn
+chế (hai nguyên nhân), bộ luật quá 1 MiB không tới được worker, và khay không tìm được helper UAC.
 
 **Còn lại:**
 

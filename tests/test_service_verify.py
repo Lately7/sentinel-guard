@@ -70,6 +70,60 @@ def test_without_elevation_it_stops_before_touching_anything(monkeypatch):
     assert [(r.name, r.passed) for r in results] == [("elevated_token", False)]
 
 
+def test_a_service_still_starting_is_waited_for_not_failed(monkeypatch):
+    replies = iter(["STATE : 2 START_PENDING", "STATE : 2 START_PENDING", "STATE : 4 RUNNING"])
+    monkeypatch.setattr(verify, "sc", lambda *a: next(replies))
+    monkeypatch.setattr(verify.time, "sleep", lambda s: None)
+    assert "RUNNING" in verify._settled()
+
+
+def test_a_service_that_never_finishes_starting_is_reported_as_it_is(monkeypatch):
+    monkeypatch.setattr(verify, "sc", lambda *a: "STATE : 2 START_PENDING")
+    monkeypatch.setattr(verify, "START_WAIT_SECONDS", 0.0)
+    assert "START_PENDING" in verify._settled()
+
+
+def test_the_pipe_gets_a_moment_after_running_then_the_failure_is_real(monkeypatch):
+    class Late:
+        def __init__(self, misses):
+            self.misses = misses
+
+        def request(self, op):
+            if self.misses:
+                self.misses -= 1
+                raise verify.ServiceUnavailable("SERVICE_UNAVAILABLE")
+            return {"protocol": 1}
+
+    monkeypatch.setattr(verify.time, "sleep", lambda s: None)
+    assert verify._hello(Late(2)) == (True, "")
+    monkeypatch.setattr(verify, "PIPE_WAIT_SECONDS", 0.0)
+    with pytest.raises(verify.ServiceUnavailable):
+        verify._hello(Late(1))
+
+
+class Status:
+    def __init__(self, *observations):
+        self.observations = list(observations)
+
+    def request(self, op):
+        assert op == "status"
+        return {"observation": self.observations.pop(0) if len(self.observations) > 1 else self.observations[0]}
+
+
+def test_the_observer_check_waits_for_the_first_journal_tick(monkeypatch):
+    monkeypatch.setattr(verify.time, "sleep", lambda s: None)
+    before = {"prevention": "none"}
+    after = {"prevention": "none", "records": 0, "gap_access_denied": 2}
+    assert verify._observed(Status(before, before, after)) == (False, "journal denied 2 times")
+    assert verify._observed(Status(before, {"prevention": "none", "records": 3}))[0] is True
+
+
+def test_no_journal_tick_at_all_is_a_fail_not_a_pass(monkeypatch):
+    monkeypatch.setattr(verify.time, "sleep", lambda s: None)
+    monkeypatch.setattr(verify, "OBSERVE_WAIT_SECONDS", 0.0)
+    assert verify._observed(Status({"prevention": "none"})) == (False, "no journal tick in time")
+
+
 def test_a_stopped_service_ends_the_run_with_a_fail(monkeypatch):
     class Scm:
         def elevated(self) -> bool:

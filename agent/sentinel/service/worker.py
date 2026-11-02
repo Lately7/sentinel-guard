@@ -7,8 +7,11 @@ a Job Object (memory cap, one process, killed when the job handle closes).
 It inherits only its two pipe handles and gets a minimal environment.
 
 A restricted copy of the caller's primary token needs no extra privilege for
-CreateProcessAsUserW (R13b P5), so this runs and is tested unelevated; as the
-LocalSystem service it does the same from the service token.
+CreateProcessAsUserW (R13b P5), so this runs and is tested unelevated. As the
+LocalSystem service it does the same from the service token, with restricting
+SIDs and a private desktop: that worker holds no user's identity, so the Users
+and Everyone entries on the runtime are all it can use, and it needs a desktop
+it can open before user32 lets it live (measured, REVIEWS.md fifth round).
 """
 
 from __future__ import annotations
@@ -16,19 +19,30 @@ from __future__ import annotations
 import ctypes
 import os
 import sys
+import threading
 from ctypes import wintypes
 from typing import Sequence
+
+# What the restricted pass of the access check may use. Python has to load system
+# DLLs and reach the object namespace, which these three can. None of them is on the
+# state tree or a user's profile, and low integrity stops every write.
+RESTRICTING_SIDS = ("S-1-5-32-545", "S-1-1-0", "S-1-5-12")
+_desktop: str | None = None
+_desktop_handles: tuple[int, int] = (0, 0)  # kept open: the objects live as long as a handle does
+_desktop_lock = threading.Lock()
 
 if os.name == "nt":
     _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
     _adv = ctypes.WinDLL("advapi32", use_last_error=True)
+    _u32 = ctypes.WinDLL("user32", use_last_error=True)
 
     TOKEN_QUERY, TOKEN_DUPLICATE, TOKEN_ASSIGN_PRIMARY, TOKEN_ADJUST_DEFAULT = 0x8, 0x2, 0x1, 0x80
     DISABLE_MAX_PRIVILEGE = 0x1
     TokenIntegrityLevel = 25
     SE_GROUP_INTEGRITY = 0x20
     CREATE_SUSPENDED = 0x4
-    CREATE_NO_WINDOW = 0x08000000
+    # Not CREATE_NO_WINDOW: its hidden console needs a conhost this token cannot attach to.
+    DETACHED_PROCESS = 0x8
     CREATE_UNICODE_ENVIRONMENT = 0x400
     EXTENDED_STARTUPINFO_PRESENT = 0x00080000
     CREATE_BREAKAWAY_FROM_JOB = 0x01000000
@@ -41,6 +55,8 @@ if os.name == "nt":
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
     JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION = 0x400
     WAIT_OBJECT_0, WAIT_TIMEOUT = 0, 0x102
+    GENERIC_ALL = 0x10000000
+    UOI_NAME = 2
 
     class SID_AND_ATTRIBUTES(ctypes.Structure):
         _fields_ = [("Sid", ctypes.c_void_p), ("Attributes", wintypes.DWORD)]
@@ -111,6 +127,17 @@ if os.name == "nt":
                                           ctypes.c_void_p, wintypes.BOOL, wintypes.DWORD, ctypes.c_void_p,
                                           wintypes.LPCWSTR, ctypes.c_void_p, ctypes.POINTER(PROCESS_INFORMATION)]
     _k32.LocalFree.argtypes = [ctypes.c_void_p]
+    _adv.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p]
+    _u32.CreateWindowStationW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p]
+    _u32.CreateWindowStationW.restype = wintypes.HANDLE
+    _u32.CreateDesktopW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.c_void_p, wintypes.DWORD,
+                                    wintypes.DWORD, ctypes.c_void_p]
+    _u32.CreateDesktopW.restype = wintypes.HANDLE
+    _u32.GetProcessWindowStation.restype = wintypes.HANDLE
+    _u32.SetProcessWindowStation.argtypes = [wintypes.HANDLE]
+    _u32.GetUserObjectInformationW.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+                                               ctypes.c_void_p]
 
 
 class WorkerError(OSError):
@@ -137,19 +164,21 @@ def _restricted_low_token(service_sid: str | None = None) -> int:
             # service) still yields a worker without admin access.
             disable = SID_AND_ATTRIBUTES(admins, 0)
             restricted = wintypes.HANDLE()
-            restricting = ctypes.c_void_p()
+            sids: list[ctypes.c_void_p] = []
             try:
-                if service_sid and not _adv.ConvertStringSidToSidW(service_sid, ctypes.byref(restricting)):
-                    raise _fail("ConvertStringSidToSid(service)")
-                restrict_entry = SID_AND_ATTRIBUTES(restricting, 0)
+                for name in (*RESTRICTING_SIDS, service_sid) if service_sid else ():
+                    sid = ctypes.c_void_p()
+                    if not _adv.ConvertStringSidToSidW(name, ctypes.byref(sid)):
+                        raise _fail("ConvertStringSidToSid(restricting)")
+                    sids.append(sid)
+                entries = (SID_AND_ATTRIBUTES * len(sids))(*(SID_AND_ATTRIBUTES(sid, 0) for sid in sids))
                 if not _adv.CreateRestrictedToken(own, DISABLE_MAX_PRIVILEGE, 1, ctypes.byref(disable),
-                                                  0, None, 1 if service_sid else 0,
-                                                  ctypes.byref(restrict_entry) if service_sid else None,
+                                                  0, None, len(sids), ctypes.byref(entries) if sids else None,
                                                   ctypes.byref(restricted)):
                     raise _fail("CreateRestrictedToken")
             finally:
-                if restricting:
-                    _k32.LocalFree(restricting)
+                for sid in sids:
+                    _k32.LocalFree(sid)
         finally:
             _k32.LocalFree(admins)
     finally:
@@ -167,6 +196,52 @@ def _restricted_low_token(service_sid: str | None = None) -> int:
     finally:
         _k32.LocalFree(low)
     return restricted.value
+
+
+def _private_desktop() -> str:
+    """station\\desktop that a restricted, low-integrity worker can open.
+
+    ctypes brings in user32, which ends a process that cannot open its desktop
+    (measured: both the RESTRICTED entry and the low label are needed). Session 0's
+    station is shared with other services, so the service makes its own. Its handles
+    stay open for the life of the process, or the objects would go with them.
+    """
+    global _desktop, _desktop_handles
+    with _desktop_lock:
+        if _desktop is not None:
+            return _desktop
+        from .winpipe import current_process_caller
+
+        owner = current_process_caller().sid
+        sddl = f"D:(A;;GA;;;SY)(A;;GA;;;{owner})(A;;GA;;;RC)S:(ML;;NW;;;LW)"
+        sd = ctypes.c_void_p()
+        if not _adv.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, ctypes.byref(sd), None):
+            raise _fail("ConvertStringSecurityDescriptorToSecurityDescriptor")
+        try:
+            attrs = SECURITY_ATTRIBUTES(ctypes.sizeof(SECURITY_ATTRIBUTES), sd, False)
+            # Unnamed: Windows names it after the logon session. A chosen name is
+            # refused below SYSTEM (measured: error 5), and nothing needs one.
+            station = _u32.CreateWindowStationW(None, 0, GENERIC_ALL, ctypes.byref(attrs))
+            if not station:
+                raise _fail("CreateWindowStation")
+            previous = _u32.GetProcessWindowStation()
+            # CreateDesktop has no station argument: it uses this process's current one.
+            if not _u32.SetProcessWindowStation(station):
+                raise _fail("SetProcessWindowStation")
+            try:
+                desktop = _u32.CreateDesktopW("Worker", None, None, 0, GENERIC_ALL, ctypes.byref(attrs))
+                if not desktop:
+                    raise _fail("CreateDesktop")
+            finally:
+                _u32.SetProcessWindowStation(previous)
+            name = ctypes.create_unicode_buffer(256)
+            if not _u32.GetUserObjectInformationW(station, UOI_NAME, name, ctypes.sizeof(name), None):
+                raise _fail("GetUserObjectInformation")
+        finally:
+            _k32.LocalFree(sd)
+        _desktop_handles = (station, desktop)
+        _desktop = f"{name.value}\\Worker"
+        return _desktop
 
 
 def _job(memory_limit: int) -> int:
@@ -292,13 +367,15 @@ def launch(args: Sequence[str], *, memory_limit: int = 512 * 1024 * 1024,
         si = STARTUPINFOEXW()
         si.StartupInfo.cb = ctypes.sizeof(STARTUPINFOEXW)
         si.StartupInfo.dwFlags = STARTF_USESTDHANDLES
+        if service_sid:
+            si.StartupInfo.lpDesktop = _private_desktop()
         si.StartupInfo.hStdInput = child_in_r
         si.StartupInfo.hStdOutput = child_out_w
         si.StartupInfo.hStdError = child_out_w
         si.lpAttributeList = ctypes.cast(attrs, ctypes.c_void_p)
         pi = PROCESS_INFORMATION()
         env = _environment()
-        flags = CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT
+        flags = CREATE_SUSPENDED | DETACHED_PROCESS | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT
         if not _adv.CreateProcessAsUserW(token, exe, cmdline, None, None, True, flags, env,
                                          cwd or os.path.dirname(exe), ctypes.byref(si), ctypes.byref(pi)):
             raise _fail("CreateProcessAsUser")

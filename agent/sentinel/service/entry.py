@@ -61,7 +61,12 @@ def main() -> None:
     os.environ["SENTINEL_HOME"] = str(paths.state_root)
     logging.basicConfig(filename=str(paths.state("journal") / "service.log"), level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    run(lambda: ProductService(lambda: _state_backend(paths)), version.name)
+    try:
+        run(lambda: ProductService(lambda: _state_backend(paths)), version.name)
+    except Exception:
+        # Failing before the dispatcher connects, SCM can show only 1067. The reason is here.
+        log.exception("service could not start")
+        raise
 
 
 if __name__ == "__main__":

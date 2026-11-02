@@ -52,6 +52,22 @@ def test_changed_plan_reference_refused_before_display():
         confirm(PLAN, client=client, message_box=lambda *args: 6)
 
 
+def test_the_tray_finds_the_helper_through_the_service_registration(tmp_path, monkeypatch):
+    from sentinel.service import consent
+    from sentinel.service.paths import installed_paths
+
+    paths = installed_paths("v1", program_files=tmp_path / "pf", program_data=tmp_path / "pd")
+    paths.version.mkdir(parents=True)
+    (paths.version / "pythonw.exe").write_bytes(b"stand-in")
+    monkeypatch.setattr(consent, "installed_paths", lambda version: paths)
+    monkeypatch.setattr(consent, "active_version", lambda: None)
+    monkeypatch.setattr(consent, "registered_version", lambda: None)
+    with pytest.raises(ConsentError, match="INSTALL_INTEGRITY"):
+        consent.protected_helper()
+    monkeypatch.setattr(consent, "registered_version", lambda: paths.version)
+    assert consent.protected_helper() == (paths.version / "pythonw.exe", paths.version)
+
+
 def test_service_claim_expiry_and_changed_target():
     backend, clock = FakeBackend(), Clock()
     core = ServiceCore(backend, clock=clock)
