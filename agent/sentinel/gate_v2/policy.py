@@ -151,8 +151,12 @@ def decide(
             incomplete.append("INCOMPLETE_COVERAGE")
         elif result.coverage.mode == "fixed_partial":
             reduced = True
-        if result.coverage.certainty != "verified" and status is StageStatus.COMPLETED:
-            # Milestone 4 must resolve verified-daemon ClamAV OK with declared outer-byte coverage.
+        if result.coverage.certainty != "verified" and not (
+            result.engine_id == "defender" and result.coverage.certainty == "declared" and
+            result.coverage.mode == "full" and status is StageStatus.COMPLETED
+        ) and status is StageStatus.COMPLETED:
+            # Defender's path result is bound by before/after generation checks;
+            # other declared coverage does not establish a trusted negative.
             incomplete.append("UNCERTAIN_COVERAGE")
     if coverage_name:
         incomplete.append("INCOMPLETE_COVERAGE")
