@@ -132,8 +132,8 @@ cần xử lý mới sáng lên (333 ms); tắt hết khi Windows tắt hiệu �
 | r4 | Review trạng thái hiện tại (tài khoản mới) | ✅ RT-008…011 | `docs/handoff/codex-review-r4.md` |
 | r5 | Điểm yếu ClamAV, so với Bitdefender/Malwarebytes | ✅ RT-012…015 | `docs/handoff/codex-research-r5.md` |
 | r6 | Sản phẩm: 3 tính năng, so sánh, lỗ hổng, giao diện bớt "AI" | ✅ RT-016…027 | `docs/handoff/codex-product-r6.md` |
-| r7 | Tổng quan tài liệu khoa học về các loại mã độc và cách phát hiện | ⏳ đang chạy | — |
-| Icon | Bộ icon: v1 xong; v2 một màu, vuông nhỏ, viền xa | ⏳ đang làm v2 | `assets/brand/` |
+| r7 | Tổng quan tài liệu khoa học về các loại mã độc và cách phát hiện | ✅ top 10 cải tiến | `docs/handoff/codex-literature-r7.md` |
+| Icon | v2: lõi một màu (đen; bộ xám có sẵn), vuông nhỏ, viền tách rời | ✅ | `assets/brand/` |
 
 ## Kiểm thử gần nhất
 
