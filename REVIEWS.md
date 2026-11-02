@@ -156,3 +156,36 @@ with a desired-behaviour test are in `tests/test_known_issues.py`
 
 Tests after these fixes: pytest 110 passed, 4 skipped (real-clamd tests, no
 clamd), 3 xfailed (known issues); node --test 12 passed.
+
+## Gate v2 milestone 1 (Codex writes, Claude reviews) — 2026-11-02 night
+
+Task files `docs/handoff/CODEX_TASK_GATE_V2_M1.md` (round 1, pinned to
+`682a495`) and `CODEX_TASK_GATE_V2_M1_R2.md` (round 2, review fixes); Codex
+answers in `docs/handoff/codex-gate-v2-m1.md`. Scope check clean in both
+rounds (only `agent/sentinel/gate_v2/`, `tests/gate_v2/`). Merged
+`9a101cb` (`--no-ff`). No caller uses `gate_v2` yet.
+
+| # | Finding by Claude on round 1 | Outcome |
+|---|---|---|
+| F1 | Unaccepted detections (unverified, failed stage, outside inspected ranges, identity mismatch) were dropped; with an optional stage the file became trusted clean (e.g. unverified clamd `FOUND`) | Fixed in round 2: `UNACCEPTED_DETECTION` → at least `unknown`, never trusted clean or cacheable |
+| F2 | Conclusive evidence of category PUA/riskware vanished (neither conclusive nor weak) | Fixed: counts as suspicious; structure/origin/health stay context |
+| F3 | `protection_generation=None` (CLI, on-demand, download) always gave `PROTECTION_STOPPED`, so on-demand scans could never quarantine | Fixed: barrier only for a bound generation |
+| F4 | `FinalDecision.duration_ms` was an absolute monotonic time | Fixed: last end − first start |
+| F5 | `tests/gate_v2/conftest.py` pointed `SENTINEL_HOME` into the repository (to dodge a sandbox temp-dir error) | Fixed: file removed; root tmp_path fixture applies; a test asserts the home is outside the repo |
+| F6 | Unknown parser state strings counted as complete enumeration | Fixed: only `"complete"` is complete |
+| F7 | `__import__("typing").Union` | Fixed |
+| F8 | `certainty="declared"` on a completed stage → `UNCERTAIN_COVERAGE`, so a clamd `OK` can never give trusted clean | Kept strict for M1, comment added; to settle in milestone 4 (R11 §6 allows a verified-daemon `OK` for outer bytes) |
+
+Accepted as designed: identity is mandatory on every `EngineResult`; a path
+request whose completed stage lacks volume/file ID raises `MISSING_IDENTITY`
+(the M2 orchestrator must turn that into a typed result); a malicious
+decision with a failed companion stage is not cacheable (stricter than R11
+§3); evidence from a disabled-by-policy stage is an unaccepted detection.
+Codex left empty temp folders (sandbox could not delete them); Claude
+removed them before committing.
+
+Tests: Codex ran `tests/gate_v2` in its sandbox only with a workaround
+(135 passed); Claude ran the full suites outside the sandbox — worktree
+254 passed, 4 skipped, 2 xfailed; after the merge on `gate-baseline` pytest
+264 passed, 4 skipped (real clamd not running), 2 xfailed (RT-001, RT-002);
+node --test 39 passed.
