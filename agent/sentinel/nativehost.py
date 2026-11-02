@@ -176,9 +176,27 @@ class Host:
         return {}
 
 
+def _read_exact(stream: BinaryIO, n: int) -> bytes | None:
+    """Read exactly n bytes; None if the stream ends first.
+
+    A pipe may hand back fewer bytes than asked for; treating a short read as
+    the whole frame would parse half a message and desynchronise every frame
+    after it.
+    """
+    parts: list[bytes] = []
+    remaining = n
+    while remaining > 0:
+        part = stream.read(remaining)
+        if not part:
+            return None
+        parts.append(part)
+        remaining -= len(part)
+    return b"".join(parts)
+
+
 def read_message(stream: BinaryIO) -> Any | None:
-    raw_len = stream.read(4)
-    if len(raw_len) < 4:
+    raw_len = _read_exact(stream, 4)
+    if raw_len is None:
         return None
     (n,) = struct.unpack("<I", raw_len)
     if n > MAX_IN:
@@ -191,7 +209,9 @@ def read_message(stream: BinaryIO) -> Any | None:
                 return None
             remaining -= len(part)
         return {"type": "__too_large__"}
-    data = stream.read(n)
+    data = _read_exact(stream, n)
+    if data is None:
+        return None  # the browser closed the pipe mid-message
     try:
         return json.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
@@ -199,6 +219,22 @@ def read_message(stream: BinaryIO) -> Any | None:
 
 
 _write_lock = threading.Lock()
+
+
+def origin_allowed(argv: list[str]) -> bool:
+    """The browser passes the caller's origin; only our extension may talk to the host.
+
+    A missing origin is refused too: it means someone started the host by hand.
+    `--diagnostic` is the explicit way to do that for debugging.
+    """
+    if "--diagnostic" in argv:
+        log.warning("native host started in diagnostic mode without an origin check")
+        return True
+    origin = next((a for a in argv if a.startswith("chrome-extension://")), None)
+    if origin is None or origin.rstrip("/") != f"chrome-extension://{config.EXTENSION_ID}":
+        log.warning("rejected origin %s", origin)
+        return False
+    return True
 
 
 def write_message(stream: BinaryIO, obj: dict[str, Any]) -> None:
@@ -216,10 +252,7 @@ def write_message(stream: BinaryIO, obj: dict[str, Any]) -> None:
 def main(argv: list[str]) -> int:
     logging.basicConfig(filename=str(config.data_dir() / "nativehost.log"), level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
-    # The browser passes the caller's origin; refuse anything but our extension.
-    origin = next((a for a in argv if a.startswith("chrome-extension://")), None)
-    if origin and origin.rstrip("/") != f"chrome-extension://{config.EXTENSION_ID}":
-        log.warning("rejected origin %s", origin)
+    if not origin_allowed(argv):
         return 1
     if os.name == "nt":
         import msvcrt
