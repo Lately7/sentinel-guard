@@ -33,13 +33,34 @@ quanh quyền đó; tối ưu bảo vệ thời gian thực; kiểm tra kỹ t�
 nghiên cứu tiếp Quét, Quét sâu và **Quét và sửa**. Quyết định này thay giả
 định "agent không cần admin" trong R11/R12d.
 
-Cách làm: Codex nghiên cứu chỉ-đọc trước (vòng R13, brief
-`docs/research/briefs/R13-admin-realtime-remediation.md`): kiến trúc tách
-quyền (dịch vụ có quyền + giao diện/native host không quyền), tách phần đọc
-tệp lạ ra tiến trình quyền thấp, USN journal/ETW cho thời gian thực, Mark of
-the Web cho tệp tải về, phạm vi quét sâu kiểu Autoruns, sửa có nhật ký hoàn
-tác. Chưa có code nào chạy với quyền admin; cài dịch vụ cần chủ dự án tự chạy
-lệnh với quyền admin (Claude không tự nâng quyền).
+Nghiên cứu xong: `docs/research/R13-admin-realtime-remediation.md`. Thiết kế
+được chọn (theo R13):
+
+* **Dịch vụ Windows có quyền** (mỏng) + khay hệ thống và native host **không
+  quyền**, nói chuyện qua named pipe có ACL, kiểm tra người gọi và từng lệnh.
+* **Đọc tệp lạ trong tiến trình quyền thấp** (restricted token, low
+  integrity, Job Object); dịch vụ có quyền chỉ cách ly/sửa sau khi kiểm lại.
+* Thời gian thực: USN journal để đối chiếu lại sau khi tràn hàng đợi, ETW để
+  quét chương trình lúc khởi chạy — vẫn **không chặn được trước khi chạy**
+  (cần driver ký số).
+* Tệp tải về: phát hiện ở mọi trình duyệt qua thư mục + Mark of the Web, quét
+  lại khi chữ ký cập nhật hoặc khi chạy lần đầu.
+* **Quét và sửa**: kế hoạch sửa có nhật ký hoàn tác; tự động chỉ cách ly tệp
+  có bằng chứng chắc chắn; diệt tiến trình, gỡ khởi động cùng Windows, dịch
+  vụ, WMI… cần xác nhận; không bao giờ đụng tệp hệ thống Windows hay Defender.
+
+| Mốc | Việc | Ghi chú |
+|---|---|---|
+| G3–G6 | Gate v2 mốc 3–6 (core/luật, ClamAV, Defender, cache + adapter) | làm trước |
+| A1 | Giao thức pipe + dịch vụ giả lập, native host/khay thành client | không cần admin để test |
+| A2 | Worker quét quyền thấp + Job Object | không cần admin để test |
+| A3 | Gate v2 mốc 7 qua dịch vụ: cách ly có kiểm lại, nhật ký hoàn tác | |
+| A4 | Gate v2 mốc 8 + nguồn quét admin (mọi user, dịch vụ, tác vụ, WMI…) | |
+| A5 | USN journal, ETW khởi chạy tiến trình, quét lại tệp tải về | cần chủ dự án chạy thử với quyền admin |
+| A6 | Xem trước kế hoạch sửa, rồi từng thao tác sửa có xác nhận | |
+
+Cài và chạy dịch vụ cần quyền admin: chủ dự án tự chạy; Claude không tự nâng
+quyền và không đổi cài đặt Defender.
 
 ## Ba tính năng bắt buộc
 
