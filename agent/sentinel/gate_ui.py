@@ -45,9 +45,10 @@ class GatePanel:
         self.nb = nb
         self.job: ScanJob | None = None
         gap = theme.px(nb, 12)
-        frame = self.frame = ttk.Frame(nb, padding=(gap, gap, gap, gap))
-        nb.add(frame, text="Quét")
+        frame = self.frame = ttk.Frame(nb, padding=(gap * 2, gap * 2, gap * 2, gap))
+        nb.add(frame, text="Quét", icon="scan")
 
+        ttk.Label(frame, text="Quét", style="PageTitle.TLabel").pack(anchor="w", pady=(0, gap))
         ctl = ttk.Frame(frame)
         ctl.pack(fill="x")
         self.buttons = []
@@ -60,7 +61,7 @@ class GatePanel:
             self.buttons.append(b)
         self.stop_btn = ttk.Button(ctl, text="Dừng", command=self.stop, state="disabled")
         self.stop_btn.pack(side="left", padx=(8, 0))
-        self.details_btn = ttk.Button(ctl, text="Chi tiết kỹ thuật", command=self.toggle_layers)
+        self.details_btn = ttk.Button(ctl, text="Các lớp", command=self.toggle_layers)
         self.details_btn.pack(side="right")
 
         # Engine-by-engine status is for people who want it; hidden by default.
@@ -84,7 +85,7 @@ class GatePanel:
         self.bar = theme.ActivityBar(frame)
         self.bar.pack(fill="x", pady=(gap, 0))
         self.bar_widget = self.bar.canvas
-        self.progress_var = tk.StringVar(value="Chưa quét lần nào trong phiên này.")
+        self.progress_var = tk.StringVar(value="Sẵn sàng")
         ttk.Label(frame, textvariable=self.progress_var, justify="left").pack(anchor="w", pady=(8, 2))
         self.current_var = tk.StringVar(value="")
         ttk.Label(frame, textvariable=self.current_var, style="Muted.TLabel").pack(anchor="w", pady=(0, gap))
@@ -104,7 +105,7 @@ class GatePanel:
         self.tv.configure(yscrollcommand=sb.set)
         self.tv.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
-        self.empty = ttk.Label(box, text="Chưa có mục cần xử lý.\nMối đe dọa và tệp nghi ngờ sẽ hiện ở đây.",
+        self.empty = ttk.Label(box, text="Không có mục nào cần xem",
                                style="CardMuted.TLabel", justify="center")
         self.empty.place(relx=0.5, rely=0.5, anchor="center")
         self.flash = theme.RowFlash(self.tv)
@@ -121,7 +122,7 @@ class GatePanel:
         else:
             self.layers.pack(fill="x", pady=(theme.px(self.frame, 12), 0), after=self.details_btn.master)
         self.layers_shown = not self.layers_shown
-        self.details_btn.configure(text="Ẩn chi tiết kỹ thuật" if self.layers_shown else "Chi tiết kỹ thuật")
+        self.details_btn.configure(text="Ẩn các lớp" if self.layers_shown else "Các lớp")
 
     # -- layer status ------------------------------------------------------
 

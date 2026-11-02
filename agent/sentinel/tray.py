@@ -20,7 +20,7 @@ from .engine.scanner import Scanner
 from .engine.signatures import SignatureEngine
 from .gate_ui import GatePanel
 from .engine_status import EngineStatus
-from .overview_ui import Overview, protection_state
+from .overview_ui import Overview
 from .singleton import AppInstance
 from .watcher import RealtimeProtection
 
@@ -240,37 +240,33 @@ class App:
         theme.dark_title_bar(w)
         self.window = w
         gap = theme.px(w, 16)
-        head = ttk.Frame(w, padding=(gap, gap, gap, theme.px(w, 4)))
-        head.pack(fill="x")
-        self.logo = theme.LogoMark(head, size=22)
-        self.logo.pack(side="left")
-        ttk.Label(head, text=APP, style="Title.TLabel").pack(side="left", padx=(10, 0))
-        state = ttk.Frame(head)
-        state.pack(side="right")
-        self.state_dot = theme.Dot(state, bg=theme.BG, size=10)
-        self.state_dot.pack(side="left", padx=(0, 8))
-        self.state_title = ttk.Label(state, style="State.TLabel")
-        self.state_title.pack(side="left")
-        self.state_detail = ttk.Label(state, style="Muted.TLabel")
-        self.state_detail.pack(side="left", padx=(10, 0))
-
-        nb = ttk.Notebook(w)
-        nb.pack(fill="both", expand=True, padx=theme.px(w, 6), pady=(0, theme.px(w, 6)))
+        side = tk.Frame(w, bg=theme.BG, width=theme.px(w, 84))
+        side.pack(side="left", fill="y")
+        side.pack_propagate(False)
+        self.logo = theme.LogoMark(side, size=26)
+        self.logo.pack(pady=(gap * 1.2, gap * 1.6))
+        tk.Frame(w, bg=theme.LINE, width=1).pack(side="left", fill="y")
+        nb = theme.Pages(w, side)
+        nb.pack(side="left", fill="both", expand=True)
         self.overview = Overview(nb, self)
         self.gate = GatePanel(nb, self)
-        self.events_tv = self._table(nb, "Lịch sử", ("Thời gian", "Nguồn", "Mức", "Nội dung"), (130, 100, 80, 640))
-        qf = ttk.Frame(nb, padding=gap)
-        nb.add(qf, text="Cách ly")
+        hf = ttk.Frame(nb, padding=(gap * 2, gap * 2, gap * 2, gap))
+        nb.add(hf, text="Lịch sử", icon="history")
+        ttk.Label(hf, text="Lịch sử", style="PageTitle.TLabel").pack(anchor="w", pady=(0, gap))
+        self.events_tv = self._table(hf, None, ("Thời gian", "Nguồn", "Mức", "Nội dung"), (130, 100, 80, 640))
+        qf = ttk.Frame(nb, padding=(gap * 2, gap * 2, gap * 2, gap))
+        nb.add(qf, text="Cách ly", icon="quarantine")
+        ttk.Label(qf, text="Cách ly", style="PageTitle.TLabel").pack(anchor="w", pady=(0, gap))
         self.q_tv = self._table(qf, None, ("ID", "Thời gian", "Vị trí gốc", "Lý do"), (0, 130, 380, 400))
         qb = ttk.Frame(qf)
         qb.pack(anchor="w", pady=(10, 0))
         ttk.Button(qb, text="Khôi phục", command=self.restore_selected).pack(side="left", padx=(0, 8))
         ttk.Button(qb, text="Xóa vĩnh viễn", command=self.delete_selected).pack(side="left")
-        wf = ttk.Frame(nb, padding=gap)
-        nb.add(wf, text="Web")
-        ttk.Label(wf, text="Sự kiện từ trình duyệt", style="Section.TLabel").pack(anchor="w", pady=(0, 6))
+        wf = ttk.Frame(nb, padding=(gap * 2, gap * 2, gap * 2, gap))
+        nb.add(wf, text="Web", icon="web")
+        ttk.Label(wf, text="Web", style="PageTitle.TLabel").pack(anchor="w", pady=(0, gap))
         self.web_tv = self._table(wf, None, ("Thời gian", "Mức", "Nội dung"), (130, 80, 720))
-        ttk.Label(wf, text="Trang bạn đã tin cậy", style="Section.TLabel").pack(anchor="w", pady=(gap, 6))
+        ttk.Label(wf, text="Trang đã tin cậy", style="Section.TLabel").pack(anchor="w", pady=(gap, 6))
         self.allow_tv = self._table(wf, None, ("Tên miền",), (600,), height=5)
         ab = ttk.Frame(wf)
         ab.pack(anchor="w", pady=(10, 0))
@@ -308,10 +304,6 @@ class App:
             return
         if self.gate is not None:
             self.gate.refresh_layers()
-        st = protection_state(self)
-        self.state_dot.set(st.color)
-        self.state_title.configure(text=st.title)
-        self.state_detail.configure(text=st.detail)
         self.overview.refresh()
         _fill(self.events_tv, [(e["id"], (_fmt_ts(e["ts"]), SOURCE_VI.get(e["source"], e["source"]),
                                           LEVEL_VI.get(e["level"], e["level"]), f"{e['title']} — {e['detail']}"),

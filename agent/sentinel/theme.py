@@ -121,6 +121,14 @@ def apply(root: tk.Tk) -> ttk.Style:
     s.configure("Title.TLabel", font=(FONT_STRONG, 14) if FONT_STRONG != FONT else (FONT, 14, "bold"))
     s.configure("State.TLabel", font=strong)
     s.configure("Section.TLabel", foreground=MUTED, font=(FONT, SMALL))
+    s.configure("Nav.TLabel", background=BG, foreground=MUTED, font=(FONT, 8))
+    s.configure("NavOn.TLabel", background=BG, foreground=TEXT, font=(FONT, 8))
+    s.configure("Hero.TLabel", background=SURFACE, font=(FONT_STRONG, 22) if FONT_STRONG != FONT else (FONT, 22, "bold"))
+    s.configure("HeroSub.TLabel", background=SURFACE, foreground=MUTED, font=(FONT, SIZE))
+    s.configure("TileTitle.TLabel", background=SURFACE, foreground=MUTED, font=(FONT, SMALL))
+    s.configure("TileValue.TLabel", background=SURFACE, font=(FONT_STRONG, 13) if FONT_STRONG != FONT else (FONT, 13, "bold"))
+    s.configure("PageTitle.TLabel", font=(FONT_STRONG, 15) if FONT_STRONG != FONT else (FONT, 15, "bold"))
+    s.configure("Big.Primary.TButton", font=(FONT_STRONG, 12) if FONT_STRONG != FONT else (FONT, 12, "bold"), padding=(28, 10))
 
     s.configure("TButton", background=RAISED, foreground=TEXT, bordercolor=RAISED, lightcolor=RAISED,
                 darkcolor=RAISED, relief="flat", padding=(12, 5), focusthickness=0)
@@ -377,3 +385,136 @@ class RowFlash:
             self.tv.after(FADE_MS // self.STEPS, self._step, iid, kind, i + 1)
         else:
             self.tv.item(iid, tags=tags)
+
+
+# -- icons and navigation ----------------------------------------------------
+
+def draw_icon(c: tk.Canvas, name: str, x: float, y: float, s: float, color: str, w: float = 1.6) -> None:
+    """Simple line icons drawn on a canvas; (x, y) is the top-left of an s x s box."""
+    w = max(1.0, w * s / 24)
+    cx, cy, r = x + s / 2, y + s / 2, s * 0.38
+    if name == "home":
+        o = s * 0.2
+        c.create_rectangle(x + o, y + o, x + s - o, y + s - o, outline=color, width=w)
+        c.create_rectangle(cx - s * 0.1, cy - s * 0.1, cx + s * 0.1, cy + s * 0.1, fill=color, outline="")
+    elif name == "scan":
+        rr = s * 0.28
+        c.create_oval(cx - rr - s * 0.08, cy - rr - s * 0.08, cx + rr - s * 0.08, cy + rr - s * 0.08, outline=color, width=w)
+        c.create_line(cx + rr * 0.55, cy + rr * 0.55, x + s * 0.86, y + s * 0.86, fill=color, width=w * 1.4, capstyle="round")
+    elif name == "history":
+        c.create_oval(cx - r, cy - r, cx + r, cy + r, outline=color, width=w)
+        c.create_line(cx, cy - r * 0.6, cx, cy, cx + r * 0.45, cy + r * 0.3, fill=color, width=w, capstyle="round")
+    elif name == "quarantine":
+        o = s * 0.2
+        c.create_rectangle(x + o, y + s * 0.38, x + s - o, y + s - o, outline=color, width=w)
+        c.create_line(x + o - s * 0.04, y + s * 0.38, x + s - o + s * 0.04, y + s * 0.38, fill=color, width=w)
+        c.create_arc(cx - s * 0.17, y + s * 0.14, cx + s * 0.17, y + s * 0.56, start=0, extent=180, style="arc",
+                     outline=color, width=w)
+    elif name == "web":
+        c.create_oval(cx - r, cy - r, cx + r, cy + r, outline=color, width=w)
+        c.create_oval(cx - r * 0.42, cy - r, cx + r * 0.42, cy + r, outline=color, width=w)
+        c.create_line(cx - r, cy, cx + r, cy, fill=color, width=w)
+    elif name == "realtime":
+        c.create_oval(cx - r, cy - r, cx + r, cy + r, outline=color, width=w)
+        c.create_oval(cx - r * 0.55, cy - r * 0.55, cx + r * 0.55, cy + r * 0.55, outline=color, width=w)
+        c.create_oval(cx - r * 0.16, cy - r * 0.16, cx + r * 0.16, cy + r * 0.16, fill=color, outline="")
+
+
+class Icon:
+    def __init__(self, parent: tk.Misc, name: str, size: int = 24, color: str = TEXT, bg: str = SURFACE) -> None:
+        s = px(parent, size)
+        self.canvas = tk.Canvas(parent, width=s, height=s, bg=bg, highlightthickness=0, bd=0)
+        self.name, self.size = name, s
+        self.set_color(color)
+
+    def set_color(self, color: str) -> None:
+        self.canvas.delete("all")
+        draw_icon(self.canvas, self.name, 1, 1, self.size - 2, color)
+
+
+class Switch:
+    """On/off switch; the knob slides in 167 ms. Calls `command(new_state)` on click."""
+
+    def __init__(self, parent: tk.Misc, command, bg: str = SURFACE) -> None:
+        self.w, self.h = px(parent, 40), px(parent, 22)
+        self.canvas = tk.Canvas(parent, width=self.w, height=self.h, bg=bg, highlightthickness=0, bd=0, cursor="hand2")
+        self.command = command
+        self.on = False
+        self._pos = 0.0
+        self._job: str | None = None
+        self.canvas.bind("<Button-1>", lambda _e: self.command(not self.on))
+        self._draw()
+
+    def set(self, on: bool) -> None:
+        if on == self.on:
+            return
+        self.on = on
+        if self._job is not None:
+            self.canvas.after_cancel(self._job)
+        if MOTION:
+            self._slide(self._pos, 1.0 if on else 0.0, 0)
+        else:
+            self._pos = 1.0 if on else 0.0
+            self._draw()
+
+    def _slide(self, a: float, b: float, elapsed: int) -> None:
+        t = min(1.0, elapsed / FAST_MS)
+        self._pos = a + (b - a) * ease_out(t)
+        self._draw()
+        if t < 1.0:
+            self._job = self.canvas.after(FRAME_MS, self._slide, a, b, elapsed + FRAME_MS)
+
+    def _draw(self) -> None:
+        # Square track and knob: flat and technical rather than a rounded pill.
+        c, w, h, p = self.canvas, self.w, self.h, self._pos
+        c.delete("all")
+        c.create_rectangle(0, 0, w - 1, h - 1, fill=mix(RAISED, OK, p), outline=mix(LINE, OK, p))
+        pad = px(c, 3)
+        k = h - 2 * pad
+        kx = pad + p * (w - k - 2 * pad)
+        c.create_rectangle(kx, pad, kx + k, pad + k, fill=TEXT if p > 0.5 else MUTED, outline="")
+
+
+class Pages(ttk.Frame):
+    """Content area driven by an icon sidebar; offers the bits of ttk.Notebook the panels use."""
+
+    def __init__(self, parent: tk.Misc, sidebar: tk.Misc) -> None:
+        super().__init__(parent)
+        self.sidebar = sidebar
+        self._frames: list[tk.Misc] = []
+        self._buttons: dict[str, tuple[tk.Frame, Icon, ttk.Label, tk.Frame]] = {}
+        self._current: tk.Misc | None = None
+
+    def add(self, frame: tk.Misc, text: str = "", icon: str = "home") -> None:
+        self._frames.append(frame)
+        cell = tk.Frame(self.sidebar, bg=BG, cursor="hand2")
+        cell.pack(fill="x", pady=px(self, 2))
+        mark = tk.Frame(cell, bg=BG, width=px(self, 3))
+        mark.pack(side="left", fill="y")
+        inner = tk.Frame(cell, bg=BG)
+        inner.pack(side="left", fill="x", expand=True, pady=px(self, 6))
+        ic = Icon(inner, icon, 22, MUTED, BG)
+        ic.canvas.pack()
+        lbl = ttk.Label(inner, text=text, style="Nav.TLabel")
+        lbl.pack(pady=(px(self, 3), 0))
+        for wdg in (cell, inner, ic.canvas, lbl):
+            wdg.bind("<Button-1>", lambda _e, f=frame: self.select(f))
+        self._buttons[str(frame)] = (cell, ic, lbl, mark)
+
+    def tabs(self) -> list[str]:
+        return [str(f) for f in self._frames]
+
+    def select(self, frame: tk.Misc | str) -> None:
+        if isinstance(frame, str):
+            frame = self.nametowidget(frame)
+        if self._current is frame:
+            return
+        if self._current is not None:
+            self._current.pack_forget()
+        frame.pack(fill="both", expand=True)
+        self._current = frame
+        for key, (_cell, ic, lbl, mark) in self._buttons.items():
+            on = key == str(frame)
+            ic.set_color(TEXT if on else MUTED)
+            lbl.configure(style="NavOn.TLabel" if on else "Nav.TLabel")
+            mark.configure(bg=TEXT if on else BG)
