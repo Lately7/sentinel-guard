@@ -34,4 +34,4 @@ ghi chú chỗ đã kiểm chứng, rồi mới lưu vào thư mục này.
 * Mỗi khẳng định về code có `tệp:dòng`; mỗi khẳng định bên ngoài có nguồn.
 * Tách rõ sự thật có tài liệu và suy luận.
 
-Mã nguồn đã tải (tải nông, bỏ thư mục test-data để không kéo mẫu mã độc): `Folder Groupesearch\` — clamav-1.5.4, yara-x-1.22.1, capa-10.0.0, capa-rules, osquery-5.24.0, wazuh-4.14.9 (chỉ agent/FIM/rootcheck/analysisd/ruleset/architecture).
+Mã nguồn đã tải (tải nông, bỏ thư mục test-data để không kéo mẫu mã độc): `Folder Group\research\` — clamav-1.5.4, yara-x-1.22.1, capa-10.0.0, capa-rules, osquery-5.24.0, wazuh-4.14.9 (chỉ agent/FIM/rootcheck/analysisd/ruleset/architecture).
