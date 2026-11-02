@@ -3,7 +3,7 @@
 Một trang duy nhất để theo dõi tiến độ. Chi tiết kỹ thuật vẫn nằm trong
 `docs/handoff/PROJECT_CONTEXT.md`; khi hai nơi khác nhau thì code là đúng.
 
-**Cập nhật:** 2026-11-02 tối · **Nhánh:** `gate-baseline` (chưa push) · **Bàn giao:** `docs/handoff/NEXT_SESSION.md`
+**Cập nhật:** 2026-11-02 đêm · **Nhánh:** `gate-baseline` (chưa push) · **Bàn giao:** `docs/handoff/NEXT_SESSION.md`
 
 ## Ai làm gì
 
@@ -26,13 +26,28 @@ C3c độ phủ ZIP) tạm dừng — Gate v2 định nghĩa lại chúng. Các 
 cổng** vẫn làm ngay: native host (C3e, C3j), extension (C3k), mã thoát CLI
 (C3g), cập nhật chữ ký (C3h), `clamd.conf` (C3i).
 
+## Quyết định mới (2026-11-02 đêm): xoay quanh quyền admin
+
+Chủ dự án quyết định: ứng dụng chạy với quyền admin và được thiết kế xoay
+quanh quyền đó; tối ưu bảo vệ thời gian thực; kiểm tra kỹ tệp tải về; Codex
+nghiên cứu tiếp Quét, Quét sâu và **Quét và sửa**. Quyết định này thay giả
+định "agent không cần admin" trong R11/R12d.
+
+Cách làm: Codex nghiên cứu chỉ-đọc trước (vòng R13, brief
+`docs/research/briefs/R13-admin-realtime-remediation.md`): kiến trúc tách
+quyền (dịch vụ có quyền + giao diện/native host không quyền), tách phần đọc
+tệp lạ ra tiến trình quyền thấp, USN journal/ETW cho thời gian thực, Mark of
+the Web cho tệp tải về, phạm vi quét sâu kiểu Autoruns, sửa có nhật ký hoàn
+tác. Chưa có code nào chạy với quyền admin; cài dịch vụ cần chủ dự án tự chạy
+lệnh với quyền admin (Claude không tự nâng quyền).
+
 ## Ba tính năng bắt buộc
 
 | Tính năng | Hiện có | Còn thiếu |
 |---|---|---|
 | **Quét / Quét sâu** | Quét tệp, thư mục, quét nhanh, toàn máy; 4 lớp (Lõi → Luật+YARA → ClamAV → Defender) | Kết quả "một phần" hoặc engine lỗi vẫn có thể hiện "sạch"; chưa có Quét sâu đúng nghĩa và nút Quét một chạm |
-| **Bảo vệ web trên Helium** | Extension MV3 chặn ~550.000 tên miền, trang cảnh báo, quét tệp tải về qua agent | "Vẫn tiếp tục" tin cậy tên miền vĩnh viễn; tải về lỗi vẫn đếm là đã quét; popup nói "không phát hiện" khi chưa kiểm tra |
-| **Bảo vệ thời gian thực** | Theo dõi Downloads, Desktop, Documents, Startup, %TEMP%, khoá Run | Chỉ phát hiện sau khi tệp đã ghi xuống đĩa (không có driver); tệp bị khoá không thử lại; báo "bật" dù không theo dõi thư mục nào |
+| **Bảo vệ web trên Helium** | Extension MV3 chặn ~550.000 tên miền, trang cảnh báo có "Mở một lần" và "Luôn tin cậy" (đều mở được trang thật), quét tệp tải về qua agent, danh sách tin cậy không giới hạn 5.000 | Trạng thái riêng cho từng tab (đang kiểm tra / hạn chế / agent offline / đã cho phép) |
+| **Bảo vệ thời gian thực** | Theo dõi Downloads, Desktop, Documents, Startup, %TEMP%, khoá Run; thử lại tệp bị khoá; hàng đợi có giới hạn; tắt là không cách ly thêm | Chỉ phát hiện sau khi tệp đã ghi xuống đĩa (không có driver); chưa quét đối chiếu lại thư mục khi hàng đợi tràn |
 
 ## Các giai đoạn
 
@@ -41,7 +56,7 @@ cổng** vẫn làm ngay: native host (C3e, C3j), extension (C3k), mã thoát CL
 | 0 | **Nền tảng**: C1 icon cũ, C2a cổng quét, C2b baseline, giao diện tối, bộ icon v2 | ✅ xong |
 | 1 | **Sửa lỗi** (C3a, d, e, g, h, j, k ✅; C3b/c/f vào Gate v2; C3i bỏ) | ✅ xong |
 | R | **Nghiên cứu sâu cho Gate v2** (R8a–R12d, R11 đặc tả) | ✅ xong |
-| G | **Gate v2** do Codex viết theo đặc tả R11 (8 mốc), Claude review | ⏭ mốc 1 (xem `docs/handoff/NEXT_SESSION.md`) |
+| G | **Gate v2** do Codex viết theo đặc tả R11 (8 mốc), Claude review | mốc 1 ✅ `9a101cb` · mốc 2: xem `docs/handoff/NIGHT_REPORT.md` |
 | 2 | **Red Team viết test** (Codex vòng 1a, 1b) | chờ giai đoạn 1 |
 | 3 | **Contract v1**: tách trạng thái quét khỏi kết luận; "một phần"/lỗi không bao giờ là "sạch" | chờ |
 | 4 | **Chính sách ClamAV + cách ly an toàn** | chờ |
@@ -122,13 +137,13 @@ cần xử lý mới sáng lên (333 ms); tắt hết khi Windows tắt hiệu �
 | RT-013 | ClamAV lỗi/không chạy mà kết luận chung vẫn "sạch" | Cao | GĐ 3 |
 | RT-014 | Lưu trữ/tài liệu mã hoá không được ghi là "chưa kiểm tra được" | TB | GĐ 3 |
 | RT-015 | Đường dẫn trong `clamd.conf` không có ngoặc kép | Thấp | ✖ từ chối: `common/optparser.c:1094-1135` của ClamAV lấy cả phần còn lại của dòng làm giá trị, dấu cách vẫn đúng |
-| RT-016 | Thời gian thực không thử lại tệp đang bị khoá | Cao | GĐ 5 |
-| RT-017 | Hàng đợi chống dội không có giới hạn | TB | GĐ 5 |
-| RT-018 | Tắt bảo vệ không dừng lượt quét/cách ly đang chạy | TB | GĐ 5 |
+| RT-016 | Thời gian thực không thử lại tệp đang bị khoá | Cao | ✅ `d03ea88` (5 lần trong ~40 s, rồi báo "Chưa quét được tệp") |
+| RT-017 | Hàng đợi chống dội không có giới hạn | TB | ✅ `d03ea88` (tối đa 10.000 tệp, tệp thay đổi liên tục vẫn được quét sau 30 s) |
+| RT-018 | Tắt bảo vệ không dừng lượt quét/cách ly đang chạy | TB | ✅ `d03ea88` (sau khi tắt không cách ly thêm; phát hiện vẫn được ghi) |
 | RT-019 | Native host chấp nhận khi thiếu origin | Thấp | ✅ C3j |
 | RT-020 | Thông điệp từ trang thiếu kiểm tra số (NaN) và độ dài | Thấp | ✅ C3k |
-| RT-021 | Allowlist bị cắt im lặng sau 5.000 tên miền | TB | GĐ 5 |
-| RT-022 | "Vẫn tiếp tục" tạo ngoại lệ vĩnh viễn cho cả tên miền | TB | ⏳ đã tách "Mở một lần"/"Luôn tin cậy"; "Mở một lần" chưa mở được trang (xem `docs/handoff/NEXT_SESSION.md` §3) |
+| RT-021 | Allowlist bị cắt im lặng sau 5.000 tên miền | TB | ✅ `8135706` |
+| RT-022 | "Vẫn tiếp tục" tạo ngoại lệ vĩnh viễn cho cả tên miền | TB | ✅ `597df57` — nguyên nhân thật: luật DNR không ghi `resourceTypes` thì bỏ qua `main_frame`, nên cả "Mở một lần" lẫn "Luôn tin cậy" đều không mở được trang bị chặn |
 | RT-023 | Tải về không gửi được tới agent vẫn đếm là đã quét | TB | ✅ |
 | RT-024 | Quét bỏ sót (junction, đường dẫn dài, thiếu quyền) không ghi vào độ phủ | TB | GĐ 5 |
 | RT-025 | Popup nói "Không phát hiện vấn đề" khi chưa kiểm tra | TB | ✅ |
