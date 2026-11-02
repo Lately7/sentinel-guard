@@ -102,6 +102,7 @@ class ScanProgress:
     unverified: int = 0
     unknown: int = 0  # a required check did not finish: neither clean nor a threat
     current: str = ""
+    stage: str = ""  # the check running on `current`, from the gate's own events
     cancelled: bool = False
     errors: list[str] = field(default_factory=list)
     # Sources a smart or deep scan could not look at, by reason: never the same as nothing there.
@@ -141,6 +142,10 @@ class ScanJob:
     def join(self, timeout: float | None = None) -> None:
         self._thread.join(timeout)
 
+    def _on_stage(self, file_id: str, stage: str, state: str, code: str, **details: object) -> None:
+        if state == "started":
+            self.progress.stage = stage
+
     def _files(self) -> Iterator[str]:
         if self.found is None:
             yield from walk(self.progress.paths, self.cancel_event, self.progress.errors)
@@ -156,7 +161,7 @@ class ScanJob:
             for f in self._files():
                 p.current = f
                 try:
-                    v = self.scanner.scan_file(f)
+                    v = self.scanner.scan_file(f, emit=self._on_stage)
                 except Exception as e:  # one hostile file must not end the whole scan
                     log.exception("scan of %s failed", f)
                     p.errors.append(f"{f}: {e}")

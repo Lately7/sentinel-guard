@@ -3,7 +3,7 @@
 Một trang duy nhất để theo dõi tiến độ. Chi tiết kỹ thuật vẫn nằm trong
 `docs/handoff/PROJECT_CONTEXT.md`; khi hai nơi khác nhau thì code là đúng.
 
-**Cập nhật:** 2026-11-02 tối · **Nhánh:** `main` (đổi tên từ `gate-baseline`), đẩy lên `github.com/Lately7/sentinel-guard` · **Kế hoạch toàn bộ:** `docs/handoff/PLAN.md` · **Bàn giao:** `docs/handoff/NEXT_SESSION.md`
+**Cập nhật:** 2026-11-02 đêm, xem `docs/handoff/PLAN.md` §0a · **Nhánh:** `main` (đổi tên từ `gate-baseline`), đẩy lên `github.com/Lately7/sentinel-guard` · **Kế hoạch toàn bộ:** `docs/handoff/PLAN.md` · **Bàn giao:** `docs/handoff/NEXT_SESSION.md`
 
 ## Ai làm gì
 
@@ -174,12 +174,12 @@ cần xử lý mới sáng lên (333 ms); tắt hết khi Windows tắt hiệu �
 | Id | Vấn đề | Mức | Sửa ở |
 |---|---|---|---|
 | RT-001 | Tên ClamAV yếu (vd. `Win.Trojan.Suspect-34`) bị coi là chắc chắn độc → tự cách ly | Cao | GĐ 4 |
-| RT-002 | Khôi phục tệp = tin cậy hash trên toàn máy | Cao | GĐ 4 |
-| RT-003 | Thời gian thực quét cả dữ liệu của Sentinel | TB | GĐ 4 |
+| RT-002 | Khôi phục tệp = tin cậy hash trên toàn máy | Cao | ✅ `3d372ed` |
+| RT-003 | Thời gian thực quét cả dữ liệu của Sentinel | TB | ✅ `088041a` |
 | RT-004 | Quét một phần có thể hiện "sạch" | Cao | C3c + GĐ 3 |
 | RT-005 | Các lớp có thể đọc hai phiên bản khác nhau của tệp | Cao | GĐ 3–4 |
 | RT-006 | Native host đọc thông điệp một lần | TB | ✅ C3e |
-| RT-007 | CLI/quét theo yêu cầu không loại trừ dữ liệu Sentinel nhất quán | TB | GĐ 4 |
+| RT-007 | CLI/quét theo yêu cầu không loại trừ dữ liệu Sentinel nhất quán | TB | ✅ `088041a` (theo định danh tệp) |
 | RT-008 | Defender lỗi/hết giờ bị báo "sạch" | Cao | ✅ C3a (lớp); nhãn chung: Gate v2 |
 | RT-009 | Cache giữ kết quả cũ hoặc chưa đầy đủ | Cao | C3b |
 | RT-010 | Cập nhật lỗi vẫn ghi mốc thành công | TB | ✅ C3h |
@@ -196,7 +196,7 @@ cần xử lý mới sáng lên (333 ms); tắt hết khi Windows tắt hiệu �
 | RT-021 | Allowlist bị cắt im lặng sau 5.000 tên miền | TB | ✅ `566c57d` |
 | RT-022 | "Vẫn tiếp tục" tạo ngoại lệ vĩnh viễn cho cả tên miền | TB | ✅ `75ba989` — nguyên nhân thật: luật DNR không ghi `resourceTypes` thì bỏ qua `main_frame`, nên cả "Mở một lần" lẫn "Luôn tin cậy" đều không mở được trang bị chặn |
 | RT-023 | Tải về không gửi được tới agent vẫn đếm là đã quét | TB | ✅ |
-| RT-024 | Quét bỏ sót (junction, đường dẫn dài, thiếu quyền) không ghi vào độ phủ | TB | GĐ 5 |
+| RT-024 | Quét bỏ sót (junction, đường dẫn dài, thiếu quyền) không ghi vào độ phủ | TB | ✅ `088041a` |
 | RT-025 | Popup nói "Không phát hiện vấn đề" khi chưa kiểm tra | TB | ✅ |
 | RT-026 | Thời gian thực báo "bật" dù không theo dõi thư mục nào | TB | ✅ |
 | RT-027 | Chỉ đọc một view registry của khoá Run | TB | ✅ |
@@ -220,5 +220,5 @@ cần xử lý mới sáng lên (333 ms); tắt hết khi Windows tắt hiệu �
 
 ## Kiểm thử gần nhất
 
-pytest **393 passed, 4 skipped, 2 xfailed** (không có clamd; 2 xfail = RT-001, RT-002; 209 test Gate v2, 55 test dịch vụ A1/A2) · extension **39 passed** (chạy lại 2026-11-02 ≈20:20, commit `2b43cc0`) · Helium e2e: mọi kiểm tra đạt (lần cuối 2026-11-02 đêm, chưa chạy lại).
+pytest **733 passed, 10 skipped, 1 xfailed** (không có clamd; xfail còn lại = RT-001; chỗ bỏ qua chủ yếu cần quyền nâng hoặc symlink) · extension **40 passed** · Helium 156 e2e đạt, `sw_errors: []`
 Baseline tại C2a: `docs/baseline.md`.

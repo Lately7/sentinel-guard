@@ -40,5 +40,9 @@ document/image extension.
 | R1 | whole repository | done: 28 findings, 27 fixed, 1 partly |
 | R2 | round-1 fixes + new code | done: 26 findings, 24 fixed, 2 partly |
 | R3 | round-2 fixes (final) | see REVIEWS.md |
+| A3 | protected install, consent helper, acceptance driver | merged after review, REVIEWS.md §A3 |
+| R15, R16 | code review, service install and ACL research | saved in docs/research |
+| Scope A5 | scope, USN, process samples, rescans (`9db4210`) | stopped by quota; rewritten and merged `088041a` |
+| Reputation ETW | feeds, ETW, canaries, burst, simulator (`a138093`) | stopped by quota; corrected and merged `ca966a6`, ETW dormant |
 
 Outcomes are recorded in `REVIEWS.md`.

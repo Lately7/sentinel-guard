@@ -284,6 +284,24 @@ def test_scan_started_while_protection_is_off_cannot_act(db, scanner, tmp_path):
     assert (action.action, action.reason_code) == (ActionCode.NONE, "PROTECTION_STOPPED")
 
 
+def test_scan_job_shows_the_check_that_is_running(db, scanner, tmp_path):
+    from sentinel import scanjob
+
+    path = tmp_path / "x.txt"
+    path.write_bytes(b"hello")
+    seen: list[str] = []
+    job = scanjob.ScanJob(scanner, db, config.Settings(), [str(path)], "t")
+    real = job._on_stage
+
+    def spy(*args, **kwargs):
+        real(*args, **kwargs)
+        seen.append(job.progress.stage)
+
+    job._on_stage = spy
+    job.start().join(30)
+    assert "core" in seen, "the stage comes from the gate's own events"
+
+
 def test_changed_file_is_reported_in_vietnamese_and_stays(db, scanner, tmp_path):
     path = tmp_path / "bad.bin"
     path.write_bytes(b"head " + MARKER + b" tail")

@@ -12,6 +12,7 @@ import os
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -180,14 +181,15 @@ class Scanner:
     # -- public API --------------------------------------------------------
 
     def scan_file(self, path: str | os.PathLike[str], *, use_cache: bool = True,
-                  barrier: ProtectionBarrier | None = None, cancel: CancellationToken | None = None) -> legacy.GateVerdict:
+                  barrier: ProtectionBarrier | None = None, cancel: CancellationToken | None = None,
+                  emit: Callable[..., object] | None = None) -> legacy.GateVerdict:
         real = os.path.realpath(path)
         try:
             with open(real, "rb") as stream:
                 head = stream.read(HEAD_BYTES)
         except OSError:
             head = b""  # the gate reports why, through its own open
-        return self._scan(os.path.basename(real), real, None, head, use_cache, barrier, cancel)
+        return self._scan(os.path.basename(real), real, None, head, use_cache, barrier, cancel, emit)
 
     def scan_bytes(self, data: bytes, name: str = "<memory>") -> legacy.GateVerdict:
         return self._scan(name, None, data, data[:HEAD_BYTES], False)
@@ -195,7 +197,8 @@ class Scanner:
     # -- internals ---------------------------------------------------------
 
     def _scan(self, name: str, path: str | None, data: bytes | None, head: bytes, use_cache: bool,
-              barrier: ProtectionBarrier | None = None, cancel: CancellationToken | None = None) -> legacy.GateVerdict:
+              barrier: ProtectionBarrier | None = None, cancel: CancellationToken | None = None,
+              emit: Callable[..., object] | None = None) -> legacy.GateVerdict:
         plan = self._plan(name, head, path is not None)
         generation = cache.gate_generation(plan.inputs)
         request = ScanRequest(CONTRACT_VERSION, uuid.uuid4().hex, "file", path, data, "on_demand",
@@ -219,7 +222,8 @@ class Scanner:
         decision = run_gate(request, adapters=plan.adapters, stages=plan.stages, gate_generation=generation,
                             auto_quarantine=True, max_bytes=config.MAX_SCAN_BYTES,
                             resident_limit=config.MAX_DEEP_SCAN_BYTES, short_circuit=known,
-                            current_protection_generation=barrier.current if barrier else None, cancel=cancel)
+                            current_protection_generation=barrier.current if barrier else None, cancel=cancel,
+                            emit=emit)
         if not served:
             cache.store(self.db, decision, time.time())
         verdict = legacy.project(decision, name=name, path=path, stage_defaults=plan.defaults)

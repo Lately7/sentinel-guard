@@ -375,14 +375,103 @@ Answer in `docs/research/R15-code-review-gate-service.md`. Claude checked each f
 | # | Finding | Verified | Outcome |
 |---|---|---|---|
 | R15-1 | Worker told the file's location | code; Claude found a second leak through `identity.canonical_path` | Fixed `9b9d06e` |
-| R15-2 | A same-user process can squat the pipe and answer clients | code | Open → A3 (client must verify the server) |
+| R15-2 | A same-user process can squat the pipe and answer clients | code | Fixed in A3: the client checks the pipe's owner before sending anything |
 | R15-3 | ZIP local and central headers disagree: inspected, could be trusted clean | test | Fixed `9b9d06e` |
 | R15-4 | Clean stop reported with the action barrier open; a test locked it | code | Fixed `9b9d06e` |
 | R15-5 | `scan_many` pulled every request up front | test | Fixed: `scan_stream` |
 | R15-6 | A file needing more slots than capacity waited forever | test (hung pytest) | Fixed: `ADMISSION_FULL` |
 | R15-7 | A call waited past its deadline; worker start used its own 30 s | test | Fixed `9b9d06e` |
-| R15-8 | Quarantining one hard link leaves the bytes reachable | code | Open → M7 |
+| R15-8 | Quarantining one hard link leaves the bytes reachable | test | Fixed in M7: every name goes, or none does |
 | R15-9 | Concurrent scan requests overshoot the job cap | test | Fixed `9b9d06e` |
 | R15-10 | A hit on an empty file lost its evidence | test | Fixed |
 | R15-11 | `decide` with no results gave trusted clean | test | Fixed |
 | R15-12 | In-memory bytes produced a quarantine action | test | Fixed; `test_m4_clamd` had locked it |
+
+## A3 — protected install (Codex draft, Claude review)
+
+| # | Found | Outcome |
+|---|---|---|
+| A3-1 | `python3.dll` missed by the runtime copy (`python\\d{2,}\\.dll` matched only the versioned name) | Fixed `95ef748` |
+| A3-2 | Client checked the server through its token, impossible at medium integrity | Owner of the pipe instance instead, read from our own handle |
+| A3-3 | Reinstall and uninstall left gaps on existing state | Fixed; state is reused only if it is exactly what we made |
+| A3-4 | `IsPathFullyQualified` does not exist on PowerShell 5.1 | Replaced |
+| A3-5 | Remote refusal cannot be shown without a second machine | Reported as SKIP, never as a pass |
+
+## M7 — actions and the service backend (Claude; independent read still owed)
+
+Written by Claude, so nobody else has read it yet. Nine mutations of the action guards and
+twelve of the service guards were all caught, one only after adding a test for it.
+
+Behaviour that changed on purpose:
+
+* Restore is a path+hash exception (RT-002). Trust is its own action behind a confirmation.
+* A file with a writer open is refused (`IN_USE`), where rename used to succeed.
+* Running from a junction or a symlink name is refused, not followed.
+* A hard link in a protected folder stops the whole quarantine.
+* A hard-linked file comes back under its first name only.
+* The service runs no clamd yet, so a ClamAV-only hit is acted on by the user's own process.
+
+Faults found by starting the real backend from a written runtime, all missed by unit tests:
+
+| # | Fault | Outcome |
+|---|---|---|
+| RUN-1 | No YARA rules yet: worker had no `yara_x` stage, gate requires it, every file `unknown` | Fixed `54ea9f1`, test added |
+| RUN-2 | Real volume serials pass 2**63 and overflowed SQLite's INTEGER, killing the sampling tick | Fixed `54ea9f1`, test added |
+| RUN-3 | Volume without a journal started a whole-machine reconciliation every 5 s | Fixed `54ea9f1`, test added |
+| RUN-4 | `install_dir()` could take `clamd.exe` from PATH, which would run as LocalSystem | Fixed `9b7e5a6` |
+| RUN-5 | The 64-job cap counted finished jobs: refused for good after the 64th scan | Fixed `090ccb6` |
+
+## Scope, journal, process samples (Codex draft, Claude rewrite)
+
+Draft `9db4210`: 1,050 lines, no tests, unrun. Claude read every line and rewrote what follows.
+
+| # | Finding | Outcome |
+|---|---|---|
+| S1 | `ERROR_JOURNAL_ENTRY_DELETED` was 1178, which is DELETE_IN_PROGRESS; it is 1181 | Fixed |
+| S2 | A batch over 4,096 records was thrown away and the cursor never moved: stuck for good | Bounded by the buffer instead |
+| S3 | A first start, with nothing seen before it, read as a clean history | `no_cursor` gap |
+| S4 | `schtasks` ran once per task; `/query /xml ONE` returns all in 0.25 s | One call |
+| S5 | `report.gaps` grew by two entries a second for ever | Counters; each process counted once |
+| S6 | A cursor on a deleted file made a resumed scan cover nothing | `cursor_lost`, then a full pass |
+| S7 | Every file stat'ed each of its parents | Remembered per folder |
+| S8 | svchost-hosted services showed svchost, never their DLL | `ServiceDll` read; `\\SystemRoot\\` and `\\??\\` forms resolved |
+| S9 | Unelevated WMI returns nothing and no error, which reads as a clean machine | `needs_admin` gap, not asked |
+| S10 | Script consumers in WMI were invisible | `script_consumer` gap |
+| S11 | Paths past 248 characters read as missing | Extended paths; test goes 14 levels down |
+| S12 | Rescan requests had no path to rescan | Path kept, debt survives restarts in the database |
+
+## Reputation, ETW, canaries (Codex draft, Claude review)
+
+Draft `a138093`: 1,543 lines. Its tests passed unchanged, and that proved little.
+
+| # | Finding | Outcome |
+|---|---|---|
+| E1 | Read the event id; the system providers carry the operation in the opcode | Fixed |
+| E2 | Accepted class version 0, which never occurs: everything would have been a parse failure | Versions 2/3 and 3/4 |
+| E3 | Wrong `FileIo_ReadWrite` offsets; a creation-time field the class does not have | Corrected from the published schema; start timestamp is the creation time |
+
+ETW still refuses to start (`SCHEMA_UNVERIFIED`) until these layouts are checked with elevation on
+the owner's build. Canaries and burst scoring are tested and unwired. VirusTotal is tested and
+unwired. Nothing here suspends any process.
+
+## A6 — repair (Claude; independent read still owed)
+
+Real test stops a harmless copy of `ping.exe` that the test started itself; registry work goes
+through a fake and these tests never write to real Run keys.
+
+## Measured, 2026-11-02 night
+
+Run on this machine with a temporary `SENTINEL_HOME`, no external engines, no YARA rules.
+
+* Full suite: see `docs/ROADMAP.md`.
+* `tools/fp_sample.py` on 6,000 files from Program Files and System32: 6,000 clean, 0 suspicious,
+  0 unknown, 33.4 files/s. Without ClamAV, Defender or downloaded rules this says the core is quiet;
+  it is **not** a false-positive rate for the product.
+* Real smart scan: 809 files in 41.6 s, 808 clean, 1 unknown, 175 entries reported as access denied.
+* Real backend from a written runtime on a private pipe: clean file, every stage completed, barrier
+  closed on stop.
+* Helium 156 e2e: all checks true, `sw_errors: []`.
+
+Not run, and only the owner can: the installed service as LocalSystem, `sentinel service verify`,
+reading the USN journal (query works unelevated, read does not), real ETW.
+Never run anywhere: a real clamd with a real database, real MpCmdRun (Defender is passive here).

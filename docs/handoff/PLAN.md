@@ -4,6 +4,35 @@ Viết 2026-11-02 tối, sau khi đọc lại code, đặc tả R11/R13b và ch�
 này thay mục 3–5 của `NEXT_SESSION.md` về thứ tự công việc. Các quy tắc mục 7 của
 `NEXT_SESSION.md` giữ nguyên, không nới lỏng.
 
+## 0a. Trạng thái cuối phiên đêm 2026-11-02
+
+Đã xong và đẩy lên `main`: M5, M6, A3 (code), M7, M8, A4, A5, A6, RT-002, R15-2, R15-8, RT-003, RT-007,
+RT-024. Hai nhánh Codex (`codex/scope-a5`, `codex/reputation-etw`) đã review và gộp; nhiều chỗ viết lại,
+xem `REVIEWS.md`. ETW, canary, chấm điểm burst có code và test nhưng **chưa nối** và ETW tự từ chối chạy
+cho tới khi schema được kiểm trên máy thật.
+
+**Việc của chủ dự án, cửa sổ PowerShell chạy Administrator:**
+
+```powershell
+cd "C:\Users\lately07\Desktop\Folder Group\sentinel-guard"
+.\.venv\Scripts\python -m sentinel service snapshot --source C:\SentinelSnapshot
+# xem lại C:\SentinelSnapshot, rồi:
+.\.venv\Scripts\python -m sentinel service install --source C:\SentinelSnapshot
+.\.venv\Scripts\python -m sentinel service verify --restart
+```
+
+`verify` in PASS/FAIL/SKIP từng mục và thoát khác 0 nếu có FAIL. Gỡ: `sentinel service uninstall`
+(giữ khu cách ly và nhật ký). Khi chưa cài, khay, CLI và native host tự chạy như cũ.
+
+**Còn lại:**
+
+* Chạy thật: dịch vụ LocalSystem, đọc USN (truy vấn chạy được không cần admin, đọc thì không), ETW, clamd
+  với cơ sở dữ liệu thật, MpCmdRun (Defender đang ở chế độ thụ động trên máy này).
+* `tools/admin_acceptance.ps1` chưa có fixture: chờ câu hỏi 13. Trong lúc đó dùng `sentinel service verify`.
+* Bước 9: đo báo nhầm có đủ engine, chủ dự án chốt ngân sách, rồi mới cân nhắc `evidence-v1`.
+* Bước 10: nối canary và ETW sau khi kiểm schema; tự dừng tiến trình cần 30 ngày quan sát (R14).
+* Chưa có ai đọc độc lập M7 và A6: Codex còn hạn mức thì giao review chỉ-đọc.
+
 ## 0. Cập nhật tối 2026-11-02 (chủ dự án)
 
 * **Đồng ý mục tiêu ≈7/10** so với Malwarebytes = 10, tự chạy hoàn toàn, săn edge case. Bước 10 không
@@ -224,6 +253,11 @@ làm engine khi đang chủ động, ML tĩnh cho PE mức "đáng ngờ".
 | 6d | Cách xác minh clamd, container ClamAV không mở được, phạm vi "Tin cậy", Quét sâu, PE ML | theo R11 §9 | 2–8 |
 | 7 | Thêm `pywin32`/`comtypes` | không cần | — |
 | 8 | Gói Claude | đã trả lời: tài khoản đang là **Max**, hạn mức 5h và tuần ở 0% lúc 19:56, reset tuần 2026-11-09 | — |
+| 10 | **Mới:** ClamAV trong dịch vụ: clamd phân tích tệp độc nên không được chạy LocalSystem. Chạy bằng token hạn chế, hay bỏ hẳn khỏi dịch vụ | chạy token hạn chế; hiện dịch vụ không chạy clamd, phát hiện của ClamAV do tiến trình của người dùng xử lý | 8 |
+| 11 | **Mới:** cho phép đặt tệp mồi trong Documents và Pictures không (R14) | có, nhưng chỉ sau khi ETW được kiểm | 10 |
+| 12 | **Mới:** tạo khóa abuse.ch miễn phí; khóa VirusTotal nếu muốn | có abuse.ch: thêm hash và URL mới; VirusTotal chưa nối | 10 |
+| 13 | **Mới:** kiểm thu trên dịch vụ dùng một lần, hay trực tiếp trên bản cài bằng `sentinel service verify` | `verify`; đơn giản hơn nhiều | 3 |
+| 14 | **Mới:** danh sách tin cậy cũ không tự sang dịch vụ khi cài, phải tin cậy lại qua UAC | giữ vậy: danh sách cũ do tiến trình quyền thấp ghi nên không nên kế thừa | 3 |
 | 9 | **Mới:** tên Defender loại PUA (`PUA:`, `Adware:`…) không còn tự cách ly, dù hành vi cũ có (K6, theo invariant 6) | chấp nhận | 1 |
 
 Bước 2 có thể làm với đề xuất mặc định; chỉ cần chủ dự án báo nếu muốn khác.

@@ -17,6 +17,11 @@ M6 part 1, R14, R15, R16; results in `%TEMP%\sg-codex\`. The M5 draft is `b66cb3
 §2's "393 passed" was luck: a test failed 6 of 12 runs until `2b43cc0`.
 §7 stays in force.
 
+**Update 2026-11-02, night — read `docs/handoff/PLAN.md` §0a first.** M7, M8, A4, A5, A6 are
+merged on `main` and pushed. The real backend runs from a written runtime on a private pipe, but
+nobody has run it as a service: `sentinel service verify` is the owner's elevated check. Worktrees
+named below are history. `gate-baseline` no longer exists: everything is on `main`.
+
 ## 1. Where things are
 
 * Repo: `C:\Users\lately07\Desktop\Folder Group\sentinel-guard`, branch

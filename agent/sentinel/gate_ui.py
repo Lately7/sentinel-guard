@@ -19,6 +19,8 @@ if TYPE_CHECKING:
 
 LAYERS = (("sentinel", "Lõi Sentinel"), ("rules+yara", "Luật + YARA-X"), ("clamav", "ClamAV"),
           ("defender", "Microsoft Defender"))
+STAGE_VI = {"identity": "đọc tệp", "core": "kiểm tra lõi", "json_rules": "luật", "yara_x": "YARA",
+            "clamav": "ClamAV", "defender": "Defender", "lnk": "lối tắt", "signer": "chữ ký số", "motw": "nguồn tải"}
 LABEL_VI = {"clean": "sạch", "suspicious": "nghi ngờ", "malicious": "mối đe dọa", "unknown": "chưa kiểm tra xong"}
 OK, WARN, BAD, OFF = theme.OK, theme.WARN, theme.BAD, theme.OFF
 MAX_ROWS = 6
@@ -279,7 +281,9 @@ class GatePanel:
         p = self.job.progress
         self._set_counts(p)
         name = os.path.basename(p.current)
-        self.current_var.set(name if len(name) <= 64 else name[:63] + "…")
+        name = name if len(name) <= 64 else name[:63] + "…"
+        stage = STAGE_VI.get(p.stage)
+        self.current_var.set(f"{name} · {stage}" if name and stage else name)
         self.tv.after(250, self.tick)
 
     def finished(self, p: ScanProgress) -> None:

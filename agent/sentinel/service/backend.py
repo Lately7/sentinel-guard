@@ -49,6 +49,7 @@ MAX_OBSERVED = 2048
 # A stop or an approved "off" waits this long for an action already running.
 OFF_BARRIER_SECONDS = 20.0
 MAINTENANCE_SECONDS = 600.0
+FIRST_MAINTENANCE_SECONDS = 30.0  # a fresh install has no threat data at all until this runs
 MAX_REPAIRS = 64
 PAGE_BYTES = 600_000  # a frame holds 1 MiB, and a page of long names can exceed that
 HOST = re.compile(r"(?=.{1,253}\Z)[a-z0-9-]+(\.[a-z0-9-]+)*\Z")
@@ -141,7 +142,9 @@ class ProductBackend:
         return closed
 
     def _maintain(self) -> None:
-        while not self._stop.wait(MAINTENANCE_SECONDS):
+        wait = FIRST_MAINTENANCE_SECONDS
+        while not self._stop.wait(wait):
+            wait = MAINTENANCE_SECONDS
             try:
                 quarantine.reconcile(self.db)
                 self.db.prune_cache()
