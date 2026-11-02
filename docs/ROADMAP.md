@@ -85,7 +85,7 @@ quyền và không đổi cài đặt Defender.
 | 0 | **Nền tảng**: C1 icon cũ, C2a cổng quét, C2b baseline, giao diện tối, bộ icon v2 | ✅ xong |
 | 1 | **Sửa lỗi** (C3a, d, e, g, h, j, k ✅; C3b/c/f vào Gate v2; C3i bỏ) | ✅ xong |
 | R | **Nghiên cứu sâu cho Gate v2** (R8a–R12d, R11 đặc tả) | ✅ xong |
-| G | **Gate v2** do Codex viết theo đặc tả R11 (8 mốc), Claude review | mốc 1 ✅ `9a101cb` · mốc 2: xem `docs/handoff/NIGHT_REPORT.md` |
+| G | **Gate v2** do Codex viết theo đặc tả R11 (8 mốc), Claude review | mốc 1 ✅ `9a101cb` · mốc 2 ✅ `e186184` · mốc 3 ✅ `7226927` · tiếp: mốc 4 (ClamAV) |
 | 2 | **Red Team viết test** (Codex vòng 1a, 1b) | chờ giai đoạn 1 |
 | 3 | **Contract v1**: tách trạng thái quét khỏi kết luận; "một phần"/lỗi không bao giờ là "sạch" | chờ |
 | 4 | **Chính sách ClamAV + cách ly an toàn** | chờ |
@@ -198,5 +198,5 @@ cần xử lý mới sáng lên (333 ms); tắt hết khi Windows tắt hiệu �
 
 ## Kiểm thử gần nhất
 
-pytest **283 passed, 4 skipped, 2 xfailed** (không có clamd; 2 xfail = RT-001, RT-002; 154 test Gate v2) · extension **39 passed** · Helium e2e: mọi kiểm tra đạt (2026-11-02 đêm).
+pytest **347 passed, 4 skipped, 2 xfailed** (không có clamd; 2 xfail = RT-001, RT-002; 177 test Gate v2, 41 test dịch vụ A1) · extension **39 passed** · Helium e2e: mọi kiểm tra đạt (2026-11-02 đêm).
 Baseline tại C2a: `docs/baseline.md`.

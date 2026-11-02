@@ -216,3 +216,30 @@ in either round and said so; round 1 left three empty temp folders, which
 Claude removed. Tests run by Claude: worktree and `gate-baseline` after the
 merge — pytest 283 passed, 4 skipped (real clamd not running), 2 xfailed
 (RT-001, RT-002); node --test 39 passed.
+
+## Gate v2 milestone 3 (Codex writes, Claude reviews) — 2026-11-02 night
+
+Task files `CODEX_TASK_GATE_V2_M3.md` (pinned `fe2949d`), `_R2.md`, `_R3.md`;
+answers in `docs/handoff/codex-gate-v2-m3.md`. New `gate_v2/content.py`
+(bound, deny-write reader), `archive.py` (one bounded ZIP walk),
+`evidence.py`, `core.py`, `rules.py` (JSON user rules, YARA-X); orchestrator
+passes the reader to `scan_bound` adapters. Scope check clean in all rounds.
+Merged `7226927`. Codex could not run pytest in its sandbox in any round
+(temp folder denied) and said so each time.
+
+| # | Finding by Claude | Outcome |
+|---|---|---|
+| H1 | Archive members marked `inspected` with no check; JSON/YARA saw only compressed bytes — a ZIP holding EICAR or the marker was **trusted clean** (regression vs. `engine/scanner.py`) | Fixed r2: shared walker; core hashes/names/PE per member, JSON and YARA-X scan members |
+| H2 | Bound reader checked metadata only (ChangeTime is settable) | Fixed r2: handle opened deny-write (`FILE_SHARE_READ|DELETE`), `IN_USE` when a writer holds the file |
+| H3 | Measurement code duplicated in `content.py` | Fixed r2: `identity.measure_stream` shared |
+| H4 | Thread-local YARA-X `Scanner` dropped on another thread (`RuntimeError … unsendable`) | Fixed r2: scanner created and released inside the call |
+| H5 | YARA evidence `raw_name` held tags; ranges covered the whole body | Fixed r2: `namespace.identifier`, match offsets |
+| H6 | Two failing tests; YARA timeout/warning/rejected-source tests missing | Failing tests fixed r2; missing tests added r3 (timeout via a scanner double) |
+| H7 | 64-item evidence cap kept the first items: a ZIP with 80 `*.pdf.exe` members then EICAR → `suspicious`, EICAR dropped (reproduced by Claude, in memory) | Fixed r3: strength-ordered selection, repeated weak items counted, `EVIDENCE_CAP` limit |
+| H8 | No overall deadline across archive members (2,000 × per-call YARA timeout) | Fixed r3: walker stops at the request deadline/cancel, remaining members omitted `DEADLINE` |
+| H9 | (Claude, r3) the new dedupe key merged different rules with the same identifier from two namespaces and merged member-scope hits into outer hits — two YARA tests failed | Fixed by Claude on the branch: key `(evidence_id, scope)` |
+
+Checked by Claude: the new H7/H8 tests fail on `6f9618d` (6 failed) and pass
+after. Tests after the merge on `gate-baseline`: pytest 347 passed,
+4 skipped (real clamd not running), 2 xfailed (RT-001, RT-002); node --test
+39 passed.
