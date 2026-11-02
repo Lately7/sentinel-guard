@@ -88,7 +88,7 @@ class ScanQueue:
             if os.path.getsize(path) != size1:  # still being written
                 self.submit(path)
                 return
-            v = self.scanner.scan_file(path)
+            v = self.scanner.scan_file(path, use_cache=False)  # see db.cached_result
             if v.skipped == "changed while scanning":
                 self.submit(path)
                 return

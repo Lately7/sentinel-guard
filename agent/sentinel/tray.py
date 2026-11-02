@@ -49,6 +49,7 @@ class App:
         if moved:
             self.db.add_event("system", "warning", "Cơ sở dữ liệu bị hỏng và đã được tạo lại",
                               f"Bản hỏng được giữ tại {moved}. Danh sách mối đe dọa sẽ được tải lại.")
+        self.db.prune_cache()
         self.scanner = Scanner(self.db, use_defender=self.settings.use_defender)
         self.realtime: RealtimeProtection | None = None
         self.ui_queue: queue.Queue = queue.Queue()

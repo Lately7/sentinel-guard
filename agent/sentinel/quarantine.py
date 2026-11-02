@@ -37,14 +37,27 @@ def _xor_chunk(data: bytes) -> bytes:
 
 
 def _copy_xor(src: Path, dest: Path) -> str:
-    """Stream src -> dest XOR-encoded (or decoded: XOR is symmetric). Returns sha256 of the plain bytes."""
+    """Stream src -> dest XOR-encoded (or decoded: XOR is symmetric). Returns sha256 of the plain bytes.
+
+    Copies exactly the size measured up front: a process still holding the
+    file open can keep appending, and the copy must neither run forever nor
+    silently include bytes that were never scanned.
+    """
     h = hashlib.sha256()
     decoding = src.suffix == ".qbin"
+    size = src.stat().st_size
+    remaining = size
     with src.open("rb") as fi, dest.open("xb") as fo:
-        while chunk := fi.read(CHUNK):
+        while remaining > 0:
+            chunk = fi.read(min(CHUNK, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
             out = _xor_chunk(chunk)
             h.update(out if decoding else chunk)
             fo.write(out)
+    if remaining or src.stat().st_size != size:
+        raise QuarantineError(f"{src.name} changed while being copied")
     return h.hexdigest()
 
 
@@ -118,12 +131,20 @@ def restore(db: Database, qid: str, *, trust: bool = True) -> Path:
     if sha != item["sha256"]:
         target.unlink(missing_ok=True)
         raise QuarantineError("quarantined copy is damaged (hash mismatch)")
-    if trust:
-        # Without this the watcher would quarantine the file again immediately.
-        db.allow_hash(item["sha256"])
-        db.bump_generation()
-    blob.unlink(missing_ok=True)
-    db.remove_quarantine(qid)
+    try:
+        # One transaction: either the item is gone from quarantine *and*
+        # trusted, or nothing changed and the restored copy is removed again,
+        # so a retry can't produce a duplicate.
+        with db.transaction():
+            if trust:
+                # Without this the watcher would quarantine the file again immediately.
+                db.allow_hash(item["sha256"])
+                db.bump_generation()
+            db.remove_quarantine(qid)
+    except sqlite3.Error as e:
+        target.unlink(missing_ok=True)
+        raise QuarantineError(f"restore could not be recorded: {e}") from e
+    blob.unlink(missing_ok=True)  # an orphaned blob after this point is harmless
     return target
 
 

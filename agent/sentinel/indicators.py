@@ -10,6 +10,7 @@ damaged snapshot costs nothing but a re-download.
 
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 import threading
@@ -24,10 +25,15 @@ from . import config
 if TYPE_CHECKING:
     from .db import Database
 
+log = logging.getLogger(__name__)
+
 KIND_RANK = {"malware": 0, "phishing": 1, "scam": 2, "miner": 3, "pup": 4}
 
 SNAPSHOT_SCHEMA = """
-CREATE TABLE hosts  (host TEXT PRIMARY KEY, kind TEXT NOT NULL, source TEXT NOT NULL, rank INTEGER NOT NULL) WITHOUT ROWID;
+-- One row per (host, feed): a host listed by two feeds keeps both rows, so a
+-- failed feed's carry-over still has its own copy after the other delists it.
+CREATE TABLE hosts  (host TEXT NOT NULL, kind TEXT NOT NULL, source TEXT NOT NULL, rank INTEGER NOT NULL,
+                     PRIMARY KEY (host, source)) WITHOUT ROWID;
 CREATE TABLE urls   (url TEXT PRIMARY KEY, kind TEXT NOT NULL, source TEXT NOT NULL) WITHOUT ROWID;
 CREATE TABLE hashes (sha256 TEXT PRIMARY KEY, source TEXT NOT NULL, name TEXT) WITHOUT ROWID;
 CREATE TABLE popular (domain TEXT PRIMARY KEY) WITHOUT ROWID;
@@ -87,10 +93,16 @@ class SnapshotBuilder:
         self.counts["popular"] += max(cur.rowcount, 0)
 
     def finish(self) -> Path:
+        self.counts["hosts"] = self._conn.execute("SELECT COUNT(DISTINCT host) FROM hosts").fetchone()[0]
         for k, v in self.counts.items():
             self._conn.execute("INSERT OR REPLACE INTO info(key,value) VALUES(?,?)", (f"count_{k}", str(v)))
         self._conn.execute("INSERT OR REPLACE INTO info(key,value) VALUES('built',?)", (str(time.time()),))
-        self._conn.execute("CREATE INDEX hosts_rank ON hosts(rank, host)")
+        # Distinct hosts with their highest-priority kind, precomputed once so
+        # readers never aggregate over the per-feed rows.
+        self._conn.execute("CREATE TABLE best (host TEXT PRIMARY KEY, kind TEXT NOT NULL, source TEXT NOT NULL, "
+                           "rank INTEGER NOT NULL) WITHOUT ROWID")
+        self._conn.execute("INSERT INTO best SELECT host, kind, source, MIN(rank) FROM hosts GROUP BY host")
+        self._conn.execute("CREATE INDEX best_rank ON best(rank, host)")
         self._conn.execute("COMMIT")
         ok = self._conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         self._conn.close()
@@ -117,6 +129,7 @@ class Indicators:
         self._conn: sqlite3.Connection | None = None
         self._checked = 0.0
         self._popular: frozenset[str] | None = None
+        self._best = "best"
 
     def _current(self) -> sqlite3.Connection | None:
         with self._lock:
@@ -132,13 +145,29 @@ class Indicators:
                 if target and Path(target).is_file():
                     try:
                         self._conn = _open_ro(Path(target))
-                    except sqlite3.Error:
+                        tables = {r[0] for r in self._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                        # Format 1 snapshots (before the per-feed rows) have no
+                        # `best` table; their `hosts` table already holds one row per host.
+                        self._best = "best" if "best" in tables else "hosts"
+                    except sqlite3.Error as e:
+                        log.warning("cannot open indicator snapshot %s: %s", target, e)
                         self._conn = None
             return self._conn
+
+    @property
+    def outdated(self) -> bool:
+        """True while serving a snapshot in an older format; the next feed update replaces it."""
+        return self._current() is not None and self._best != "best"
 
     def refresh(self) -> None:
         with self._lock:
             self._checked = 0.0
+
+    def close(self) -> None:
+        with self._lock:
+            if self._conn is not None:
+                self._conn.close()
+            self._conn, self._path, self._popular = None, None, None
 
     def _one(self, sql: str, args: tuple) -> sqlite3.Row | None:
         conn = self._current()
@@ -147,11 +176,15 @@ class Indicators:
         try:
             with self._lock:
                 return conn.execute(sql, args).fetchone()
-        except sqlite3.DatabaseError:
+        except sqlite3.DatabaseError as e:
+            # Never silently: an unreadable snapshot means no protection.
+            log.warning("indicator lookup failed: %s", e)
             return None
 
     def host(self, host: str) -> sqlite3.Row | None:
-        return self._one("SELECT host, kind, source FROM hosts WHERE host=?", (host,))
+        if self._current() is None:
+            return None
+        return self._one(f"SELECT host, kind, source FROM {self._best} WHERE host=? ORDER BY rank LIMIT 1", (host,))
 
     def url(self, url: str) -> sqlite3.Row | None:
         return self._one("SELECT url, kind, source FROM urls WHERE url=?", (url,))
@@ -165,9 +198,10 @@ class Indicators:
             return []
         try:
             with self._lock:
-                rows = conn.execute("SELECT host, kind FROM hosts ORDER BY rank, host LIMIT ?", (limit,)).fetchall()
+                rows = conn.execute(f"SELECT host, kind FROM {self._best} ORDER BY rank, host LIMIT ?", (limit,)).fetchall()
             return [(r["host"], r["kind"]) for r in rows]
-        except sqlite3.DatabaseError:
+        except sqlite3.DatabaseError as e:
+            log.warning("indicator listing failed: %s", e)
             return []
 
     def rows_for_source(self, table: str, source: str) -> list[tuple]:
@@ -218,10 +252,13 @@ class Indicators:
 
 
 def publish(state: "Database", path: Path) -> None:
-    state.set_meta(POINTER_KEY, str(path))
-    state.bump_generation()
-    state.set_meta("blocklist_version", str(state.generation()))
+    # Pointer and versions change together: a crash in between must not leave
+    # URL lookups on new data while the browser keeps rules for the old.
+    with state.transaction():
+        state.set_meta(POINTER_KEY, str(path))
+        state.set_meta("blocklist_version", str(state.bump_generation()))
     state.indicators.refresh()
+    state.indicators.counts()  # switch this process to the new file now, releasing the old one
     cleanup(keep={str(path)})
 
 

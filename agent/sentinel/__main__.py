@@ -11,12 +11,13 @@ from pathlib import Path
 from . import config
 
 
-def _walk(paths: list[str]):
+def _walk(paths: list[str], errors: list[str] | None = None):
     for base in paths:
         if os.path.isfile(base):
             yield base
             continue
-        for root, _d, files in os.walk(base):
+        on_error = (lambda e: errors.append(f"{e.filename}: {e.strerror}")) if errors is not None else None
+        for root, _d, files in os.walk(base, onerror=on_error):
             for f in files:
                 yield os.path.join(root, f)
 
@@ -35,8 +36,12 @@ def cmd_scan(args: argparse.Namespace) -> int:
     missing = [p for p in args.paths if not os.path.exists(p)]
     for p in missing:
         print(f"ERROR      cannot access {p}", file=sys.stderr)
-    for f in _walk([p for p in args.paths if p not in missing]):
+    failures: list[str] = list(missing)
+    for f in _walk([p for p in args.paths if p not in missing], failures):
         v = scanner.scan_file(f, use_cache=not args.no_cache)
+        if v.skipped and v.skipped.startswith(("unreadable", "changed while")):
+            failures.append(f"{f}: {v.skipped}")
+            print(f"ERROR      {f}: {v.skipped}", file=sys.stderr)
         rank = {"clean": 0, "suspicious": 1, "malicious": 2}[v.label]
         worst = max(worst, rank)
         if args.json:
@@ -51,7 +56,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(results, indent=2, ensure_ascii=False))
     # A target that couldn't be scanned must not look like a clean result to scripts.
-    return 3 if missing and worst == 0 else worst
+    return 3 if failures and worst == 0 else worst
 
 
 def cmd_update(args: argparse.Namespace) -> int:
@@ -75,6 +80,27 @@ def cmd_check_url(args: argparse.Namespace) -> int:
     r = urlintel.check(Database(), args.url)
     print(json.dumps(r, indent=2, ensure_ascii=False))
     return 2 if r["verdict"] == "malicious" else 0
+
+
+def cmd_block(args: argparse.Namespace) -> int:
+    from . import feeds
+    from .db import Database
+
+    host = args.host.lower().strip().rstrip(".")
+    if not feeds._HOST_RE.match(host):
+        print(f"invalid host: {args.host}", file=sys.stderr)
+        return 2
+    db = Database()
+    if args.cmd == "block":
+        db.add_hosts([(host, "custom", "user")])
+    elif not db.remove_local_host(host):
+        print(f"{host} is not in the custom blocklist")
+        return 1
+    # New blocklist version: the browser extension picks the change up on its next sync.
+    db.bump_generation()
+    db.set_meta("blocklist_version", str(db.generation()))
+    print(f"{args.cmd}ed {host}")
+    return 0
 
 
 def cmd_quarantine(args: argparse.Namespace) -> int:
@@ -177,6 +203,11 @@ def main(argv: list[str] | None = None) -> int:
     c = sub.add_parser("check-url", help="tra cứu URL")
     c.add_argument("url")
     c.set_defaults(fn=cmd_check_url)
+
+    for name, help_text in (("block", "tự chặn một tên miền"), ("unblock", "bỏ chặn tên miền đã tự chặn")):
+        b = sub.add_parser(name, help=help_text)
+        b.add_argument("host")
+        b.set_defaults(fn=cmd_block)
 
     q = sub.add_parser("quarantine", help="quản lý cách ly")
     q.add_argument("action", choices=["list", "restore", "delete"])

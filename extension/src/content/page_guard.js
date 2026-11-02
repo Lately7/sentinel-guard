@@ -65,28 +65,36 @@
     document.documentElement.append(host);
   }
 
-  // Re-sent whenever the set of signals grows: a single-page app may render
-  // a plain password box first and point its form somewhere else later.
-  let sentIds = new Set();
+  // Re-sent whenever the set of signals changes, in either direction: a
+  // single-page app may show a login form late, retarget it, or remove it.
+  let sentKey = "";
   function check() {
     const signals = collect();
-    const ids = new Set(signals.map((s) => s.id));
-    const grew = [...ids].some((id) => !sentIds.has(id));
-    if (!grew) return;
-    sentIds = new Set([...sentIds, ...ids]);
+    const key = signals.map((s) => s.id).sort().join(",");
+    if (key === sentKey) return;
+    sentKey = key;
+    if (!signals.length) {
+      document.getElementById("sentinel-guard-banner")?.remove();
+      return;
+    }
     chrome.runtime.sendMessage({ type: "page_signals", signals }, (res) => {
       if (chrome.runtime.lastError) return;
       if (res && res.warn) banner(res.reasons || [], res.score);
     });
   }
 
-  let timer = 0;
+  // Throttled, for the page's whole lifetime: a busy page mutating
+  // constantly costs one cheap check per second at most.
+  let pending = false;
   const schedule = () => {
-    clearTimeout(timer);
-    timer = setTimeout(check, 400);
+    if (pending) return;
+    pending = true;
+    setTimeout(() => {
+      pending = false;
+      check();
+    }, 1000);
   };
   check();
-  const obs = new MutationObserver(schedule);
-  obs.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["action", "type"] });
-  setTimeout(() => obs.disconnect(), 30000);
+  new MutationObserver(schedule).observe(document.documentElement,
+    { childList: true, subtree: true, attributes: true, attributeFilter: ["action", "type"] });
 })();

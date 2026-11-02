@@ -39,7 +39,7 @@ class Scanner:
     # -- public API --------------------------------------------------------
 
     def scan_file(self, path: str | os.PathLike[str], *, use_cache: bool = True) -> Verdict:
-        p = Path(path)
+        p = Path(os.path.realpath(path))
         name = p.name
         try:
             st = p.stat()
@@ -49,7 +49,7 @@ class Scanner:
             return Verdict(name=name, sha256="", size=0, path=str(p), skipped="not a regular file")
 
         if use_cache:
-            cached = self.db.cached_result(str(p), st.st_size, st.st_mtime)
+            cached = self.db.cached_result(str(p), st.st_size, st.st_mtime, st.st_ino)
             if cached is not None:
                 return _from_dict(cached)
 
@@ -66,14 +66,19 @@ class Scanner:
             # Too big to hold in memory, but each member can still be inspected
             # straight from disk.
             try:
-                with zipfile.ZipFile(p) as zf:
-                    v.findings.extend(self._scan_zip_members(name, zf, depth=0))
-                v.skipped = None
+                with p.open("rb") as fh:
+                    refusal = _zip_directory_refusal(fh)
+                    if refusal:
+                        v.findings.append(refusal)
+                    else:
+                        with zipfile.ZipFile(fh) as zf:
+                            v.findings.extend(self._scan_zip_members(name, zf, depth=0))
+                        v.skipped = None
             except (zipfile.BadZipFile, OSError, ValueError, RuntimeError, EOFError, NotImplementedError):
                 pass
         if self.db.is_hash_allowed(sha256):
             v.findings = [Finding("allowlist", "allow.user", Severity.INFO, "trusted by the user", 0)]
-            self.db.store_result(str(p), st.st_size, st.st_mtime, v.to_dict())
+            self.db.store_result(str(p), st.st_size, st.st_mtime, st.st_ino, v.to_dict())
             return v
 
         origin = motw.read(str(p))
@@ -85,7 +90,7 @@ class Scanner:
         if self.use_defender and v.label != "malicious" and (risky_type or v.label != CLEAN):
             v.findings.extend(defender.scan(str(p)))
 
-        self.db.store_result(str(p), st.st_size, st.st_mtime, v.to_dict())
+        self.db.store_result(str(p), st.st_size, st.st_mtime, st.st_ino, v.to_dict())
         return v
 
     def scan_bytes(self, data: bytes, name: str = "<memory>") -> Verdict:
@@ -128,8 +133,12 @@ class Scanner:
         if depth >= config.MAX_ARCHIVE_DEPTH:
             return [Finding("archive", "archive.depth_limit", Severity.INFO,
                             f"nested archives deeper than {config.MAX_ARCHIVE_DEPTH} levels were not opened", 0)]
+        buf = io.BytesIO(data)
+        refusal = _zip_directory_refusal(buf)
+        if refusal:
+            return [refusal]
         try:
-            zf = zipfile.ZipFile(io.BytesIO(data))
+            zf = zipfile.ZipFile(buf)
         except (zipfile.BadZipFile, OSError, ValueError, RuntimeError, EOFError, NotImplementedError):
             return []
         return self._scan_zip_members(name, zf, depth)
@@ -152,6 +161,11 @@ class Scanner:
         if len(infos) > config.MAX_ARCHIVE_MEMBERS:
             out.append(Finding("archive", "archive.too_many_members", Severity.LOW,
                                f"{len(infos)} members; only the first {config.MAX_ARCHIVE_MEMBERS} inspected", 5))
+            # Names cost nothing to check: deceptive names past the limit are still reported.
+            for info in infos[config.MAX_ARCHIVE_MEMBERS:]:
+                for f in filetype.check_name(info.filename, b""):
+                    if f.severity > Severity.INFO:
+                        out.append(Finding(f.engine, f.rule, f.severity, f"{info.filename}: {f.detail}", f.score))
         total = 0
         for info in infos[: config.MAX_ARCHIVE_MEMBERS]:
             if info.is_dir():
@@ -186,6 +200,37 @@ class Scanner:
                     continue
                 out.append(Finding(f.engine, f.rule, f.severity, f"{info.filename}: {f.detail}", f.score))
         return out
+
+
+MAX_ZIP_ENTRIES = 200_000
+MAX_ZIP_DIRECTORY_BYTES = 32 * 1024 * 1024
+
+
+def _zip_directory_refusal(fh) -> Finding | None:
+    """Read the end-of-central-directory record before zipfile parses the
+    whole directory: a small archive declaring millions of entries would
+    otherwise exhaust memory before any member limit applies."""
+    try:
+        fh.seek(0, io.SEEK_END)
+        size = fh.tell()
+        fh.seek(max(0, size - 66_000))
+        tail = fh.read()
+        fh.seek(0)
+    except OSError:
+        return None
+    i = tail.rfind(b"PK\x05\x06")
+    if i < 0 or i + 22 > len(tail):
+        return None  # not found: let zipfile decide (it will reject a broken archive)
+    entries = int.from_bytes(tail[i + 10:i + 12], "little")
+    dir_size = int.from_bytes(tail[i + 12:i + 16], "little")
+    z64 = tail.rfind(b"PK\x06\x06", 0, i)  # ZIP64 record carries the real 64-bit counts
+    if z64 >= 0 and z64 + 56 <= len(tail):
+        entries = int.from_bytes(tail[z64 + 32:z64 + 40], "little")
+        dir_size = int.from_bytes(tail[z64 + 40:z64 + 48], "little")
+    if entries > MAX_ZIP_ENTRIES or dir_size > MAX_ZIP_DIRECTORY_BYTES:
+        return Finding("archive", "archive.directory_too_large", Severity.LOW,
+                       f"archive declares {entries} entries / {dir_size} directory bytes; not opened", 10)
+    return None
 
 
 def _pe_structure(data: bytes) -> list[Finding]:

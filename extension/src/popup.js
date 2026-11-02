@@ -7,6 +7,12 @@ async function load() {
   const { state, agent, tab } = res;
   $("enabled").checked = state.enabled;
   $("size").textContent = state.blocklistSize ? state.blocklistSize.toLocaleString("vi-VN") : "chưa đồng bộ";
+  if (state.enabled && state.syncError) {
+    // Degraded: protection is on but the network rules could not be loaded.
+    $("size").textContent = "chưa đồng bộ — đang thử lại";
+    $("size").className = "bad";
+    $("size").title = state.syncError;
+  }
   $("s-blocked").textContent = state.stats.blocked || 0;
   $("s-warned").textContent = state.stats.warned || 0;
   $("s-downloads").textContent = state.stats.downloads || 0;

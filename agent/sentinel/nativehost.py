@@ -121,7 +121,14 @@ class Host:
         return {"version": version, "total": len(hosts), "offset": offset, "hosts": page}
 
     def on_get_allowlist(self, msg: dict[str, Any]) -> dict[str, Any]:
-        return {"allow_version": self.db.allow_version(), "hosts": self.db.allowed_hosts()[:5000]}
+        hosts: list[str] = []
+        size = 0
+        for h in self.db.allowed_hosts()[:5000]:  # 5000 = extension's allow-rule budget
+            size += len(h) + 4
+            if size > PAGE_BYTES:
+                break
+            hosts.append(h)
+        return {"allow_version": self.db.allow_version(), "hosts": hosts}
 
     def on_scan_download(self, msg: dict[str, Any]) -> dict[str, Any]:
         path = _str(msg, "path", max_len=4096)
@@ -133,12 +140,11 @@ class Host:
         rep = urlintel.check(self.db, url) if url else None
         v = self.scanner.scan_file(p, use_cache=False)
         if rep and rep["verdict"] == "malicious" and v.label != MALICIOUS:
-            # The download may have finished before the browser could cancel
-            # it; a file served from a listed malware URL is treated as such.
-            conclusive = rep["kind"] == "malware"
-            v.findings.append(Finding(
-                "origin", "origin.blocklisted_download", Severity.CRITICAL if conclusive else Severity.HIGH,
-                f"downloaded from {rep['matched']} ({rep['kind']}, {rep['source']})", 100 if conclusive else 50))
+            # The browser tried to cancel this download because of the same
+            # URL verdict and lost the race; the verdict stays authoritative
+            # whatever the list's kind (phishing kits ship droppers too).
+            v.findings.append(Finding("origin", "origin.blocklisted_download", Severity.CRITICAL,
+                                      f"downloaded from {rep['matched']} ({rep['kind']}, {rep['source']})", 100))
         outcome = act_on(self.db, v, self.settings, "download")
         return {"verdict": v.to_dict(max_findings=30), "reason": top_reason(v), "url_reputation": rep, **outcome}
 

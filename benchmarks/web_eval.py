@@ -2,7 +2,7 @@
 
 * Detection: current OpenPhish URLs, checked against a DB built from every
   other feed (OpenPhish itself excluded), plus the URL heuristics.
-* False positives: Tranco ranks 10,001-20,000 (outside the top-10k list the
+* False positives: Tranco ranks 100,001-110,000 (outside the top-100k list the
   feeds are filtered against, so the filter can't hide blocklist mistakes),
   and the top 10,000 for the heuristics.
 
@@ -44,15 +44,16 @@ def main() -> int:
 
         db = Database()
         holdout = [f for f in feeds.FEEDS if f.name != "openphish"]
-        feeds.update_popular(db)
-        feed_status = feeds.update_all(db, holdout)
+        feed_status = feeds._update_all(db, holdout, feeds.fetch, feeds._fetch_bytes, with_tranco=True)
 
         phish = list(dict.fromkeys(feeds.parse_urls(feeds.fetch("https://openphish.com/feed.txt"))))
         raw = feeds._fetch_bytes(feeds.TRANCO_URL)
         with zipfile.ZipFile(io.BytesIO(raw)) as zf:
             rows = zf.read(zf.namelist()[0]).decode().splitlines()
-        tranco = [r.split(",", 1)[1].strip() for r in rows[:20_000]]
-        top10k, next10k = tranco[:10_000], tranco[10_000:20_000]
+        tranco = [r.split(",", 1)[1].strip() for r in rows[:110_000]]
+        # Legit sample just outside the protected top-100k, so the popular
+        # filter can't hide blocklist mistakes; heuristics are checked on the top 10k too.
+        top10k, next10k = tranco[:10_000], tranco[100_000:110_000]
 
         def listed(url: str) -> str | None:
             r = urlintel.check(db, url)

@@ -46,13 +46,15 @@ CREATE TABLE IF NOT EXISTS allow_hashes (
     added  REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS scan_cache (
-    path   TEXT PRIMARY KEY,
+    path   TEXT PRIMARY KEY,   -- resolved absolute path
     size   INTEGER NOT NULL,
     mtime  REAL NOT NULL,
+    ino    INTEGER NOT NULL,   -- file id: a different file moved into place doesn't inherit the verdict
     sha256 TEXT NOT NULL,
     label  TEXT NOT NULL,
     result TEXT NOT NULL,      -- Verdict.to_dict() as JSON
-    db_gen INTEGER NOT NULL    -- signatures generation the result was computed with
+    db_gen INTEGER NOT NULL,   -- signatures generation the result was computed with
+    ts     REAL NOT NULL       -- when stored, for pruning
 );
 CREATE TABLE IF NOT EXISTS events (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -103,68 +105,161 @@ class _Rows:
         return self._rows
 
 
-# Tables worth carrying over from a damaged database; indicator tables are
-# rebuilt by the next feed update instead.
-SALVAGE_TABLES = ("allow_hosts", "allow_hashes", "quarantine", "events", "meta",
-                  "bad_hosts", "bad_urls", "bad_hashes", "popular")
+# Tables worth carrying over from a damaged database, with an optional row
+# filter. Feed data lives in snapshots and is simply re-downloaded; the user's
+# own blocklist entries (source='user') are kept.
+SALVAGE: dict[str, str] = {
+    "allow_hosts": "", "allow_hashes": "", "quarantine": "", "events": "", "meta": "",
+    "bad_hosts": "WHERE source='user'", "bad_urls": "WHERE source='user'", "bad_hashes": "WHERE source='user'",
+}
+
+SCHEMA_VERSION = 3
+SCAN_CACHE_MAX_ROWS = 50_000
+SCAN_CACHE_MAX_AGE = 30 * 86400
 
 
 class Database:
-    def __init__(self, path: Path | None = None) -> None:
+    """State database. Opening it checks integrity and repairs a damaged file,
+    so every entry point (tray, CLI, browser-spawned native host) recovers."""
+
+    def __init__(self, path: Path | None = None, *, repair: bool = True) -> None:
         self.path = path or config.db_path()
         self._lock = threading.RLock()
         self._popular: frozenset[str] | None = None
-        self._conn = self._open()
+        self.repaired_from: str | None = None  # where a damaged DB was moved to, if it was
         from .indicators import Indicators
 
+        self._conn: sqlite3.Connection | None = None  # type: ignore[assignment]
+        try:
+            self._conn = self._open()
+            healthy = self._conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+        except sqlite3.DatabaseError:
+            healthy = False
+        if not healthy:
+            if not repair:
+                raise sqlite3.DatabaseError(f"{self.path} is damaged")
+            self.repaired_from = self._rebuild()
         self.indicators = Indicators(self)
+        self._migrate()
 
     def _open(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=30, check_same_thread=False, isolation_level=None)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=30000")
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.executescript(SCHEMA)
+        try:
+            conn.execute("PRAGMA busy_timeout=30000")
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.executescript(SCHEMA)
+        except sqlite3.DatabaseError:
+            conn.close()
+            raise
         return conn
 
+    def _rebuild(self) -> str:
+        """Move the damaged file aside, recreate, and copy back what can still be read."""
+        salvaged: dict[str, tuple[list[str], list[tuple[Any, ...]]]] = {}
+        old = self._conn
+        if old is None:
+            try:
+                old = sqlite3.connect(self.path, isolation_level=None)
+            except sqlite3.DatabaseError:
+                old = None
+        if old is not None:
+            for t, where in SALVAGE.items():
+                try:
+                    cur = old.execute(f"SELECT * FROM {t} {where}")
+                    salvaged[t] = ([d[0] for d in cur.description], [tuple(r) for r in cur.fetchall()])
+                except sqlite3.DatabaseError:
+                    continue
+            old.close()
+        moved = self.path.with_name(f"{self.path.name}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}")
+        os.replace(self.path, moved)
+        for suffix in ("-wal", "-shm"):
+            side = Path(str(self.path) + suffix)
+            if side.exists():
+                os.replace(side, Path(str(moved) + suffix))
+        self._conn = self._open()
+        for t, (cols, rows) in salvaged.items():
+            if rows:
+                marks = ",".join("?" * len(cols))
+                self._conn.executemany(f"INSERT OR IGNORE INTO {t}({','.join(cols)}) VALUES({marks})", rows)
+        return str(moved)
+
     def check_and_repair(self) -> str | None:
-        """Run at agent start. Returns the path the damaged DB was moved to, or None if healthy."""
+        """Re-check at run time (the constructor already repaired at open).
+        Returns where a damaged DB was moved to, or None if healthy."""
         if not self.indicators.healthy():
             # A damaged snapshot is just dropped; the next feed update rebuilds it.
             self.set_meta("indicators_file", "")
             self.indicators.refresh()
-        try:
-            ok = self._conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
-        except sqlite3.DatabaseError:
-            ok = False
-        if ok:
-            return None
+        if self.repaired_from:
+            moved, self.repaired_from = self.repaired_from, None
+            return moved
         with self._lock:
-            salvaged: dict[str, tuple[list[str], list[tuple[Any, ...]]]] = {}
-            for t in SALVAGE_TABLES:
-                try:
-                    cur = self._conn.execute(f"SELECT * FROM {t}")
-                    salvaged[t] = ([d[0] for d in cur.description], [tuple(r) for r in cur.fetchall()])
-                except sqlite3.DatabaseError:
-                    continue
-            self._conn.close()
-            stamp = time.strftime("%Y%m%d-%H%M%S")
-            moved = self.path.with_name(f"{self.path.name}.corrupt-{stamp}")
-            os.replace(self.path, moved)
-            for suffix in ("-wal", "-shm"):
-                side = Path(str(self.path) + suffix)
-                if side.exists():
-                    os.replace(side, Path(str(moved) + suffix))
-            self._conn = self._open()
-            for t, (cols, rows) in salvaged.items():
-                if rows:
-                    marks = ",".join("?" * len(cols))
-                    self._conn.executemany(f"INSERT OR IGNORE INTO {t}({','.join(cols)}) VALUES({marks})", rows)
+            try:
+                ok = self._conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+            except sqlite3.DatabaseError:
+                ok = False
+            if ok:
+                return None
+            moved = self._rebuild()
             self._popular = None
-        return str(moved)
+        self.indicators.refresh()
+        return moved
+
+    def _migrate(self) -> None:
+        version = int(self.get_meta("schema_version", "1") or 1)
+        if version >= SCHEMA_VERSION:
+            return
+        if version < 2:
+            self._migrate_v2()
+        # v3: scan_cache gained file id and timestamp columns; it is only a
+        # cache, so it is recreated rather than altered.
+        with self.transaction():
+            self._exec("DROP TABLE IF EXISTS scan_cache")
+            self._exec(SCHEMA[SCHEMA.index("CREATE TABLE IF NOT EXISTS scan_cache"):SCHEMA.index(");", SCHEMA.index("CREATE TABLE IF NOT EXISTS scan_cache")) + 2])
+            self.set_meta("schema_version", str(SCHEMA_VERSION))
+        if version < 2:
+            try:
+                self._exec("VACUUM")  # give the space of the v1 feed rows back once
+            except sqlite3.OperationalError:
+                pass  # another process has the DB open; the space is reused anyway
+
+    def _migrate_v2(self) -> None:
+        # v1 kept feed rows (hundreds of thousands) and the Tranco list in this
+        # database; since v2 they live in snapshot files. Legacy rows are first
+        # turned into a snapshot if none is published yet, so protection never
+        # drops to empty during the upgrade, and only then deleted here.
+        from . import indicators
+        from .feeds import FEEDS
+
+        names = [f.name for f in FEEDS] + ["malwarebazaar", "urlhaus", "urlhaus_hosts", "tranco_top"]
+        marks = ",".join("?" * len(names))
+        legacy = self._exec(f"SELECT COUNT(*) AS n FROM bad_hosts WHERE source IN ({marks})", names).fetchone()["n"]
+        if legacy and not self.get_meta(indicators.POINTER_KEY):
+            builder = indicators.SnapshotBuilder()
+            try:
+                builder.add_hosts((r["host"], r["kind"], r["source"]) for r in self._exec(
+                    f"SELECT host, kind, source FROM bad_hosts WHERE source IN ({marks})", names).fetchall())
+                builder.add_urls((r["url"], r["kind"], r["source"]) for r in self._exec(
+                    f"SELECT url, kind, source FROM bad_urls WHERE source IN ({marks})", names).fetchall())
+                builder.add_hashes((r["sha256"], r["source"], r["name"]) for r in self._exec(
+                    f"SELECT sha256, source, name FROM bad_hashes WHERE source IN ({marks})", names).fetchall())
+                builder.set_popular(r["domain"] for r in self._exec("SELECT domain FROM popular").fetchall())
+                path = builder.finish()
+            except BaseException:
+                builder.discard()
+                raise
+            indicators.publish(self, path)
+        with self.transaction():
+            for t in ("bad_hosts", "bad_urls", "bad_hashes"):
+                self._exec(f"DELETE FROM {t} WHERE source IN ({marks})", names)
+            self._exec("DELETE FROM popular")
 
     def close(self) -> None:
+        # The snapshot handle too: on Windows an open file can't be deleted,
+        # so a leaked handle would pin superseded snapshots on disk.
+        self.indicators.close()
         with self._lock:
             self._conn.close()
 
@@ -215,10 +310,15 @@ class Database:
         """Bumped whenever signatures change, so cached scan results are re-checked."""
         return int(self.get_meta("generation", "0") or 0)
 
+    def _increment(self, key: str) -> int:
+        # One statement, so two processes bumping at once can't both write the same value.
+        row = self._exec(
+            "INSERT INTO meta(key,value) VALUES(?, '1') ON CONFLICT(key) DO UPDATE "
+            "SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT) RETURNING value", (key,)).fetchone()
+        return int(row["value"])
+
     def bump_generation(self) -> int:
-        g = self.generation() + 1
-        self.set_meta("generation", str(g))
-        return g
+        return self._increment("generation")
 
     # -- indicators --------------------------------------------------------
     #
@@ -246,6 +346,13 @@ class Database:
             "INSERT OR IGNORE INTO bad_urls(url,kind,source,added) VALUES(?,?,?,?)",
             ((u, kind, src, now) for u, kind, src in rows),
         )
+
+    def remove_local_host(self, host: str, source: str = "user") -> bool:
+        return bool(self._exec_count("DELETE FROM bad_hosts WHERE host=? AND source=?", (host.lower(), source)))
+
+    def _exec_count(self, sql: str, args: Iterable[Any] = ()) -> int:
+        with self._lock:
+            return self._conn.execute(sql, tuple(args)).rowcount
 
     def hash_info(self, sha256: str) -> sqlite3.Row | None:
         sha256 = sha256.lower()
@@ -310,11 +417,12 @@ class Database:
         return self.get_meta("allow_version", "0") or "0"
 
     def _bump_allow(self) -> None:
-        self.set_meta("allow_version", str(int(self.allow_version()) + 1))
+        self._increment("allow_version")
 
     def allow_host(self, host: str) -> None:
-        self._exec("INSERT OR IGNORE INTO allow_hosts(host,added) VALUES(?,?)", (host.lower(), time.time()))
-        self._bump_allow()
+        with self.transaction():
+            self._exec("INSERT OR IGNORE INTO allow_hosts(host,added) VALUES(?,?)", (host.lower(), time.time()))
+            self._bump_allow()
 
     def is_host_allowed(self, host: str) -> bool:
         return self._exec("SELECT 1 FROM allow_hosts WHERE host=?", (host.lower(),)).fetchone() is not None
@@ -323,8 +431,9 @@ class Database:
         return [r["host"] for r in self._exec("SELECT host FROM allow_hosts ORDER BY host").fetchall()]
 
     def remove_allowed_host(self, host: str) -> None:
-        self._exec("DELETE FROM allow_hosts WHERE host=?", (host.lower(),))
-        self._bump_allow()
+        with self.transaction():
+            self._exec("DELETE FROM allow_hosts WHERE host=?", (host.lower(),))
+            self._bump_allow()
 
     def allow_hash(self, sha256: str) -> None:
         self._exec("INSERT OR IGNORE INTO allow_hashes(sha256,added) VALUES(?,?)", (sha256.lower(), time.time()))
@@ -334,19 +443,31 @@ class Database:
 
     # -- scan cache --------------------------------------------------------
 
-    def cached_result(self, path: str, size: int, mtime: float) -> dict[str, Any] | None:
+    # Callers pass os.path.realpath() paths: "x.exe" from two different working
+    # directories must not share an entry. The cache only serves on-demand
+    # scans; real-time protection always re-reads changed files.
+
+    def cached_result(self, path: str, size: int, mtime: float, ino: int) -> dict[str, Any] | None:
         row = self._exec("SELECT * FROM scan_cache WHERE path=?", (path,)).fetchone()
-        if not row or row["size"] != size or abs(row["mtime"] - mtime) > 1e-3 or row["db_gen"] != self.generation():
+        if (not row or row["size"] != size or abs(row["mtime"] - mtime) > 1e-3 or row["ino"] != ino
+                or row["db_gen"] != self.generation()):
             return None
         return json.loads(row["result"])
 
-    def store_result(self, path: str, size: int, mtime: float, result: dict[str, Any]) -> None:
+    def store_result(self, path: str, size: int, mtime: float, ino: int, result: dict[str, Any]) -> None:
         self._exec(
-            "INSERT INTO scan_cache(path,size,mtime,sha256,label,result,db_gen) VALUES(?,?,?,?,?,?,?) "
-            "ON CONFLICT(path) DO UPDATE SET size=excluded.size, mtime=excluded.mtime, sha256=excluded.sha256, "
-            "label=excluded.label, result=excluded.result, db_gen=excluded.db_gen",
-            (path, size, mtime, result["sha256"], result["label"], json.dumps(result), self.generation()),
+            "INSERT INTO scan_cache(path,size,mtime,ino,sha256,label,result,db_gen,ts) VALUES(?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(path) DO UPDATE SET size=excluded.size, mtime=excluded.mtime, ino=excluded.ino, "
+            "sha256=excluded.sha256, label=excluded.label, result=excluded.result, db_gen=excluded.db_gen, ts=excluded.ts",
+            (path, size, mtime, ino, result["sha256"], result["label"], json.dumps(result), self.generation(), time.time()),
         )
+
+    def prune_cache(self, max_rows: int = SCAN_CACHE_MAX_ROWS, max_age: float = SCAN_CACHE_MAX_AGE) -> int:
+        """Drop old entries and keep the newest `max_rows`; Temp churn would otherwise grow it forever."""
+        n = self._exec_count("DELETE FROM scan_cache WHERE ts < ?", (time.time() - max_age,))
+        n += self._exec_count(
+            "DELETE FROM scan_cache WHERE path NOT IN (SELECT path FROM scan_cache ORDER BY ts DESC LIMIT ?)", (max_rows,))
+        return n
 
     # -- events ------------------------------------------------------------
 

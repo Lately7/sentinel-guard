@@ -53,3 +53,55 @@ other directories). Fix, independent of the cause:
 | 28 | Stats counter lost increments | Fixed: serialised |
 
 Tests after round 1: pytest 41 passed, node --test 8 passed.
+
+### Found by Claude while testing the real app between rounds
+
+* **Defender false positives (critical).** With Malwarebytes active, Defender
+  is off and `MpCmdRun` fails every scan with exit code 2 — the same code as
+  "threat found". The agent flagged `notepad.exe` and quarantined four pytest
+  temp files in `%TEMP%`. Fixed: Defender is used only when Security Center
+  reports it active, and only a named `Threat :` line counts. The four files
+  were restored. Regression test added.
+* `Database.close()` leaked the snapshot handle (old snapshots could not be
+  deleted). Fixed.
+* Salvage after the first repair copied the v1 feed rows back into the state
+  DB (counts doubled, 54 MB). Fixed with a one-time v2 migration.
+* After the snapshot format changed, the old snapshot answered every lookup
+  with nothing — errors were swallowed. Fixed: format-1 snapshots are read
+  through a fallback, flagged outdated and rebuilt; lookup errors are logged.
+
+## Round 2 — 26 findings
+
+| # | Finding | Outcome |
+|---|---------|---------|
+| 1 | Repair unreachable if the DB can't even be opened | Fixed: integrity check + rebuild inside `Database()` for every entry point |
+| 2 | v1→v2 migration emptied protection before a snapshot existed | Fixed: legacy rows become a snapshot first |
+| 3 | No hash feed | Partly: optional MalwareBazaar feed with an abuse.ch key (`abusech_auth_key`); untested against the live API (no key here) |
+| 4 | Scan cache keyed on caller path + metadata | Fixed: real path + file id; real-time scans bypass the cache |
+| 5 | Lost-race downloads from non-malware lists only "suspicious" | Fixed: any listed download URL is conclusive |
+| 6 | Crafted warning page could earn a trust exemption | Fixed: proceed requires the tab's recorded navigation and a URL that is really flagged (verified in Helium) |
+| 7 | Disable raced an in-flight sync | Fixed: one queue for all rule changes |
+| 8 | Enabling offline left zero rules silently | Fixed: error state in popup, retry after 1 min |
+| 9 | `Local\` mutexes are per logon session | Fixed: `Global\`, keyed by data directory |
+| 10 | Huge ZIP central directory parsed before limits | Fixed: end-of-central-directory pre-check (incl. ZIP64) |
+| 11 | Carry-over ignored the new popular list | Fixed |
+| 12 | Host listed by two feeds lost on delist + failure | Fixed: per-feed rows, precomputed best row |
+| 13 | Snapshot pointer and versions written separately | Fixed: one transaction |
+| 14 | Blocklist pages could mix versions | Fixed: version-pinned paging, restart on change |
+| 15 | allow_version read-modify-write across processes | Fixed: atomic increment in the same transaction |
+| 16 | Offline trust never uploaded | Fixed: pending queue uploaded on next sync |
+| 17 | Allowlist response not byte-bounded | Fixed |
+| 18 | Page guard stopped after 30 s and never retracted | Fixed: lifetime observer, throttled, both directions |
+| 19 | Disguised executables past the member limit | Partly: names of all members are checked; contents past the limit are not opened (that limit protects memory, finding 10) |
+| 20 | Scan cache grew forever | Fixed: age + row-count pruning |
+| 21 | Unreadable targets exited 0 | Fixed: exit 3 |
+| 22 | Quarantine copy unbounded on a growing file | Fixed: copies the measured size, re-checks |
+| 23 | User blocks lost on repair | Fixed: `source='user'` rows salvaged |
+| 24 | `unblock` removed any local row | Fixed: only the user's own |
+| 25 | Restore finalisation not transactional | Fixed |
+| 26 | Second launch could miss the show-dashboard event | Fixed: event created with the claim, signal retried |
+
+Tests after round 2: pytest 52 passed, node --test 8 passed; Helium 156
+end-to-end (`tools/helium_e2e.mjs`): extension loads, 400,000 hosts synced,
+block page, heuristic warning, normal site, crafted-proceed rejected,
+genuine proceed trusted, no service-worker errors.

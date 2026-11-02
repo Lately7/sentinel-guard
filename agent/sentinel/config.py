@@ -100,6 +100,7 @@ class Settings:
     use_defender: bool = True  # ask Microsoft Defender for a second opinion
     feed_interval_hours: float = 6.0
     web_block_suspicious: bool = False  # suspicious URLs get a warning page only when True
+    abusech_auth_key: str = ""  # free abuse.ch account key: enables the MalwareBazaar hash feed
 
     @staticmethod
     def path() -> Path:
@@ -122,6 +123,9 @@ class Settings:
         dirs = raw.get("watch_dirs")
         if isinstance(dirs, list) and all(isinstance(d, str) and d for d in dirs):
             s.watch_dirs = dirs
+        key = raw.get("abusech_auth_key")
+        if isinstance(key, str) and len(key) <= 200 and key.isprintable():
+            s.abusech_auth_key = key.strip()
         hours = raw.get("feed_interval_hours")
         if isinstance(hours, (int, float)) and not isinstance(hours, bool) and 0.25 <= hours <= 24 * 30:
             s.feed_interval_hours = float(hours)

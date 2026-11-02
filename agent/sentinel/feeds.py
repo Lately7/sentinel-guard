@@ -6,12 +6,17 @@ in the `feeds` table and that feed keeps its previous entries.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import re
 import time
 import urllib.request
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .config import Settings
 
 from . import __version__, urlintel
 from .db import Database
@@ -32,6 +37,7 @@ class Feed:
     table: str  # bad_hashes | bad_hosts | bad_urls
     kind: str
     parse: Callable[[str], Iterable[str]]
+    headers: tuple[tuple[str, str], ...] = ()  # e.g. an account key; never logged
 
 
 def _lines(text: str) -> Iterable[str]:
@@ -118,8 +124,8 @@ def parse_tranco(raw: bytes, top: int = POPULAR_TOP) -> list[str]:
     return domains
 
 
-def _fetch_bytes(url: str, timeout: float = 120.0) -> bytes:
-    req = urllib.request.Request(url, headers={"User-Agent": f"SentinelGuard/{__version__} (+feed updater)"})
+def _fetch_bytes(url: str, timeout: float = 120.0, headers: dict[str, str] | None = None) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": f"SentinelGuard/{__version__} (+feed updater)", **(headers or {})})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         data = resp.read(MAX_FEED_BYTES + 1)
     if len(data) > MAX_FEED_BYTES:
@@ -127,8 +133,8 @@ def _fetch_bytes(url: str, timeout: float = 120.0) -> bytes:
     return data
 
 
-def fetch(url: str) -> str:
-    return _fetch_bytes(url).decode("utf-8", errors="replace")
+def fetch(url: str, headers: dict[str, str] | None = None) -> str:
+    return _fetch_bytes(url, headers=headers).decode("utf-8", errors="replace")
 
 
 _TABLE = {"bad_hosts": "hosts", "bad_urls": "urls", "bad_hashes": "hashes"}
@@ -160,17 +166,36 @@ def apply_feed(builder: SnapshotBuilder, feed: Feed, text: str, popular: frozens
     return len(items)
 
 
-def _carry_over(db: Database, builder: SnapshotBuilder, feed: Feed) -> int:
+def _carry_over(db: Database, builder: SnapshotBuilder, feed: Feed, popular: frozenset[str]) -> int:
     table = _TABLE[feed.table]
     rows = db.indicators.rows_for_source(table, feed.name)
+
+    def unpopular(host_rows: list[tuple]) -> list[tuple]:
+        # Same exclusion as fresh data: today's popular list may cover a host
+        # that was admitted while Tranco itself was unavailable.
+        return [r for r in host_rows if urlintel.registrable_domain(r[0]) not in popular]
+
     if table == "hosts":
+        rows = unpopular(rows)
         builder.add_hosts(rows)
     elif table == "urls":
         builder.add_urls(rows)
-        builder.add_hosts(db.indicators.rows_for_source("hosts", feed.name))
+        builder.add_hosts(unpopular(db.indicators.rows_for_source("hosts", feed.name)))
     else:
         builder.add_hashes(rows)
     return len(rows)
+
+
+# MalwareBazaar's export needs a free abuse.ch account key since 2025; with
+# one configured (settings.json "abusech_auth_key") it is added automatically.
+MALWAREBAZAAR = Feed("malwarebazaar", "https://bazaar.abuse.ch/export/txt/sha256/recent/", "bad_hashes", "malware", parse_hashes)
+
+
+def configured_feeds(settings: "Settings") -> list[Feed]:
+    feeds = list(FEEDS)
+    if settings.abusech_auth_key:
+        feeds.append(dataclasses.replace(MALWAREBAZAAR, headers=(("Auth-Key", settings.abusech_auth_key),)))
+    return feeds
 
 
 def last_update(db: Database) -> float:
@@ -179,6 +204,8 @@ def last_update(db: Database) -> float:
 
 
 def is_due(db: Database, interval_hours: float, now: float | None = None) -> bool:
+    if db.indicators.outdated:  # old snapshot format: rebuild without waiting for the interval
+        return True
     return (now if now is not None else time.time()) - last_update(db) > interval_hours * 3600
 
 
@@ -189,8 +216,13 @@ def update_all(db: Database, feeds: list[Feed] | None = None, fetcher: Callable[
     if not lock.acquire():
         return {"skipped": "another feed update is already running"}
     try:
-        return _update_all(db, FEEDS if feeds is None else feeds, fetcher, fetch_bytes or _fetch_bytes,
-                           with_tranco=feeds is None)
+        if feeds is None:
+            from .config import Settings
+
+            chosen = configured_feeds(Settings.load())
+        else:
+            chosen = feeds
+        return _update_all(db, chosen, fetcher, fetch_bytes or _fetch_bytes, with_tranco=feeds is None)
     finally:
         lock.release()
 
@@ -219,12 +251,13 @@ def _update_all(db: Database, feeds: list[Feed], fetcher: Callable[[str], str],
 
         for feed in feeds:
             try:
-                n = apply_feed(builder, feed, fetcher(feed.url), popular)
+                text = fetch(feed.url, dict(feed.headers)) if feed.headers else fetcher(feed.url)
+                n = apply_feed(builder, feed, text, popular)
                 statuses.append((feed.name, n, "ok"))
                 results[feed.name] = f"ok ({n})"
             except Exception as e:  # one broken feed must not stop the others
                 log.warning("feed %s failed: %s", feed.name, e)
-                kept = _carry_over(db, builder, feed)
+                kept = _carry_over(db, builder, feed, popular)
                 statuses.append((feed.name, None, f"error: {e}"))
                 results[feed.name] = f"error: {e} (kept {kept} previous entries)"
         path = builder.finish()

@@ -1,30 +1,31 @@
 {
-  "generated": "2026-11-02T13:14:34",
+  "generated": "2026-11-02T14:01:40",
   "holdout_feeds": {
-    "urlhaus_filter": "ok (17072)",
-    "phishing_filter": "ok (13154)",
+    "tranco_top": "ok (100000)",
+    "urlhaus_filter": "ok (17004)",
+    "phishing_filter": "ok (10275)",
     "pup_filter": "ok (189)",
-    "hagezi_tif": "ok (315081)",
-    "hagezi_fake": "ok (17354)",
-    "phishing_database": "ok (261182)",
-    "nocoin": "ok (305)"
+    "hagezi_tif": "ok (313812)",
+    "hagezi_fake": "ok (17259)",
+    "phishing_database": "ok (216650)",
+    "nocoin": "ok (289)"
   },
   "phishing_sample": {
     "source": "openphish (live, excluded from blocklist)",
     "urls": 300,
-    "blocklist_hits": 73,
-    "blocklist_pct": 24.3,
+    "blocklist_hits": 69,
+    "blocklist_pct": 23.0,
     "heuristic_ge70": 0,
     "heuristic_ge70_pct": 0.0,
     "heuristic_ge40": 3,
     "heuristic_ge40_pct": 1.0,
-    "blocked_total": 73,
-    "blocked_total_pct": 24.3,
-    "blocked_or_warned": 76,
-    "blocked_or_warned_pct": 25.3,
+    "blocked_total": 69,
+    "blocked_total_pct": 23.0,
+    "blocked_or_warned": 72,
+    "blocked_or_warned_pct": 24.0,
     "hits_by_source": {
       "phishing_database": 4,
-      "phishing_filter": 58,
+      "phishing_filter": 54,
       "hagezi_tif": 11
     },
     "missed_examples": [
@@ -57,90 +58,58 @@
   },
   "legit_sample": {
     "blocklist_checked": 10000,
-    "blocklist_false_positives": 19,
-    "blocklist_fp_pct": 0.2,
+    "blocklist_false_positives": 11,
+    "blocklist_fp_pct": 0.1,
     "blocklist_fp_examples": [
       [
-        "https://unstoppabledomains.com/",
+        "https://allmy.bio/",
         "phishing_database"
       ],
       [
-        "https://dvrlists.com/",
-        "hagezi_tif"
-      ],
-      [
-        "https://ffm.to/",
+        "https://eg1xbet.com/",
         "phishing_database"
       ],
       [
-        "https://nereserv.com/",
-        "hagezi_tif"
-      ],
-      [
-        "https://earn.fm/",
-        "hagezi_tif"
-      ],
-      [
-        "https://forthnet.gr/",
-        "hagezi_tif"
-      ],
-      [
-        "https://ycxrl.com/",
-        "hagezi_tif"
-      ],
-      [
-        "https://cbphe.com/",
-        "hagezi_tif"
-      ],
-      [
-        "https://mercadolibre.com.uy/",
+        "https://123pan.cn/",
         "phishing_database"
       ],
       [
-        "https://mez.ink/",
-        "phishing_database"
-      ],
-      [
-        "https://geocities.ws/",
-        "phishing_database"
-      ],
-      [
-        "https://wavebrowser.co/",
+        "https://sklstech.com/",
         "hagezi_tif"
       ],
       [
-        "https://genspark.ai/",
+        "https://dqmop.com/",
+        "hagezi_tif"
+      ],
+      [
+        "https://sinfoon.com/",
+        "hagezi_tif"
+      ],
+      [
+        "https://staticfile.org/",
+        "hagezi_tif"
+      ],
+      [
+        "https://mpago.la/",
         "phishing_database"
       ],
       [
-        "https://cyberprotector.online/",
+        "https://pdfxd.com/",
         "hagezi_tif"
       ],
       [
-        "https://000webhost.com/",
+        "https://pu550ev.com/",
         "hagezi_tif"
       ],
       [
-        "https://werefilledwit.org/",
+        "https://lbk-sol.com/",
         "hagezi_tif"
-      ],
-      [
-        "https://ghabovethec.info/",
-        "phishing_database"
-      ],
-      [
-        "https://qemow.com/",
-        "hagezi_tif"
-      ],
-      [
-        "https://bit.do/",
-        "phishing_database"
       ]
     ],
     "heuristic_checked": 20000,
     "heuristic_ge70": 0,
     "heuristic_ge70_pct": 0.0,
-    "heuristic_ge40": 108,
+    "heuristic_ge40": 90,
     "heuristic_ge40_pct": 0.5,
     "heuristic_fp_examples": []
   }

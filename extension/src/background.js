@@ -7,7 +7,7 @@ const NOTE_AT = 40; // heuristic score shown in the popup / in-page banner
 const SYNC_MINUTES = 360;
 const BLOCKED_PAGE = chrome.runtime.getURL("src/blocked.html");
 
-const DEFAULTS = { enabled: true, blocklistVersion: "", allowVersion: "", blocklistSize: 0, allowHosts: [], stats: { blocked: 0, warned: 0, downloads: 0 } };
+const DEFAULTS = { enabled: true, blocklistVersion: "", allowVersion: "", blocklistSize: 0, allowHosts: [], pendingAllow: [], syncError: "", stats: { blocked: 0, warned: 0, downloads: 0 } };
 
 async function getState() {
   const s = await chrome.storage.local.get(DEFAULTS);
@@ -61,11 +61,24 @@ function report(action, url, reason) {
 
 // ---------------------------------------------------------------- blocklist
 
-let syncing = null;
+// Every change to the rule set — sync, enable, disable, trust — runs through
+// this one queue, so "off" can never be overwritten by a sync that was
+// already half-way through when the user switched protection off.
+let ruleQueue = Promise.resolve();
+function exclusive(fn) {
+  const run = ruleQueue.then(fn, fn);
+  ruleQueue = run.catch(() => {});
+  return run;
+}
+
 function syncBlocklist(force = false) {
-  // One sync at a time; alarms, start-up and the popup can all ask at once.
-  if (!syncing) syncing = doSync(force).finally(() => (syncing = null));
-  return syncing;
+  return exclusive(() => doSync(force)).then(async (res) => {
+    await chrome.storage.local.set({ syncError: res.ok ? "" : res.error || "sync failed" });
+    // Retry soon while the agent is unreachable, instead of waiting six hours
+    // with no rules after protection was switched on.
+    if (!res.ok && res.error !== "protection is off") chrome.alarms.create("sync-retry", { delayInMinutes: 1 });
+    return res;
+  });
 }
 
 async function doSync(force) {
@@ -77,8 +90,21 @@ async function doSync(force) {
   } catch {
     return { ok: false, error: "agent not connected" };
   }
+  // Trust given while the agent was offline is uploaded first, so the
+  // agent's (authoritative) list below already contains it.
+  for (const host of state.pendingAllow) {
+    try {
+      await native.request("allow_host", { host });
+    } catch {
+      return { ok: false, error: "agent not connected" };
+    }
+  }
+  if (state.pendingAllow.length) {
+    await chrome.storage.local.set({ pendingAllow: [] });
+    hello = await native.request("hello");
+  }
   let allowHosts = state.allowHosts;
-  if (force || hello.allow_version !== state.allowVersion) {
+  if (force || state.pendingAllow.length || hello.allow_version !== state.allowVersion) {
     // The agent's list is authoritative: a site un-trusted in the dashboard
     // must lose its exemption here too.
     const res = await native.request("get_allowlist");
@@ -87,28 +113,40 @@ async function doSync(force) {
   }
   const blocklistChanged = force || hello.blocklist_version !== state.blocklistVersion;
   if (!blocklistChanged) {
-    await refreshAllowRules();
+    await applyAllowRules(allowHosts);
     return { ok: true, unchanged: true };
   }
+  let hosts, version;
+  for (let attempt = 0; ; attempt++) {
+    // Pages must all come from one blocklist version; a feed update landing
+    // mid-sync shifts offsets, so start over (a few times at most).
+    ({ hosts, version } = await fetchBlocklist());
+    if (version !== null || attempt >= 2) break;
+  }
+  if (version === null) return { ok: false, error: "blocklist kept changing during sync" };
+  const rules = [...buildBlockRules(hosts), ...buildAllowRules(allowHosts)];
+  const existing = await chrome.declarativeNetRequest.getDynamicRules();
+  await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: existing.map((r) => r.id), addRules: rules });
+  await chrome.storage.local.set({ blocklistVersion: version, blocklistSize: hosts.length });
+  return { ok: true, hosts: hosts.length, rules: rules.length };
+}
+
+async function fetchBlocklist() {
   const hosts = [];
   let offset = 0;
+  let version;
   for (;;) {
     const page = await native.request("get_blocklist", { offset, limit: 20000 }, 30000);
+    if (version === undefined) version = page.version;
+    else if (page.version !== version) return { hosts, version: null };
     hosts.push(...page.hosts);
     offset += page.hosts.length;
     if (!page.hosts.length || offset >= page.total) break;
   }
-  if (!(await getState()).enabled) return { ok: false, error: "protection is off" }; // switched off mid-sync
-  const rules = [...buildBlockRules(hosts), ...buildAllowRules(allowHosts)];
-  const existing = await chrome.declarativeNetRequest.getDynamicRules();
-  await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: existing.map((r) => r.id), addRules: rules });
-  await chrome.storage.local.set({ blocklistVersion: hello.blocklist_version, blocklistSize: hosts.length });
-  return { ok: true, hosts: hosts.length, rules: rules.length };
+  return { hosts, version };
 }
 
-async function refreshAllowRules() {
-  const { allowHosts, enabled } = await getState();
-  if (!enabled) return;
+async function applyAllowRules(allowHosts) {
   const existing = await chrome.declarativeNetRequest.getDynamicRules();
   await chrome.declarativeNetRequest.updateDynamicRules({
     removeRuleIds: existing.filter((r) => r.id >= ALLOW_BASE_ID).map((r) => r.id),
@@ -117,13 +155,16 @@ async function refreshAllowRules() {
 }
 
 async function setEnabled(enabled) {
-  await chrome.storage.local.set({ enabled });
   if (!enabled) {
-    const existing = await chrome.declarativeNetRequest.getDynamicRules();
-    await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: existing.map((r) => r.id) });
-    await chrome.storage.local.set({ blocklistVersion: "" });
+    await exclusive(async () => {
+      await chrome.storage.local.set({ enabled: false, syncError: "" });
+      const existing = await chrome.declarativeNetRequest.getDynamicRules();
+      await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: existing.map((r) => r.id) });
+      await chrome.storage.local.set({ blocklistVersion: "" });
+    });
   } else {
-    await syncBlocklist(true).catch(() => {});
+    await chrome.storage.local.set({ enabled: true });
+    await syncBlocklist(true); // failure is recorded in syncError and shown by the popup
   }
   updateBadge();
 }
@@ -258,15 +299,24 @@ async function handle(msg, sender) {
     case "blocked_context":
       return { ok: true, info: tabId != null ? await getTabInfo(tabId) : null };
     case "proceed": {
-      // Only the top-level warning page, and only for the URL this tab was
-      // actually stopped on: a site framing blocked.html can't trick a click
-      // into trusting a host of its choice.
+      // Only the top-level warning page, only for the URL this tab was
+      // actually navigating to, and only if that URL really is flagged. The
+      // page's own ?u= parameter is display-only: blocked.html is web
+      // accessible, so a site can open it with any URL it likes.
       if (tabId == null || sender.frameId !== 0 || !sender.url.startsWith(BLOCKED_PAGE)) return { ok: false };
       const info = await getTabInfo(tabId);
-      const fromQuery = new URL(sender.url).searchParams.get("u");
-      if (msg.url !== info?.url && msg.url !== fromQuery) return { ok: false };
+      if (!info?.url || msg.url !== info.url) return { ok: false };
       const host = hostOf(msg.url);
       if (!host) return { ok: false };
+      let flagged = scoreUrl(msg.url).score >= WARN_AT;
+      if (!flagged) {
+        try {
+          flagged = (await native.request("check_url", { url: msg.url }, 3000)).result.verdict === "malicious";
+        } catch {
+          flagged = info.reputation?.verdict === "malicious";
+        }
+      }
+      if (!flagged) return { ok: false };
       // Trust only the exact host the user chose to open, not its whole domain.
       await trust(host);
       report("proceeded", msg.url, "");
@@ -312,21 +362,26 @@ async function handle(msg, sender) {
 }
 
 async function trust(host) {
-  const state = await getState();
-  if (!state.allowHosts.includes(host)) {
-    state.allowHosts.push(host);
-    await chrome.storage.local.set({ allowHosts: state.allowHosts });
-  }
-  await refreshAllowRules();
-  try {
-    await native.request("allow_host", { host });
-    // Our own change: remember the agent's new version so the next sync
-    // doesn't treat it as a dashboard edit.
-    const hello = await native.request("hello", {}, 3000);
-    await chrome.storage.local.set({ allowVersion: hello.allow_version });
-  } catch {
-    /* agent offline: kept locally, merged on next sync */
-  }
+  await exclusive(async () => {
+    const state = await getState();
+    if (!state.allowHosts.includes(host)) {
+      state.allowHosts.push(host);
+      await chrome.storage.local.set({ allowHosts: state.allowHosts });
+    }
+    if (state.enabled) await applyAllowRules(state.allowHosts);
+    try {
+      await native.request("allow_host", { host });
+      // Our own change: remember the agent's new version so the next sync
+      // doesn't treat it as a dashboard edit.
+      const hello = await native.request("hello", {}, 3000);
+      await chrome.storage.local.set({ allowVersion: hello.allow_version });
+    } catch {
+      // Agent offline: queued and uploaded by the next successful sync.
+      const { pendingAllow } = await getState();
+      if (!pendingAllow.includes(host)) await chrome.storage.local.set({ pendingAllow: [...pendingAllow, host] });
+      chrome.alarms.create("sync-retry", { delayInMinutes: 1 });
+    }
+  });
 }
 
 // --------------------------------------------------------------------- badge
@@ -365,5 +420,5 @@ chrome.runtime.onStartup.addListener(() => {
   updateBadge();
 });
 chrome.alarms.onAlarm.addListener((a) => {
-  if (a.name === "sync") syncBlocklist(false).catch(() => {});
+  if (a.name === "sync" || a.name === "sync-retry") syncBlocklist(false).catch(() => {});
 });
