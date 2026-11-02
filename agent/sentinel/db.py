@@ -58,8 +58,8 @@ CREATE TABLE IF NOT EXISTS action_journal (
     started REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS downloads (
-    volume      INTEGER NOT NULL,
-    file_id     TEXT NOT NULL,   -- 128-bit NTFS ids do not fit an INTEGER column
+    volume      TEXT NOT NULL,   -- volume serials and 128-bit NTFS ids do not fit
+    file_id     TEXT NOT NULL,   -- SQLite's signed 64-bit INTEGER
     path        TEXT NOT NULL,
     sha256      TEXT NOT NULL,
     generation  TEXT NOT NULL,
@@ -542,7 +542,7 @@ class Database:
         self._exec("DELETE FROM quarantine WHERE id=?", (qid,))
 
     def download(self, volume: int, file_id: int) -> dict[str, Any] | None:
-        row = self._exec("SELECT * FROM downloads WHERE volume=? AND file_id=?", (volume, str(file_id))).fetchone()
+        row = self._exec("SELECT * FROM downloads WHERE volume=? AND file_id=?", (str(volume), str(file_id))).fetchone()
         return dict(row) if row else None
 
     def downloads(self) -> list[dict[str, Any]]:
@@ -551,10 +551,10 @@ class Database:
     def put_download(self, volume: int, file_id: int, path: str, sha256: str, generation: str,
                      recorded_at: float, first_run: bool) -> None:
         self._exec("INSERT OR REPLACE INTO downloads(volume,file_id,path,sha256,generation,recorded_at,first_run) "
-                   "VALUES(?,?,?,?,?,?,?)", (volume, str(file_id), path, sha256, generation, recorded_at, int(first_run)))
+                   "VALUES(?,?,?,?,?,?,?)", (str(volume), str(file_id), path, sha256, generation, recorded_at, int(first_run)))
 
     def delete_download(self, volume: int, file_id: int) -> None:
-        self._exec("DELETE FROM downloads WHERE volume=? AND file_id=?", (volume, str(file_id)))
+        self._exec("DELETE FROM downloads WHERE volume=? AND file_id=?", (str(volume), str(file_id)))
 
     def add_repair_undo(self, qid: str, hive: str, key: str, view: int, name: str, data: str, kind: int) -> None:
         self._exec("INSERT OR REPLACE INTO repair_undo(qid,hive,key,view,name,data,kind) VALUES(?,?,?,?,?,?,?)",

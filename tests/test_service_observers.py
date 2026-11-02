@@ -361,10 +361,13 @@ def test_malformed_downloads_are_refused():
 
 
 def test_download_debt_survives_a_restart(db):
-    RescanQueue(DbDownloadStore(db), clock=lambda: 100.0).remember(download(2 ** 100, generation="g1"))
+    # Real volume serials pass 2**63: seen on the first start in a real runtime.
+    big = Download(2 ** 64 - 5, 2 ** 100, "D:/x.exe", SHA, "g1", 100.0)
+    RescanQueue(DbDownloadStore(db), clock=lambda: 100.0).remember(big)
     again = RescanQueue(DbDownloadStore(db), clock=lambda: 100.0)
+    assert again.first_run(big.identity) is True
     assert again.signatures_changed("g2") == 1
-    assert again.pop().identity == (1, 2 ** 100)
+    assert again.pop().identity == big.identity
 
 
 # -- what reaches the queue
@@ -410,6 +413,35 @@ def test_a_gap_reconciles_and_restarts_the_cursor(db):
     assert DbCursorStore(db).load("C:\\").journal_id == 5
     seen.tick_journal()
     assert calls == [1], "reconciled once, then back to following the journal"
+
+
+def test_a_volume_without_a_journal_is_one_incident_not_one_a_tick(db):
+    calls = []
+    failure = OSError(6, "no journal here")
+    failure.winerror = 6
+    now = [0.0]
+    seen, _ = observers(FakeDevice(query=failure), db=db, reconcile=lambda: calls.append(1), clock=lambda: now[0])
+    for _ in range(50):
+        seen.tick_journal()
+        now[0] += 5.0
+    assert calls == [1] and seen.counts["gap_device_error"] == 50
+
+
+def test_new_trouble_after_a_reconciliation_waits_for_the_next_slot(db):
+    calls = []
+    now = [0.0]
+    device = FakeDevice(query=journal(journal_id=5), read=batch(next_usn=1000))
+    seen, _ = observers(device, db=db, reconcile=lambda: calls.append(1), clock=lambda: now[0])
+    seen.tick_journal()
+    seen.tick_journal()  # back to following the journal
+    device.query = journal(journal_id=6)
+    seen.tick_journal()
+    assert calls == [1]
+    seen.tick_journal()
+    device.query = journal(journal_id=7)
+    now[0] = 4000.0
+    seen.tick_journal()
+    assert calls == [1, 1]
 
 
 def test_a_burst_past_the_queue_is_counted(db):

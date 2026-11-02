@@ -267,6 +267,18 @@ def test_real_worker_scan_reaches_the_same_answer(db, marker_rule, tmp_path):
         iso.close()
 
 
+def test_a_fresh_install_with_no_rules_can_still_call_a_file_clean(db, tmp_path):
+    # Seen only in a real runtime: every file came back unknown, for ever.
+    iso = Isolation()
+    try:
+        good = tmp_path / "good.txt"
+        good.write_bytes(b"nothing here")
+        verdict = Scanner(db, use_defender=False, isolation=iso).scan_file(good, use_cache=False)
+        assert verdict.label == "clean", verdict.decision.reason_codes
+    finally:
+        iso.close()
+
+
 def test_real_worker_uses_the_service_hash_list(db, marker_rule, tmp_path):
     body = b"harmless bytes on a test list"
     path = tmp_path / "listed.bin"

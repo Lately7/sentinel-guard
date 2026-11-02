@@ -50,9 +50,10 @@ class Worker:
         packs = tuple((str(n), base64.b64decode(b), bool(u)) for n, b, u in args.get("json_packs", []))
         sources = tuple((str(ns), str(n), str(s)) for ns, n, s in args.get("yara_sources", []))
         self.adapters = {"core": CoreAdapter(), "json_rules": JsonRulesAdapter(packs),
-                         "lnk": LnkAdapter(), "signer": SignerAdapter()}
-        if sources:
-            self.adapters["yara_x"] = YaraXAdapter(sources)
+                         "lnk": LnkAdapter(), "signer": SignerAdapter(),
+                         # Also with no rules yet: the gate requires the stage either
+                         # way, and a fresh install would call every file unknown.
+                         "yara_x": YaraXAdapter(sources)}
         return {"engines": sorted(self.adapters),
                 "json_rules_digest": self.adapters["json_rules"].ruleset_digest}
 

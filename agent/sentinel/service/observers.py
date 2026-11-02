@@ -25,6 +25,7 @@ from .usn import Device, JournalCursor, UsnRecord, read_batch, reset_cursor
 log = logging.getLogger(__name__)
 
 JOURNAL_SECONDS = 5.0
+RECONCILE_SECONDS = 3600.0  # a whole-machine scan: a journal that keeps failing must not repeat it
 RECENT_SECONDS = 10.0
 RECENT_CAP = 4096
 # Files that can run, or carry something that can. Everything else changes all
@@ -77,6 +78,8 @@ class Observers:
         self.clock = clock
         self.counts: Counter[str] = Counter()
         self._recent: OrderedDict[str, float] = OrderedDict()
+        self._gap_of: dict[str, str] = {}
+        self._reconciled_at = float("-inf")
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
 
@@ -112,13 +115,21 @@ class Observers:
             for change in batch.records:
                 if self.wanted(change.path):
                     self._offer(change.path, "journal")
+            if not batch.gaps:
+                self._gap_of.pop(volume.root, None)
+                continue
             for gap in batch.gaps:
                 self.counts[f"gap_{gap.reason}"] += 1
-                lost = lost or gap.reconciliation_required
-            if batch.gaps:
-                reset_cursor(volume.root, volume, self.store)
-        if lost:
+            # A volume with no journal says so every tick: one incident, not one a tick.
+            reason = batch.gaps[0].reason
+            if self._gap_of.get(volume.root) != reason:
+                self._gap_of[volume.root] = reason
+                lost = lost or any(gap.reconciliation_required for gap in batch.gaps)
+            reset_cursor(volume.root, volume, self.store)
+        now = self.clock()
+        if lost and now - self._reconciled_at >= RECONCILE_SECONDS:
             # After the cursors moved: whatever changes during this scan is in the journal.
+            self._reconciled_at = now
             self.counts["reconciliations"] += 1
             self.reconcile()
 

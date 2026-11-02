@@ -54,7 +54,7 @@ def test_marker_file_on_disk_is_found_by_the_worker(session, tmp_path):
     d = run(session, request(path=str(p)))
     assert d.verdict is VerdictCode.MALICIOUS
     assert [r.status for r in d.engine_results] == [StageStatus.COMPLETED, StageStatus.COMPLETED]
-    assert session.starts == 1 and session.engines == ["core", "json_rules", "lnk", "signer"]
+    assert session.starts == 1 and session.engines == ["core", "json_rules", "lnk", "signer", "yara_x"]
 
 
 def test_marker_inside_a_zip_is_found_by_the_worker(session, tmp_path):
