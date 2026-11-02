@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from typing import Callable, Iterable
 
 from . import identity
+from .content import BoundReader, ContentError
 from .contract import (
     CONTRACT_VERSION, ActionCode, ActionDecision, CancellationToken, ContractError, Coverage,
     EngineAdapter, EngineResult, FileIdentity, FinalDecision, ScanError,
@@ -103,6 +104,7 @@ def scan(
     required = stages or RequiredStages(frozenset(ids))
     token = cancel or _NeverCancel()
     machine = ScanState()
+    reader: BoundReader | None = None
     admitted = _admitted or not isinstance(emit, EventStream) or emit.admit(request.file_id, terminal_slots=len(ordered) + 2)
     if not admitted:
         return _unknown(request, gate_generation, "ADMISSION_FULL", auto_quarantine)
@@ -121,8 +123,18 @@ def scan(
         machine.advance("opening")
         _publish(emit, request.file_id, "identity", "started", "OPENING")
         machine.advance("hashing")
-        measured_result = (identity.measure(request.path, max_bytes=max_bytes, cancel=token)
-                           if request.path is not None else identity.measure_bytes(request.data or b"", max_bytes=max_bytes, cancel=token))
+        bound = any(callable(getattr(item, "scan_bound", None)) for item in ordered)
+        if bound and request.path is not None:
+            try:
+                reader = BoundReader.measure_path(request.path, max_bytes=max_bytes, cancel=token)
+                measured_result = identity.IdentityResult(reader.identity, "OK")
+            except ContentError as exc:
+                measured_result = identity.IdentityResult(None, exc.code)
+            except OSError:
+                measured_result = identity.IdentityResult(None, "UNREADABLE")
+        else:
+            measured_result = (identity.measure(request.path, max_bytes=max_bytes, cancel=token)
+                               if request.path is not None else identity.measure_bytes(request.data or b"", max_bytes=max_bytes, cancel=token))
         if not measured_result.ok:
             machine.advance("cancelled" if measured_result.code == "CANCELLED" else "unknown")
             value = _unknown(request, gate_generation, measured_result.code, auto_quarantine)
@@ -132,6 +144,8 @@ def scan(
             return value
         measured = measured_result.identity
         assert measured is not None
+        if bound and reader is None:
+            reader = BoundReader.from_bytes(request.data or b"", measured)
         _publish(emit, request.file_id, "identity", "finished", "OK")
         machine.advance("stages")
         results: list[EngineResult] = []
@@ -163,7 +177,9 @@ def scan(
                         else:
                             result = adapter.scan(request, measured, token)
                     else:
-                        result = adapter.scan(request, measured, token)
+                        scan_bound = getattr(adapter, "scan_bound", None)
+                        result = (scan_bound(request, measured, token, reader) if callable(scan_bound)
+                                  else adapter.scan(request, measured, token))
                     if not isinstance(result, EngineResult):
                         result = _synthetic(adapter, request, measured, StageStatus.ERROR, "INVALID_RESULT", start)
                 except Exception:
@@ -222,6 +238,8 @@ def scan(
                  "CANCELLED" if was_cancelled else decision.verdict.value.upper(), terminal=True)
         return decision
     finally:
+        if reader is not None:
+            reader.close()
         if isinstance(emit, EventStream):
             emit.release(request.file_id)
 
