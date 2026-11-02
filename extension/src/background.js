@@ -1,6 +1,7 @@
 import { scoreUrl } from "./url_heuristics.js";
 import { buildBlockRules, buildAllowRules, ALLOW_BASE_ID, KIND_CODES, KIND_LABELS } from "./rules.js";
 import * as native from "./native.js";
+import { VALID } from "./messages.js";
 
 const WARN_AT = 70; // heuristic score that earns a full-page warning
 const NOTE_AT = 40; // heuristic score shown in the popup / in-page banner
@@ -267,16 +268,6 @@ function notify(title, message) {
 }
 
 // ------------------------------------------------------------------ messages
-
-const VALID = {
-  blocked_context: () => true,
-  proceed: (m) => typeof m.url === "string" && m.url.length < 8000,
-  page_signals: (m) => Array.isArray(m.signals) && m.signals.length <= 20 && m.signals.every((s) => typeof s?.id === "string" && typeof s?.score === "number" && typeof s?.detail === "string"),
-  popup_state: () => true,
-  set_enabled: (m) => typeof m.enabled === "boolean",
-  sync_now: () => true,
-  trust_site: (m) => typeof m.host === "string" && /^[a-z0-9.-]{1,253}$/.test(m.host),
-};
 
 // Messages that only our own extension pages (popup, warning page) may send;
 // content scripts run inside arbitrary websites.
