@@ -80,8 +80,9 @@ def test_lnk_valid_script_host_and_malformed() -> None:
     assert direct(LnkAdapter(), bytes(hostile)).status is StageStatus.PARTIAL
     decision = scan(request(data=lnk()), adapters=[LnkAdapter()],
                     gate_generation="m5", auto_quarantine=False)
-    assert decision.verdict is VerdictCode.CLEAN
-    assert decision.trusted_clean
+    # A context parser is no malware scan: required alone, it clears nothing.
+    assert decision.verdict is VerdictCode.UNKNOWN
+    assert not decision.trusted_clean
 
 
 def test_pe_certificate_presence_is_not_trust() -> None:

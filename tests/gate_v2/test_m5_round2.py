@@ -16,7 +16,8 @@ from sentinel.gate_v2.analyzers.lnk import LnkAdapter, MAX_LNK
 from sentinel.gate_v2.analyzers.motw import MotwAdapter, read_zone
 from sentinel.gate_v2.analyzers.signer import SignerAdapter, win_verify_trust
 from sentinel.gate_v2.content import BoundReader
-from sentinel.gate_v2.contract import ByteRange, Category, Coverage, ScanRequest, StageStatus, Strength, VerdictCode
+from sentinel.gate_v2.contract import (ActionCode, ByteRange, Category, Coverage, ScanRequest,
+                                       StageStatus, Strength, VerdictCode)
 from sentinel.gate_v2.core import CoreAdapter
 from sentinel.gate_v2.defender import DefenderAdapter, MAX_OUTPUT, _Cancelled, _applicability, _run
 from sentinel.gate_v2.identity import measure_bytes
@@ -139,7 +140,7 @@ def test_k3_k4_named_hit_survives_change_and_deadline(tmp_path: Path) -> None:
     assert d.engine_results[0].status is StageStatus.CHANGED
     assert d.engine_results[0].evidence and d.verdict is VerdictCode.UNKNOWN
     assert "UNACCEPTED_DETECTION" in d.reason_codes
-    assert not d.cacheable and not d.action_decision.quarantine
+    assert not d.cacheable and d.action_decision.action is not ActionCode.QUARANTINE
     def late(*_):
         time.sleep(0.03)
         return 2, "Threat : Named.Two"
@@ -164,7 +165,7 @@ def test_k5_k6_context_rule_and_name_policy(tmp_path: Path) -> None:
              gate_generation="r2", auto_quarantine=True)
     assert d.verdict is VerdictCode.SUSPICIOUS
     assert "CONTEXT_RULE" in d.reason_codes and not d.trusted_clean
-    assert not d.action_decision.quarantine
+    assert d.action_decision.action is not ActionCode.QUARANTINE
     motw = MotwAdapter(reader=lambda _: "[ZoneTransfer]\nHostUrl=https://blocked.invalid/a",
                        url_check=lambda url: "blocked" in url)
     d = scan(request(path), adapters=[CoreAdapter(), motw], gate_generation="r2", auto_quarantine=True)
@@ -386,6 +387,112 @@ def test_k17_defender_pool_serializes(tmp_path: Path) -> None:
     finally:
         release.set()
         thread.join(2)
+
+
+def test_k18_required_context_stage_clears_nothing(tmp_path: Path) -> None:
+    # No exception for an engine name in the policy: required, it is incomplete.
+    path = tmp_path / "ordinary"
+    path.write_bytes(b"ordinary")
+    d = scan(request(path), adapters=[MotwAdapter(reader=lambda _: None)],
+             gate_generation="r2", auto_quarantine=False)
+    assert d.verdict is VerdictCode.UNKNOWN and not d.trusted_clean
+
+
+def test_k19_padding_cannot_hide_the_target_or_the_arguments() -> None:
+    # Arguments padded past the window, with another string flagged after them.
+    data = link(flags=8 | 32 | 64 | 0x80, strings=("cmd.exe", " " * 40000 + "/c x", "icon.ico"))
+    assert len(data) > MAX_LNK and direct(LnkAdapter(), data).evidence
+    # The name padded past the window: the flag still says arguments exist.
+    data = link(flags=1 | 4 | 8 | 32 | 0x80, idlist=b"cmd.exe", strings=("n" * 40000, "x.txt", "/c x"))
+    assert direct(LnkAdapter(), data).evidence
+    # A truncated tail keeps what was already seen.
+    assert direct(LnkAdapter(), link(flags=8 | 32 | 64 | 0x80, strings=("cmd.exe", "/c x"))).evidence
+    # An oversized LinkInfo keeps the strings inside the window.
+    info = bytearray(70000)
+    info[:4] = (70000).to_bytes(4, "little")
+    info[4:8] = (28).to_bytes(4, "little")
+    info[16:20] = (28).to_bytes(4, "little")
+    info[28:36] = b"cmd.exe\0"
+    assert direct(LnkAdapter(), link(flags=2 | 32 | 0x80, info=bytes(info), strings=("/c x",))).evidence
+
+
+def test_k19_id_list_needs_the_whole_file_name() -> None:
+    harmless = "C:\\tools\\cmdline\\app.exe".encode("utf-16le")
+    assert not direct(LnkAdapter(), link(flags=1 | 32 | 0x80, idlist=harmless, strings=("/c x",))).evidence
+    assert not direct(LnkAdapter(), link(flags=1 | 32 | 0x80, idlist=b"cmd folder", strings=("/c x",))).evidence
+    shifted = b"\x01" + "cmd.exe".encode("utf-16le")
+    assert direct(LnkAdapter(), link(flags=1 | 32 | 0x80, idlist=shifted, strings=("/c x",))).evidence
+
+
+def test_k20_a_late_conclusive_hit_still_reaches_its_action(tmp_path: Path) -> None:
+    # Invariant 9: the pre-action check is not cut short by the request deadline.
+    path = tmp_path / "ordinary"
+    path.write_bytes(b"ordinary")
+
+    class Slow(CoreAdapter):
+        def scan_bound(self, request, measured, cancel, reader):
+            found = super().scan_bound(request, measured, cancel, reader)
+            time.sleep(0.4)
+            return found
+
+    d = scan(request(path, seconds=0.2), adapters=[Slow(known_bad=lambda _: True)],
+             gate_generation="r2", auto_quarantine=True)
+    assert d.verdict is VerdictCode.MALICIOUS
+    assert d.action_decision.action is ActionCode.QUARANTINE
+
+
+def test_k21_pua_outranks_the_context_rule(tmp_path: Path) -> None:
+    # should_auto_quarantine routes on PUA_DETECTION, so it must not be replaced.
+    path = tmp_path / "shortcut.lnk"
+    path.write_bytes(link(flags=8 | 32 | 0x80, strings=("cmd.exe", "/c x")))
+    named = DefenderAdapter(applicability=lambda _: ("MpCmdRun.exe", "active"),
+                            runner=lambda *_: (2, "Threat : PUA:Win32/Example"))
+    d = scan(request(path), adapters=[LnkAdapter(), named], gate_generation="r2", auto_quarantine=False)
+    assert d.reason_codes[0] == "PUA_DETECTION"
+    assert d.action_decision.action is ActionCode.REVIEW
+
+
+def test_k22_uncertain_coverage_concerns_completed_stages_only(tmp_path: Path) -> None:
+    path = tmp_path / "ordinary"
+    path.write_bytes(b"ordinary")
+    r = defender(path, "Scan completed", code=0).engine_results[0]
+    partial = replace(r, status=StageStatus.PARTIAL, verdict=VerdictCode.UNKNOWN,
+                      coverage=Coverage(r.identity.size, (ByteRange(0, 1),), "fixed_partial",
+                                        0, 0, 0, 0, (), (), (), "declared"))
+    d = decide((partial,), request(path), "r2", stages=RequiredStages(frozenset({"defender"})))
+    assert d.reason_codes == ("FIXED_PARTIAL",) and d.verdict is VerdictCode.CLEAN
+
+
+def test_k23_cancel_during_the_last_check_is_not_a_change(tmp_path: Path) -> None:
+    from sentinel.gate_v2.identity import measure
+    path = tmp_path / "ordinary"
+    path.write_bytes(b"ordinary")
+    stop = threading.Event()
+
+    class Token:
+        def cancelled(self): return stop.is_set()
+
+    def runner(*_):
+        stop.set()
+        return 0, "Scan completed"
+
+    adapter = DefenderAdapter(applicability=lambda _: ("MpCmdRun.exe", "active"), runner=runner)
+    result = adapter.scan(request(path), measure(str(path)).identity, Token())
+    assert result.status is StageStatus.CANCELLED
+    seen = []
+
+    def reader(_):
+        stop.set()
+        seen.append(1)
+        return None
+
+    stop.clear()
+    r = BoundReader.measure_path(str(path), max_bytes=1024, cancel=Token())
+    try:
+        result = MotwAdapter(reader=reader).scan_bound(request(path), r.identity, Token(), r)
+    finally:
+        r.close()
+    assert seen and result.status is StageStatus.CANCELLED
 
 
 def test_k17_uses_measured_canonical_path(tmp_path: Path, monkeypatch) -> None:

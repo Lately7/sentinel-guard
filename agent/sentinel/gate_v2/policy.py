@@ -14,7 +14,8 @@ from .coverage import contains_range
 _COVERAGE_PREFIXES = ("Heuristics.Limits.Exceeded.", "Heuristics.Encrypted.")
 _WEAK_PREFIXES = ("PUA.", "Heuristics.", "BC.Heuristics.", "Weak.")
 _WEAK_NAMES = frozenset({"Win.Trojan.Suspect-34"})
-_CONTEXT_RULES = frozenset({"LNK_TARGETS_SCRIPT_HOST", "ORIGIN_BLOCKLISTED"})
+# R11 §6: such signals reach "suspicious" only through an explicit rule.
+CONTEXT_RULES = frozenset({"LNK_TARGETS_SCRIPT_HOST", "ORIGIN_BLOCKLISTED"})
 _DECLARED_COVERAGE_ENGINES = frozenset({"defender"})
 _DEFENDER_PUA = frozenset({"Adware", "BrowserModifier", "Program", "SoftwareBundler",
                            "SettingsModifier", "Misleading", "MonitoringTool", "RemoteAccess", "Joke"})
@@ -112,7 +113,9 @@ def decide(
                 if result.engine_id in stages.required and result.engine_id not in stages.disabled_by_policy:
                     coverage_name = True
                 continue
-            context_rule = evidence.detail_code in _CONTEXT_RULES and strength is Strength.SUPPORTING
+            # Structure, origin, and health evidence provide context, even at
+            # conclusive strength, unless an explicit rule names them.
+            context_rule = evidence.detail_code in CONTEXT_RULES and strength is Strength.SUPPORTING
             if not context_rule and category not in (Category.MALWARE, Category.PUA, Category.RISKWARE):
                 continue
             if strength not in (
@@ -163,13 +166,13 @@ def decide(
                 reduced = True
             else:
                 incomplete.append("INCOMPLETE_COVERAGE")
-        if (result.engine_id != "motw" and result.coverage.mode in ("runtime_partial", "none")) or result.coverage.objects_opaque or result.coverage.objects_omitted or result.coverage.limits_hit:
+        if result.coverage.mode in ("runtime_partial", "none") or result.coverage.objects_opaque or result.coverage.objects_omitted or result.coverage.limits_hit:
             incomplete.append("INCOMPLETE_COVERAGE")
         elif result.coverage.mode == "fixed_partial":
             reduced = True
-        if result.engine_id != "motw" and result.coverage.certainty != "verified" and not (
+        if status is StageStatus.COMPLETED and result.coverage.certainty != "verified" and not (
             result.engine_id in _DECLARED_COVERAGE_ENGINES and result.coverage.certainty == "declared" and
-            result.coverage.mode == "full" and status is StageStatus.COMPLETED
+            result.coverage.mode == "full"
         ):
             # Defender's path result is bound by before/after generation checks;
             # other declared coverage does not establish a trusted negative.
@@ -186,7 +189,10 @@ def decide(
             reasons += ("UNACCEPTED_DETECTION",)
     elif weak:
         verdict = VerdictCode.SUSPICIOUS
-        lead = "CONTEXT_RULE" if any(category in (Category.STRUCTURE, Category.ORIGIN) for category, _ in weak) else "PUA_DETECTION" if any(category is Category.PUA for category, _ in weak) else "WEAK_DETECTION"
+        categories = {category for category, _ in weak}
+        # should_auto_quarantine routes on PUA_DETECTION, so it leads when present.
+        lead = ("PUA_DETECTION" if Category.PUA in categories else
+                "WEAK_DETECTION" if categories & {Category.MALWARE, Category.RISKWARE} else "CONTEXT_RULE")
         reasons = (lead, "UNACCEPTED_DETECTION") if unaccepted_detection else (lead,)
     elif incomplete:
         verdict = VerdictCode.UNKNOWN

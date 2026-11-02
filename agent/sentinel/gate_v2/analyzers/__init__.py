@@ -8,6 +8,7 @@ from typing import Literal
 from ..contract import (CONTRACT_VERSION, ByteRange, Category, Coverage,
                         EngineResult, Evidence, FileIdentity, ScanError,
                         ScanRequest, StageStatus, Strength, VerdictCode)
+from ..policy import CONTEXT_RULES
 
 
 def context_evidence(engine: str, code: str, category: Category,
@@ -21,19 +22,18 @@ def context_evidence(engine: str, code: str, category: Category,
 def result(engine: str, request: ScanRequest, measured: FileIdentity, start: int,
            status: StageStatus, code: str, inspected: tuple[ByteRange, ...],
            evidence: tuple[Evidence, ...] = (), *,
-            certainty: Literal["verified", "declared", "unknown"] = "verified",
+           certainty: Literal["verified", "declared", "unknown"] = "unknown",
            parser_state: str = "complete") -> EngineResult:
     full = inspected == ((ByteRange(0, measured.size),) if measured.size else ())
     coverage = Coverage(measured.size, inspected,
-                         "full" if full and parser_state == "complete" and status is StageStatus.COMPLETED else
+                        "full" if full and parser_state == "complete" and status is StageStatus.COMPLETED else
                         "fixed_partial" if inspected and parser_state == "complete" else
                         "runtime_partial" if inspected else "none",
                         0, 0, 0, 0, (), ((engine, parser_state),),
                         () if parser_state == "complete" else (code,), certainty)
     # These parsers observe context; even a complete parse is no malware scan.
-    verdict = (VerdictCode.SUSPICIOUS if any(item.detail_code in
-                {"LNK_TARGETS_SCRIPT_HOST", "ORIGIN_BLOCKLISTED"} for item in evidence) else
-               VerdictCode.UNKNOWN)
+    verdict = (VerdictCode.SUSPICIOUS if any(item.detail_code in CONTEXT_RULES for item in evidence)
+               else VerdictCode.UNKNOWN)
     error = None if status in (StageStatus.COMPLETED, StageStatus.PARTIAL) else ScanError(
         code, engine, code, status in (StageStatus.CHANGED, StageStatus.TIMEOUT,
                                        StageStatus.ERROR))

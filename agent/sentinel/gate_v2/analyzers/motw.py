@@ -102,13 +102,22 @@ class MotwAdapter:
                           "PATH_REQUIRED", (), parser_state="unavailable")
         try:
             path = measured.canonical_path or request.path
-            if not identity.revalidate(path, measured, rehash=False, cancel=cancel).ok:
-                return result(self.engine_id, request, measured, start, StageStatus.CHANGED,
-                              "CHANGED", (), parser_state="changed")
+
+            def stopped() -> EngineResult | None:
+                code = identity.revalidate(path, measured, rehash=False, cancel=cancel).code
+                if code == "OK":
+                    return None
+                status = StageStatus.CANCELLED if code == "CANCELLED" else StageStatus.CHANGED
+                return result(self.engine_id, request, measured, start, status, code, (),
+                              parser_state=code.lower())
+
+            failed = stopped()
+            if failed is not None:
+                return failed
             raw = self.reader(path)
-            if not identity.revalidate(path, measured, rehash=False, cancel=cancel).ok:
-                return result(self.engine_id, request, measured, start, StageStatus.CHANGED,
-                              "CHANGED", (), parser_state="changed")
+            failed = stopped()
+            if failed is not None:
+                return failed
             if raw is None:
                 return result(self.engine_id, request, measured, start, StageStatus.COMPLETED,
                               "NO_ORIGIN", (), certainty="declared")

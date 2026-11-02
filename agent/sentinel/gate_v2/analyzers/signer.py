@@ -11,8 +11,8 @@ from ctypes import wintypes
 from typing import Literal
 
 from ..content import BoundReader, ContentError
-from ..contract import (ByteRange, CancellationToken, Category, EngineResult,
-                        FileIdentity, ScanRequest, StageStatus, Strength)
+from ..contract import (CancellationToken, Category, EngineResult, FileIdentity,
+                        ScanRequest, StageStatus, Strength)
 from . import context_evidence, result
 
 TrustState = Literal["valid", "unsigned", "invalid", "revoked", "unavailable"]

@@ -240,7 +240,9 @@ def scan(
             identity_reverified=True,
         )
         if action.action is ActionCode.QUARANTINE and request.path is not None:
-            if not identity.revalidate(request.path, measured, rehash=True, max_bytes=max_bytes, cancel=bounded_token).ok:
+            # Invariant 9: an accepted conclusive detection completes its action
+            # decision, so neither cancel nor the deadline may cut this check short.
+            if not identity.revalidate(request.path, measured, rehash=True, max_bytes=max_bytes).ok:
                 action = should_auto_quarantine(
                     decision, policy_version=request.action_policy_version,
                     auto_quarantine=auto_quarantine, protection_generation=request.protection_generation,

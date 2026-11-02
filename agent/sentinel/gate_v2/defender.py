@@ -17,8 +17,8 @@ from ctypes import wintypes
 
 from . import identity
 from .policy import classify_defender_name
-from .contract import (CONTRACT_VERSION, ByteRange, CancellationToken, Category,
-                       Coverage, EngineResult, Evidence, FileIdentity, ScanError,
+from .contract import (CONTRACT_VERSION, ByteRange, CancellationToken, Coverage,
+                       EngineResult, Evidence, FileIdentity, ScanError,
                        ScanRequest, StageStatus, Strength, VerdictCode)
 
 _NAME = re.compile(r"^[ \t]*Threat[ \t]*:[ \t]*([^\r\n]+)[ \t]*$", re.I | re.M)
@@ -329,7 +329,8 @@ class DefenderAdapter:
                         # directly. The orchestrator performs full before/after revalidation.
                         checked = identity.revalidate(request.path, measured, rehash=False, cancel=cancel)
                         if not checked.ok:
-                            status, code = StageStatus.CHANGED, checked.code
+                            status = StageStatus.CANCELLED if checked.code == "CANCELLED" else StageStatus.CHANGED
+                            code = checked.code
                         else:
                             limited = bool(coverage.limits_hit)
                             coverage = Coverage(measured.size,
