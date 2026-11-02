@@ -99,6 +99,8 @@ if os.name == "nt":
     _k32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
     _k32.WaitForSingleObject.restype = wintypes.DWORD
     _k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    _k32.GetWindowsDirectoryW.argtypes = [wintypes.LPWSTR, wintypes.UINT]
+    _k32.GetWindowsDirectoryW.restype = wintypes.UINT
     _adv.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
     _adv.CreateRestrictedToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
                                            wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p,
@@ -120,7 +122,7 @@ def _fail(what: str) -> WorkerError:
     return WorkerError(code, f"{what} failed (Windows error {code})")
 
 
-def _restricted_low_token() -> int:
+def _restricted_low_token(service_sid: str | None = None) -> int:
     """Restricted, low-integrity primary token derived from our own."""
     own = wintypes.HANDLE()
     access = TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_DEFAULT
@@ -135,9 +137,19 @@ def _restricted_low_token() -> int:
             # service) still yields a worker without admin access.
             disable = SID_AND_ATTRIBUTES(admins, 0)
             restricted = wintypes.HANDLE()
-            if not _adv.CreateRestrictedToken(own, DISABLE_MAX_PRIVILEGE, 1, ctypes.byref(disable),
-                                              0, None, 0, None, ctypes.byref(restricted)):
-                raise _fail("CreateRestrictedToken")
+            restricting = ctypes.c_void_p()
+            try:
+                if service_sid and not _adv.ConvertStringSidToSidW(service_sid, ctypes.byref(restricting)):
+                    raise _fail("ConvertStringSidToSid(service)")
+                restrict_entry = SID_AND_ATTRIBUTES(restricting, 0)
+                if not _adv.CreateRestrictedToken(own, DISABLE_MAX_PRIVILEGE, 1, ctypes.byref(disable),
+                                                  0, None, 1 if service_sid else 0,
+                                                  ctypes.byref(restrict_entry) if service_sid else None,
+                                                  ctypes.byref(restricted)):
+                    raise _fail("CreateRestrictedToken")
+            finally:
+                if restricting:
+                    _k32.LocalFree(restricting)
         finally:
             _k32.LocalFree(admins)
     finally:
@@ -178,7 +190,11 @@ def _job(memory_limit: int) -> int:
 def _environment() -> ctypes.Array[ctypes.c_wchar]:
     # Nothing from the parent's environment beyond what Windows itself needs:
     # no PYTHON*, no PATH entries a user could plant DLLs in.
-    sysroot = os.environ.get("SystemRoot", r"C:\Windows")
+    buf = ctypes.create_unicode_buffer(32768)
+    length = _k32.GetWindowsDirectoryW(buf, len(buf))
+    if not length or length >= len(buf):
+        raise _fail("GetWindowsDirectoryW")
+    sysroot = buf.value
     entries = [f"SystemRoot={sysroot}", f"PATH={sysroot}\\System32"]
     block = "\0".join(entries) + "\0\0"
     return ctypes.create_unicode_buffer(block, len(block))
@@ -242,7 +258,8 @@ def bootstrap(module: str) -> list[str]:
 
 
 def launch(args: Sequence[str], *, memory_limit: int = 512 * 1024 * 1024,
-           python: str | None = None, cwd: str | None = None) -> Worker:
+           python: str | None = None, cwd: str | None = None,
+           service_sid: str | None = None) -> Worker:
     """Start `python -I -B <args...>` as a restricted, low-integrity, jobbed worker."""
     if os.name != "nt":
         raise WorkerError(0, "restricted workers need Windows")
@@ -259,7 +276,7 @@ def launch(args: Sequence[str], *, memory_limit: int = 512 * 1024 * 1024,
     token = job = 0
     attrs = None
     try:
-        token = _restricted_low_token()
+        token = _restricted_low_token(service_sid)
         job = _job(memory_limit)
         size = ctypes.c_size_t()
         _k32.InitializeProcThreadAttributeList(None, 1, 0, ctypes.byref(size))

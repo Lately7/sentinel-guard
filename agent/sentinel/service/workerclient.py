@@ -27,6 +27,7 @@ from ..gate_v2.contract import (
     FileIdentity, ScanError, ScanRequest, StageStatus, VerdictCode,
 )
 from . import worker as worker_mod
+from .paths import active_version, installed_paths
 from .protocol import MAX_FRAME, ProtocolError, read_frame, write_frame
 
 POLL_SECONDS = 0.05
@@ -67,8 +68,19 @@ class WorkerSession:
     # -- lifecycle
 
     def _start(self, deadline_ns: int) -> None:
-        self._proc = worker_mod.launch(worker_mod.bootstrap("sentinel.service.workermain"),
-                                       memory_limit=self._memory_limit)
+        version = active_version()
+        if version is None:
+            self._proc = worker_mod.launch(worker_mod.bootstrap("sentinel.service.workermain"),
+                                           memory_limit=self._memory_limit)
+        else:
+            expected = installed_paths(version.name).version.resolve(strict=True)
+            if version.resolve(strict=True) != expected:
+                raise WorkerFailure(StageStatus.UNAVAILABLE, "INSTALL_INTEGRITY")
+            from .installer import WindowsScm
+            sid = WindowsScm().service_sid("SentinelGuard")
+            self._proc = worker_mod.launch(["-m", "sentinel.service.workermain"],
+                                           memory_limit=self._memory_limit, python=str(version / "python.exe"),
+                                           cwd=str(version), service_sid=sid)
         self.starts += 1
         self._replies = queue.Queue()
         threading.Thread(target=self._pump, args=(self._proc, self._replies), daemon=True,

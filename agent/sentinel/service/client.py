@@ -20,9 +20,14 @@ class ServiceUnavailable(ServiceError):
     """No service is listening (not installed, stopped, or still starting)."""
 
 
+class WrongServer(ServiceError):
+    """The pipe is answered by a process with the wrong token user."""
+
+
 class ServiceClient:
-    def __init__(self, name: str = winpipe.PIPE_NAME) -> None:
+    def __init__(self, name: str = winpipe.PIPE_NAME, *, expected_sid: str = "S-1-5-18") -> None:
         self.name = name
+        self.expected_sid = expected_sid
         self._conn: winpipe.PipeStream | None = None
         self._ids = itertools.count(1)
 
@@ -41,7 +46,12 @@ class ServiceClient:
         if self._conn is None:
             try:
                 self._conn = winpipe.connect(self.name)
+                actual = winpipe.server_process_sid(self._conn)
+                if actual.casefold() != self.expected_sid.casefold():
+                    self.close()
+                    raise WrongServer("WRONG_SERVER", "pipe server SID mismatch")
             except winpipe.PipeError as e:
+                self.close()
                 raise ServiceUnavailable("SERVICE_UNAVAILABLE", str(e)) from e
         rid = next(self._ids)
         try:

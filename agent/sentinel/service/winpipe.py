@@ -11,6 +11,7 @@ from __future__ import annotations
 import ctypes
 import logging
 import os
+import secrets
 import threading
 from ctypes import wintypes
 from typing import Any
@@ -72,6 +73,10 @@ if os.name == "nt":
     _k32.GetCurrentProcess.restype = wintypes.HANDLE
     _k32.LocalFree.argtypes = [ctypes.c_void_p]
     _k32.ProcessIdToSessionId.argtypes = [wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    _k32.GetNamedPipeServerProcessId.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    _k32.GetNamedPipeServerProcessId.restype = wintypes.BOOL
+    _k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    _k32.OpenProcess.restype = wintypes.HANDLE
     _adv.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
         wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p]
     _adv.ImpersonateNamedPipeClient.argtypes = [wintypes.HANDLE]
@@ -198,6 +203,29 @@ def current_process_caller() -> Caller:
         _k32.CloseHandle(token)
 
 
+def server_process_sid(stream: PipeStream) -> str:
+    """The server PID is obtained from this connected pipe handle."""
+    if os.name != "nt":
+        raise PipeError(0, "named pipes need Windows")
+    pid = wintypes.DWORD()
+    if not _k32.GetNamedPipeServerProcessId(stream.handle, ctypes.byref(pid)):
+        raise _fail("GetNamedPipeServerProcessId")
+    process = _k32.OpenProcess(0x1000, False, pid)
+    if not process:
+        raise _fail("OpenProcess(pipe server)")
+    try:
+        token = wintypes.HANDLE()
+        if not _adv.OpenProcessToken(process, TOKEN_QUERY, ctypes.byref(token)):
+            raise _fail("OpenProcessToken(pipe server)")
+        try:
+            user = _token_info(token, TokenUser)
+            return _sid_string(ctypes.cast(user, ctypes.POINTER(ctypes.c_void_p))[0])
+        finally:
+            _k32.CloseHandle(token)
+    finally:
+        _k32.CloseHandle(process)
+
+
 def _identify_client(handle: int) -> Caller:
     if not _adv.ImpersonateNamedPipeClient(handle):
         raise _fail("ImpersonateNamedPipeClient")
@@ -265,6 +293,7 @@ class PipeServer:
 
     def _client(self, handle: int) -> None:
         stream = PipeStream(handle)
+        connection_id = secrets.token_hex(16)
         caller: Caller | None = None
         try:
             while not self._stop.is_set():
@@ -283,7 +312,7 @@ class PipeServer:
                     except PipeError:
                         write_frame(stream, error(None, "FORBIDDEN", "caller could not be identified"))
                         return
-                write_frame(stream, self.core.handle(caller, frame))
+                write_frame(stream, self.core.handle(caller, frame, connection_id=connection_id))
         except PipeError:
             return
         finally:
