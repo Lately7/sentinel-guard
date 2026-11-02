@@ -125,6 +125,14 @@ class BoundReader:
             self._reads.append(ByteRange(offset, offset + amount))
         return bytes(out)
 
+    def begin_stage(self) -> None:
+        self._reads.clear()
+
+    def os_handle(self) -> int | None:
+        if self._stream is None or os.name != "nt":
+            return None
+        return msvcrt.get_osfhandle(self._stream.fileno())
+
     @property
     def ranges(self) -> tuple[ByteRange, ...]:
         return normalize_ranges(tuple(self._reads), self.identity.size)
