@@ -61,6 +61,7 @@ class App:
         quarantine.reconcile(self.db)
         self.lease = install_lease()
         self._service_items: set[str] = set()
+        self._service_held: int | None = None
         self.scanner = Scanner(self.db, use_defender=self.settings.use_defender, use_clamav=self.settings.use_clamav)
         self.gate: GatePanel | None = None
         self.engine_status = EngineStatus(self.scanner, on_change=lambda: self.ui(self.refresh))
@@ -167,9 +168,19 @@ class App:
             self.icon.icon = _icon_image(GREEN if self.realtime else AMBER)
             self.icon.update_menu()
 
+    def _service_news(self) -> None:
+        # What the service quarantined on its own never passes through this process.
+        count = (self.lease.status() or {}).get("quarantined")
+        if isinstance(count, int) and self.icon:
+            if self._service_held is not None and count > self._service_held:
+                self.icon.notify(f"{count - self._service_held} tệp vừa được cách ly.", "Sentinel Guard")
+                self.icon.icon = _icon_image(RED)
+            self._service_held = count
+
     def _notifier(self) -> None:
         while not self._stop.wait(2.0):
             try:
+                self._service_news()
                 for ev in self.db.take_unnotified():
                     if self.icon:
                         self.icon.notify(ev["detail"][:250], ev["title"])

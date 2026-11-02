@@ -187,6 +187,10 @@ def cmd_service(args: argparse.Namespace) -> int:
             print("Xem lại thư mục này, rồi chạy `sentinel service install --source <thư mục>` với quyền admin.")
         elif args.action == "install":
             installer.install(Path(args.source), args.version_id or __version__, dry_run=args.dry_run)
+        elif args.action == "verify":
+            from .service import verify
+
+            return verify.main(restart=args.restart)
         else:
             print(installer.uninstall())
     except installer.ElevationRequired:
@@ -328,11 +332,12 @@ def main(argv: list[str] | None = None) -> int:
     i.set_defaults(fn=cmd_install)
     sub.add_parser("uninstall").set_defaults(fn=cmd_uninstall)
 
-    v = sub.add_parser("service", help="dịch vụ Windows: snapshot | install | uninstall (hai lệnh sau cần quyền admin)")
-    v.add_argument("action", choices=["snapshot", "install", "uninstall"])
+    v = sub.add_parser("service", help="dịch vụ Windows: snapshot | install | verify | uninstall (ba lệnh sau cần quyền admin)")
+    v.add_argument("action", choices=["snapshot", "install", "verify", "uninstall"])
     v.add_argument("--source", help="thư mục bản sao runtime đã xem xét")
     v.add_argument("--version-id")
     v.add_argument("--dry-run", action="store_true", help="in kế hoạch, không thay đổi gì")
+    v.add_argument("--restart", action="store_true", help="verify: dừng rồi khởi động lại dịch vụ để kiểm tra rào dừng")
     v.set_defaults(fn=cmd_service)
 
     r = sub.add_parser("report", help="xuất báo cáo HTML + JSON")
@@ -344,7 +349,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     if args.cmd == "quarantine" and args.action != "list" and not args.id:
         ap.error("quarantine restore/delete needs an id")
-    if args.cmd == "service" and args.action != "uninstall" and not args.source:
+    if args.cmd == "service" and args.action in ("snapshot", "install") and not args.source:
         ap.error("service snapshot/install needs --source")
     return int(args.fn(args) or 0)
 

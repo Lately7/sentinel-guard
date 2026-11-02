@@ -22,3 +22,11 @@ export function recordSuccess(list, id) {
 export function retryable(list) {
   return list.filter((p) => !p.gaveUp);
 }
+
+// A confirmation may wait on an administrator; the native host gives up first.
+export const APPROVAL_MS = 180000;
+
+/** The agent answered and the answer was no, as opposed to no answer at all. */
+export function refused(error) {
+  return error?.message === "not approved";
+}

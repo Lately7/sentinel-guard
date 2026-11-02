@@ -298,6 +298,9 @@ class GatePanel:
         self.heading.configure(text=head)
         self._set_counts(p)
         note = []
+        if sum(p.uncovered.values()):
+            # Nothing found there is not the same as nothing there.
+            note.append(f"{sum(p.uncovered.values())} mục chưa xem được, phần lớn cần quyền quản trị")
         if p.unverified:
             note.append(f"{_n(p.unverified)} tệp chỉ được lõi Sentinel kiểm tra.")
         if p.unreadable or p.errors:

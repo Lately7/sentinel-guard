@@ -2,7 +2,7 @@ import { scoreUrl } from "./url_heuristics.js";
 import { buildBlockRules, buildAllowRules, buildOnceRule, ALLOW_BASE_ID, ONCE_BASE_ID, ONCE_SLOTS, KIND_CODES, KIND_LABELS } from "./rules.js";
 import * as native from "./native.js";
 import { VALID } from "./messages.js";
-import { recordFailure, recordSuccess, retryable } from "./pending.js";
+import { APPROVAL_MS, recordFailure, recordSuccess, refused, retryable } from "./pending.js";
 import { fetchAllowlist } from "./allowlist.js";
 
 const WARN_AT = 70; // heuristic score that earns a full-page warning
@@ -136,8 +136,13 @@ async function doSync(force) {
   // agent's (authoritative) list below already contains it.
   for (const host of state.pendingAllow) {
     try {
-      await native.request("allow_host", { host });
-    } catch {
+      await native.request("allow_host", { host }, APPROVAL_MS);
+    } catch (e) {
+      // An administrator said no: that is an answer, not something to retry.
+      if (refused(e)) {
+        await forgetTrust(host);
+        continue;
+      }
       return { ok: false, error: "agent not connected" };
     }
   }
@@ -383,7 +388,7 @@ async function handle(msg, sender) {
       // Trust only the exact host the user chose to open, not its whole domain,
       // and only for this tab unless the user asked to always trust it.
       if (msg.always) {
-        await trust(host);
+        if (!(await trust(host))) return { ok: false, refused: true };
         report("proceeded", msg.url, "always");
       } else {
         await allowOnce(tabId, host);
@@ -396,8 +401,7 @@ async function handle(msg, sender) {
       return { ok: true };
     }
     case "trust_site":
-      await trust(msg.host);
-      return { ok: true };
+      return { ok: await trust(msg.host) };
     case "page_signals": {
       if (tabId == null || !sender.url || sender.frameId !== 0) return { ok: false };
       const { enabled } = await getState();
@@ -436,26 +440,37 @@ async function handle(msg, sender) {
   return { ok: false };
 }
 
+async function forgetTrust(host) {
+  const state = await getState();
+  const allowHosts = state.allowHosts.filter((h) => h !== host);
+  await chrome.storage.local.set({ allowHosts });
+  if (state.enabled) await applyAllowRules(allowHosts);
+}
+
 async function trust(host) {
-  await exclusive(async () => {
+  return await exclusive(async () => {
+    // Asked first: with the service installed this waits for an administrator,
+    // and until then the page stays blocked.
+    try {
+      await native.request("allow_host", { host }, APPROVAL_MS);
+      // Our own change: remember the agent's new version so the next sync
+      // doesn't treat it as a dashboard edit.
+      const hello = await native.request("hello", {}, 3000);
+      await chrome.storage.local.set({ allowVersion: hello.allow_version });
+    } catch (e) {
+      if (refused(e)) return false;
+      // Agent offline: queued and uploaded by the next successful sync.
+      const { pendingAllow } = await getState();
+      if (!pendingAllow.includes(host)) await chrome.storage.local.set({ pendingAllow: [...pendingAllow, host] });
+      chrome.alarms.create("sync-retry", { delayInMinutes: 1 });
+    }
     const state = await getState();
     if (!state.allowHosts.includes(host)) {
       state.allowHosts.push(host);
       await chrome.storage.local.set({ allowHosts: state.allowHosts });
     }
     if (state.enabled) await applyAllowRules(state.allowHosts);
-    try {
-      await native.request("allow_host", { host });
-      // Our own change: remember the agent's new version so the next sync
-      // doesn't treat it as a dashboard edit.
-      const hello = await native.request("hello", {}, 3000);
-      await chrome.storage.local.set({ allowVersion: hello.allow_version });
-    } catch {
-      // Agent offline: queued and uploaded by the next successful sync.
-      const { pendingAllow } = await getState();
-      if (!pendingAllow.includes(host)) await chrome.storage.local.set({ pendingAllow: [...pendingAllow, host] });
-      chrome.alarms.create("sync-retry", { delayInMinutes: 1 });
-    }
+    return true;
   });
 }
 

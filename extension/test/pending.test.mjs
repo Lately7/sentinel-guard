@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { recordFailure, recordSuccess, retryable, MAX_ATTEMPTS, MAX_PENDING } from "../src/pending.js";
+import { recordFailure, recordSuccess, refused, retryable, MAX_ATTEMPTS, MAX_PENDING } from "../src/pending.js";
 
 const item = (id) => ({ id, path: `C:\\Users\\u\\Downloads\\f${id}.exe`, url: "https://example.test/f", name: `f${id}.exe` });
 
@@ -31,4 +31,10 @@ test("list is bounded, oldest dropped first", () => {
   for (let i = 0; i < MAX_PENDING + 5; i++) l = recordFailure(l, item(i), "x", i);
   assert.equal(l.length, MAX_PENDING);
   assert.equal(l[0].id, 5);
+});
+
+test("a refusal is an answer, a lost agent is not", () => {
+  assert.equal(refused(new Error("not approved")), true);
+  assert.equal(refused(new Error("disconnected")), false);
+  assert.equal(refused(undefined), false);
 });
