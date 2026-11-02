@@ -143,6 +143,7 @@ with a desired-behaviour test are in `tests/test_known_issues.py`
 | RT-025 | Popup "no issue" when nothing was checked | not yet | Open → phase 5 |
 | RT-026 | Real-time "on" with nothing watched | code + xfail test | Open → phase 5 |
 | RT-027 | Only one registry view of Run keys | not yet | Open → phase 5 |
+| RT-028 | `BC.Heuristics.*` ClamAV names treated as conclusive (ClamAV itself classes them potentially unwanted) | ClamAV source `others.c:1730-1734` + `clamav.py:231` | Open → Gate v2 ClamAV policy (R8a) |
 
 Tests after these fixes: pytest 110 passed, 4 skipped (real-clamd tests, no
 clamd), 3 xfailed (known issues); node --test 12 passed.
