@@ -1,6 +1,6 @@
 # R11 — Gate v2 knowledge pack and specification
 
-Read everything in `docs/research/` (R8a–R10) and `docs/handoff/` (r1–r7),
+Read everything in `docs/research/` (R8a–R10 and R12a–d: YARA-X, capa, osquery, Wazuh) and `docs/handoff/` (r1–r7),
 plus the current gate code (`agent/sentinel/engine/`, `scanjob.py`,
 `watcher.py`, `protection.py`, `quarantine.py`, `nativehost.py`).
 
