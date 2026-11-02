@@ -3,7 +3,7 @@
 Một trang duy nhất để theo dõi tiến độ. Chi tiết kỹ thuật vẫn nằm trong
 `docs/handoff/PROJECT_CONTEXT.md`; khi hai nơi khác nhau thì code là đúng.
 
-**Cập nhật:** 2026-11-02 tối (≈20:20) · **Nhánh:** `gate-baseline` (chưa push) · **Kế hoạch toàn bộ:** `docs/handoff/PLAN.md` · **Bàn giao:** `docs/handoff/NEXT_SESSION.md`
+**Cập nhật:** 2026-11-02 tối · **Nhánh:** `main` (đổi tên từ `gate-baseline`), đẩy lên `github.com/Lately7/sentinel-guard` · **Kế hoạch toàn bộ:** `docs/handoff/PLAN.md` · **Bàn giao:** `docs/handoff/NEXT_SESSION.md`
 
 ## Ai làm gì
 

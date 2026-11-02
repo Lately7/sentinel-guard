@@ -4,6 +4,19 @@ Viết 2026-11-02 tối, sau khi đọc lại code, đặc tả R11/R13b và ch�
 này thay mục 3–5 của `NEXT_SESSION.md` về thứ tự công việc. Các quy tắc mục 7 của
 `NEXT_SESSION.md` giữ nguyên, không nới lỏng.
 
+## 0. Cập nhật tối 2026-11-02 (chủ dự án)
+
+* **Đồng ý mục tiêu ≈7/10** so với Malwarebytes = 10, tự chạy hoàn toàn, săn edge case. Bước 10 không
+  còn chờ duyệt. Ngoại lệ không đổi: Claude không tự nâng quyền, không đổi cài đặt hệ thống hay Defender,
+  không tải gì, không chạy mã độc. Sản phẩm được viết để chạy quyền admin; lệnh cài do chủ dự án chạy.
+* `gate-baseline` đổi tên thành `main`, đẩy lên `github.com/Lately7/sentinel-guard`, commit dần lên đó.
+  Không force, không viết lại lịch sử.
+* **Ước tính:** phần tự động khoảng 20 giờ máy chạy (15–25), nhiều khả năng qua 2–3 phiên; phần chủ dự án
+  khoảng 1 giờ chạy script admin; tự động dừng tiến trình ransomware cần thêm 30 ngày quan sát (R14).
+  Là ước lượng, không phải số đo. "7/10" cũng là ước lượng: không có lab mẫu thật để đo tỉ lệ phát hiện.
+* Không làm được trong dự án này: ML tĩnh cho PE, vì cần bộ dữ liệu mẫu mà quy tắc không cho tải.
+* Xong tới giờ: bước 1 (M5), M6 phần 1, R15 trừ R15-2 (vào A3) và R15-8 (vào M7).
+
 ## 1. Nguyên tắc từ giờ
 
 * **Claude chịu trách nhiệm toàn bộ** code, test, tích hợp, tài liệu. Kế hoạch này
