@@ -61,7 +61,8 @@ class App:
         quarantine.reconcile(self.db)
         self.lease = install_lease()
         self._service_items: set[str] = set()
-        self._service_held: int | None = None
+        self._service_seen: int | None = None
+        self._service_repairs: dict[str, str] = {}  # repair id -> file, waiting for a confirmation
         self.scanner = Scanner(self.db, use_defender=self.settings.use_defender, use_clamav=self.settings.use_clamav)
         self.gate: GatePanel | None = None
         self.engine_status = EngineStatus(self.scanner, on_change=lambda: self.ui(self.refresh))
@@ -169,13 +170,20 @@ class App:
             self.icon.update_menu()
 
     def _service_news(self) -> None:
-        # What the service quarantined on its own never passes through this process.
-        count = (self.lease.status() or {}).get("quarantined")
-        if isinstance(count, int) and self.icon:
-            if self._service_held is not None and count > self._service_held:
-                self.icon.notify(f"{count - self._service_held} tệp vừa được cách ly.", "Sentinel Guard")
+        # What the service does on its own never passes through this process.
+        news = self.lease.events(self._service_seen or 0)
+        if news is None:
+            return
+        first_look = self._service_seen is None
+        self._service_seen = int(news.get("last", 0))
+        for event in news.get("events", ()):
+            if event.get("repair_id"):
+                self._service_repairs[str(event["repair_id"])] = str(event.get("detail", ""))
+            if first_look or event.get("level") == "info" or not self.icon:
+                continue  # old news: the tray was not running when it happened
+            self.icon.notify(str(event.get("detail", ""))[:250], str(event.get("title", "")))
+            if event.get("level") == "threat":
                 self.icon.icon = _icon_image(RED)
-            self._service_held = count
 
     def _notifier(self) -> None:
         while not self._stop.wait(2.0):
@@ -289,7 +297,8 @@ class App:
         qb = ttk.Frame(qf)
         qb.pack(anchor="w", pady=(10, 0))
         ttk.Button(qb, text="Khôi phục", command=self.restore_selected).pack(side="left", padx=(0, 8))
-        ttk.Button(qb, text="Xóa vĩnh viễn", command=self.delete_selected).pack(side="left")
+        ttk.Button(qb, text="Xóa vĩnh viễn", command=self.delete_selected).pack(side="left", padx=(0, 8))
+        ttk.Button(qb, text="Dừng và cách ly", command=self.repair_selected).pack(side="left")
         wf = ttk.Frame(nb, padding=(gap * 2, gap * 2, gap * 2, gap))
         nb.add(wf, text="Web", icon="web")
         ttk.Label(wf, text="Web", style="PageTitle.TLabel").pack(anchor="w", pady=(0, gap))
@@ -340,6 +349,9 @@ class App:
         items = []
         held = self.lease.quarantine_items() or []
         self._service_items = {q["id"] for q in held}
+        for repair_id, where in self._service_repairs.items():
+            items.append((repair_id, (os.path.basename(where), "", "Đang chạy: chọn Dừng và cách ly",
+                                      os.path.dirname(where)), "threat"))
         for q in held:
             items.append((q["id"], (os.path.basename(q["original_path"]), _fmt_ts(q["ts"]), "Do dịch vụ giữ",
                                     os.path.dirname(q["original_path"])), "threat"))
@@ -369,6 +381,8 @@ class App:
                                         "khi quét. Bản sao ở nơi khác vẫn bị chặn."):
             return
         for qid in sel:
+            if qid in self._service_repairs:
+                continue  # still running from where it is: nothing was quarantined yet
             if qid in self._service_items:
                 if not self.lease.approve("restore_quarantine", {"quarantine_id": qid}):
                     messagebox.showerror(APP, "Chưa khôi phục: cần xác nhận của quản trị viên.")
@@ -384,11 +398,23 @@ class App:
         sel = self.q_tv.selection()
         if sel and messagebox.askyesno(APP, f"Xóa vĩnh viễn {len(sel)} tệp? Không thể hoàn tác."):
             for qid in sel:
+                if qid in self._service_repairs:
+                    continue
                 if qid not in self._service_items:
                     quarantine.delete(self.db, qid)
                 elif not self.lease.approve("delete_quarantine", {"quarantine_id": qid}):
                     messagebox.showerror(APP, "Chưa xóa: cần xác nhận của quản trị viên.")
             self.refresh()
+
+    def repair_selected(self) -> None:
+        for repair_id in self.q_tv.selection():
+            if repair_id not in self._service_repairs:
+                continue
+            if self.lease.approve("approve_repair", {"repair_id": repair_id}):
+                del self._service_repairs[repair_id]
+            else:
+                messagebox.showerror(APP, "Chưa xử lý: cần xác nhận của quản trị viên.")
+        self.refresh()
 
     def unallow_selected(self) -> None:
         for host in self.allow_tv.selection():

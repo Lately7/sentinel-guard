@@ -262,7 +262,8 @@ def origin_allowed(argv: list[str]) -> bool:
 
 
 def write_message(stream: BinaryIO, obj: dict[str, Any]) -> None:
-    data = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    # Escaped: a lone surrogate is a legal NTFS name and has no UTF-8 form.
+    data = json.dumps(obj, separators=(",", ":")).encode("ascii")
     if len(data) > MAX_OUT:
         # Sending it would make the browser kill the connection; answer with
         # an error the extension can handle instead.

@@ -9,7 +9,7 @@ are injected, so nothing here elevates or mutates the machine by itself.
 from __future__ import annotations
 
 import logging
-import ntpath
+import re
 import secrets
 import threading
 import time
@@ -29,6 +29,27 @@ MAX_PLANS_PER_CALLER = 8
 MAX_JOBS_PER_CALLER = 64
 MAX_JOBS = 4096
 FINISHED_JOB_STATES = ("done", "cancelled", "failed")
+MAX_SUMMARY = 500
+DRIVE_PATH = re.compile(r"[A-Za-z]:\\.+", re.DOTALL)
+DEVICE_NAMES = frozenset(("CON", "PRN", "AUX", "NUL", *(f"{p}{n}" for p in ("COM", "LPT") for n in range(1, 10))))
+
+
+def local_path(path: str) -> str | None:
+    """The one spelling of a local file the service accepts, or None.
+
+    Win32 treats "/" as "\\", so "\\/srv/share" is a UNC path a prefix test
+    misses, and it reads every other form as well: a device name in any folder,
+    a stream after a colon, names that silently lose trailing dots and spaces.
+    A real path never needs any of those, and each one has been a way past a check.
+    """
+    text = path.replace("/", "\\")
+    if not DRIVE_PATH.fullmatch(text):
+        return None
+    for part in text[3:].split("\\"):
+        if (not part or part in (".", "..") or part != part.rstrip(". ") or ":" in part
+                or any(ord(c) < 32 for c in part) or part.split(".")[0].upper() in DEVICE_NAMES):
+            return None
+    return text
 RATE_CAPACITY = 60.0
 RATE_PER_SECOND = 20.0
 
@@ -47,6 +68,7 @@ class Backend(Protocol):
     # Only what this caller may know about: another user's file paths stay theirs.
     def quarantine_items(self, caller: Caller) -> list[dict[str, Any]]: ...
     def allowed_hosts(self, offset: int, limit: int) -> dict[str, Any]: ...
+    def events_for(self, caller: Caller, after: int, limit: int) -> dict[str, Any]: ...
     # Vietnamese summary built by the service from its own state, or None when
     # the target does not exist (unknown quarantine id, ...).
     def describe_plan(self, kind: str, params: dict[str, Any]) -> str | None: ...
@@ -144,13 +166,12 @@ class ServiceCore:
             return True
 
     def _checked_path(self, caller: Caller, path: str) -> str:
-        # Local drive paths only: no UNC/device namespaces (\\server, \\?\,
-        # \\.\), no relative paths resolved against the service's directory.
-        if path.startswith(("\\\\", "//")) or not ntpath.isabs(path) or not ntpath.splitdrive(path)[0]:
-            raise ProtocolError("BAD_PATH", "only absolute local paths are accepted")
-        if not self.backend.can_read(caller, path):
+        normal = local_path(path)
+        if normal is None:
+            raise ProtocolError("BAD_PATH", "only plain absolute local paths are accepted")
+        if not self.backend.can_read(caller, normal):
             raise ProtocolError("ACCESS_DENIED", "the caller cannot read this file")
-        return path
+        return normal
 
     def _own_job(self, caller: Caller, job_id: str) -> None:
         with self._lock:
@@ -235,8 +256,16 @@ class ServiceCore:
     def _op_allowed_hosts(self, caller: Caller, args: dict[str, Any]) -> dict[str, Any]:
         return self.backend.allowed_hosts(args["offset"], args["limit"])
 
+    def _op_events(self, caller: Caller, args: dict[str, Any]) -> dict[str, Any]:
+        return self.backend.events_for(caller, args["after"], args["limit"])
+
     def _op_request_plan(self, caller: Caller, args: dict[str, Any]) -> dict[str, Any]:
-        summary = self.backend.describe_plan(args["kind"], args["params"])
+        params = dict(args["params"])
+        if args["kind"] == "add_exclusion":
+            # Whether a hash matches is an answer about the file: it has to be one
+            # the caller may read, and the path must be as plain as any other.
+            params["path"] = self._checked_path(caller, params["path"])
+        summary = self.backend.describe_plan(args["kind"], params)
         if summary is None:
             raise ProtocolError("NOT_FOUND", "nothing to act on")
         now = self._clock()
@@ -244,7 +273,7 @@ class ServiceCore:
             self._expire(now)
             if sum(1 for p in self._plans.values() if p.requester == caller.key) >= MAX_PLANS_PER_CALLER:
                 raise ProtocolError("BUSY", "too many pending confirmations")
-            plan = _Plan(secrets.token_hex(16), 1, args["kind"], dict(args["params"]), summary[:500],
+            plan = _Plan(secrets.token_hex(16), 1, args["kind"], params, summary[:MAX_SUMMARY],
                          caller.key, now + PLAN_TTL_SECONDS)
             self._plans[plan.plan_id] = plan
         # The requester learns only the id; what gets approved is what the
@@ -277,7 +306,8 @@ class ServiceCore:
             raise ProtocolError("PLAN_CLAIMED", "confirmation belongs to another helper")
         if args["version"] != plan.version:
             raise ProtocolError("STALE_PLAN", "the confirmation changed; show it again")
-        if self.backend.describe_plan(plan.kind, plan.params) != plan.summary:
+        current = self.backend.describe_plan(plan.kind, plan.params)
+        if current is None or current[:MAX_SUMMARY] != plan.summary:
             raise ProtocolError("STALE_PLAN", "the target changed; show it again")
         with self._lock:
             # Single use: removed before acting, so a replayed approval finds nothing.

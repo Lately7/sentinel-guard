@@ -66,7 +66,7 @@ class DbCursorStore:
 class Observers:
     def __init__(self, submit: Callable[[str, str, bool], bool], volumes: Iterable[Volume], store: DbCursorStore,
                  *, processes: ProcessWatcher | None = None, rescans: RescanQueue | None = None,
-                 reconcile: Callable[[], None] = lambda: None, data_root: str = "",
+                 reconcile: Callable[[], bool | None] = lambda: True, data_root: str = "",
                  clock: Callable[[], float] = time.monotonic) -> None:
         self.submit = submit
         self.volumes = list(volumes)
@@ -78,6 +78,8 @@ class Observers:
         self.clock = clock
         self.counts: Counter[str] = Counter()
         self._recent: OrderedDict[str, float] = OrderedDict()
+        self._again: dict[str, tuple[str, str]] = {}  # changed again inside the window
+        self._owed = False  # something was missed and a reconciliation has to make up for it
         self._gap_of: dict[str, str] = {}
         self._reconciled_at = float("-inf")
         self._stop = threading.Event()
@@ -96,6 +98,11 @@ class Observers:
         key = ntpath.normcase(path)
         last = self._recent.get(key)
         if last is not None and now - last < RECENT_SECONDS and not fresh:
+            # That scan may have read the file before this write: look again after the window.
+            if len(self._again) < RECENT_CAP:
+                self._again[key] = (path, reason)
+            else:
+                self._owed = True
             return
         self._recent[key] = now
         self._recent.move_to_end(key)
@@ -105,9 +112,17 @@ class Observers:
             self.counts[f"queued_{reason}"] += 1
         else:
             self.counts["queue_full"] += 1
+            self._owed = True
+
+    def _offer_again(self) -> None:
+        now = self.clock()
+        for key, (path, reason) in list(self._again.items()):
+            if now - self._recent.get(key, float("-inf")) >= RECENT_SECONDS:
+                del self._again[key]
+                self._offer(path, reason)
 
     def tick_journal(self) -> None:
-        lost = False
+        self._offer_again()
         for volume in self.volumes:
             batch = read_batch(volume.root, volume, self.store, volume.resolve)
             self.counts["records"] += len(batch.records)
@@ -124,14 +139,16 @@ class Observers:
             reason = batch.gaps[0].reason
             if self._gap_of.get(volume.root) != reason:
                 self._gap_of[volume.root] = reason
-                lost = lost or any(gap.reconciliation_required for gap in batch.gaps)
+                self._owed = self._owed or any(gap.reconciliation_required for gap in batch.gaps)
             reset_cursor(volume.root, volume, self.store)
         now = self.clock()
-        if lost and now - self._reconciled_at >= RECONCILE_SECONDS:
+        if self._owed and now - self._reconciled_at >= RECONCILE_SECONDS:
             # After the cursors moved: whatever changes during this scan is in the journal.
             self._reconciled_at = now
+            self._owed = False
             self.counts["reconciliations"] += 1
-            self.reconcile()
+            if self.reconcile() is False:
+                self._owed = True
 
     def tick_processes(self) -> None:
         if self.processes is None:

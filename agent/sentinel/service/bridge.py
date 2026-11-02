@@ -24,8 +24,6 @@ CHECK_SECONDS = 5.0
 POLL_SECONDS = 0.2
 JOB_SECONDS = 150.0
 FINISHED = ("done", "cancelled", "failed")
-# The service will not handle these paths; the user's own process still can.
-LOCAL_ONLY = ("BAD_PATH",)
 
 
 class ServiceLease:
@@ -94,10 +92,10 @@ class ServiceLease:
         except ServiceUnavailable:
             self._gone()
             return None
-        except ServiceError as e:
-            if e.code in LOCAL_ONLY:
-                return None
-            return {"code": e.code, "state": "failed"}
+        except ServiceError:
+            # Refused or unable: this process still has its own rights, and using
+            # them gains nothing a same-user process does not already have.
+            return None
         except OSError:
             self._gone()
             return None
@@ -107,7 +105,7 @@ class ServiceLease:
         if not v.path or not self.available():
             return None
         done = self._scan("scan_request", path=str(v.path))
-        return None if done is not None and _only_we_saw_it(v, done) else done
+        return None if done is None or _left_to_us(v, done) else done
 
     def scan_download(self, path: str, url: str | None) -> dict[str, Any] | None:
         if not self.available():
@@ -127,6 +125,9 @@ class ServiceLease:
     def status(self) -> dict[str, Any] | None:
         return self._query("status")
 
+    def events(self, after: int) -> dict[str, Any] | None:
+        return self._query("events", after=after)
+
     def enable_protection(self) -> bool:
         return self._query("enable_protection") is not None
 
@@ -142,14 +143,17 @@ class ServiceLease:
             return False
 
 
-def _only_we_saw_it(v: Verdict, done: dict[str, Any]) -> bool:
-    """The service found nothing, but only because it does not run the engine that did.
+def _left_to_us(v: Verdict, done: dict[str, Any]) -> bool:
+    """The service gave no answer about the bytes this process found something in.
 
-    This process may act on a file it can reach anyway, so the detection stands.
-    A service that looked with the same engines, or a trust an administrator
-    approved, is an answer and overrides what was found here.
+    It failed, was refused the file, or found nothing without having run the
+    engine that did. This process may act on a file it can reach anyway, so the
+    detection stands. A service that looked with the same engines, or a trust an
+    administrator approved, is an answer and overrides what was found here.
     """
-    if done.get("state") != "done" or done.get("quarantined") or done.get("error") or done.get("trusted"):
+    if done.get("state") != "done" or done.get("code") == "ACCESS_DENIED":
+        return True
+    if done.get("quarantined") or done.get("error") or done.get("trusted"):
         return False
     decision = getattr(v, "decision", None)
     accepted = set(decision.accepted_evidence_ids) if decision else set()

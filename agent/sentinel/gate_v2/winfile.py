@@ -28,7 +28,22 @@ INVALID_HANDLE = wintypes.HANDLE(-1).value
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 FILE_ATTRIBUTE_TAG_INFO = 9
 FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX = 4, 21
-FILE_DISPOSITION_DELETE, FILE_DISPOSITION_IGNORE_READONLY = 0x1, 0x10
+FILE_DISPOSITION_DELETE, FILE_DISPOSITION_POSIX, FILE_DISPOSITION_IMAGE_CHECK = 0x1, 0x2, 0x4
+FILE_DISPOSITION_IGNORE_READONLY = 0x10
+FILE_STANDARD_INFO_CLASS = 1
+FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_SHARE_ALL = 0x120116, 0x80, 0x7
+FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+FILE_CREATE, FILE_SYNCHRONOUS_IO_NONALERT, FILE_NON_DIRECTORY_FILE = 2, 0x20, 0x40
+OBJ_CASE_INSENSITIVE = 0x40
+SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION = 1, 0x1
+TRUSTED_INSTALLER = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+SYSTEM_OWNERS = frozenset((TRUSTED_INSTALLER, "S-1-5-18", "S-1-5-32-544"))
+# Under the Windows folder but writable by any user, so nothing there can be
+# assumed to be the system's: droppers use them for exactly that reason.
+USER_WRITABLE = ("Temp", "Tasks", "Tracing", "debug\\WIA", "Registration\\CRMLog",
+                 "System32\\Tasks", "System32\\com\\dmp", "System32\\FxsTmp", "System32\\spool\\PRINTERS",
+                 "System32\\spool\\SERVERS", "System32\\spool\\drivers\\color",
+                 "SysWOW64\\Tasks", "SysWOW64\\com\\dmp", "SysWOW64\\FxsTmp")
 # Set on junctions and symlinks. Cloud placeholders are reparse points too, but
 # they name no other location, so they stay acceptable targets.
 NAME_SURROGATE = 0x20000000
@@ -36,10 +51,43 @@ ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_ACCESS_DENIED = 2, 3, 5
 ERROR_SHARING_VIOLATION, ERROR_HANDLE_EOF, ERROR_FILE_EXISTS = 32, 38, 80
 ERROR_INVALID_PARAMETER, ERROR_ALREADY_EXISTS, ERROR_NOT_SUPPORTED = 87, 183, 50
 
+class FILE_STANDARD_INFO(ctypes.Structure):
+    _fields_ = [("AllocationSize", ctypes.c_int64), ("EndOfFile", ctypes.c_int64), ("NumberOfLinks", wintypes.DWORD),
+                ("DeletePending", ctypes.c_ubyte), ("Directory", ctypes.c_ubyte)]
+
+
+class UNICODE_STRING(ctypes.Structure):
+    _fields_ = [("Length", wintypes.USHORT), ("MaximumLength", wintypes.USHORT), ("Buffer", wintypes.LPWSTR)]
+
+
+class OBJECT_ATTRIBUTES(ctypes.Structure):
+    _fields_ = [("Length", wintypes.ULONG), ("RootDirectory", wintypes.HANDLE),
+                ("ObjectName", ctypes.POINTER(UNICODE_STRING)), ("Attributes", wintypes.ULONG),
+                ("SecurityDescriptor", ctypes.c_void_p), ("SecurityQualityOfService", ctypes.c_void_p)]
+
+
+class IO_STATUS_BLOCK(ctypes.Structure):
+    _fields_ = [("Status", ctypes.c_void_p), ("Information", ctypes.c_size_t)]
+
+
 if os.name == "nt":
     import msvcrt
 
     _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _adv = ctypes.WinDLL("advapi32", use_last_error=True)
+    _nt = ctypes.WinDLL("ntdll")
+    _nt.NtCreateFile.restype = ctypes.c_long
+    _nt.NtCreateFile.argtypes = [ctypes.POINTER(wintypes.HANDLE), wintypes.DWORD, ctypes.POINTER(OBJECT_ATTRIBUTES),
+                                 ctypes.POINTER(IO_STATUS_BLOCK), ctypes.c_void_p, wintypes.ULONG, wintypes.ULONG,
+                                 wintypes.ULONG, wintypes.ULONG, ctypes.c_void_p, wintypes.ULONG]
+    _k32.WriteFile.argtypes = [wintypes.HANDLE, ctypes.c_char_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+                               ctypes.c_void_p]
+    _k32.LocalFree.argtypes = [ctypes.c_void_p]
+    _adv.GetSecurityInfo.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p),
+                                     ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+                                     ctypes.POINTER(ctypes.c_void_p)]
+    _adv.GetSecurityInfo.restype = wintypes.DWORD
+    _adv.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
     _k32.CreateFileW.restype = wintypes.HANDLE
     _k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
                                  wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
@@ -106,9 +154,13 @@ class Target:
         return [name for name in _link_names(self.path) if not same_path(name, self.path)]
 
     def mark_delete(self, delete: bool = True) -> None:
-        # The read-only attribute must not be a way to stay out of quarantine;
-        # file systems without the extended call fall back to the classic one.
-        flags = (FILE_DISPOSITION_DELETE | FILE_DISPOSITION_IGNORE_READONLY) if delete else 0
+        # The read-only attribute must not be a way to stay out of quarantine.
+        # POSIX: the name goes when this handle closes, whoever else holds the
+        # file. The image check keeps a running program a refusal: its process
+        # would otherwise go on running from a file nobody can see any more.
+        # File systems without the extended call fall back to the classic one.
+        flags = (FILE_DISPOSITION_DELETE | FILE_DISPOSITION_POSIX | FILE_DISPOSITION_IMAGE_CHECK
+                 | FILE_DISPOSITION_IGNORE_READONLY) if delete else 0
         ex = wintypes.DWORD(flags)
         if _k32.SetFileInformationByHandle(self.handle, FILE_DISPOSITION_INFO_EX, ctypes.byref(ex), 4):
             return
@@ -117,6 +169,55 @@ class Target:
         plain = ctypes.c_ubyte(1 if delete else 0)
         if not _k32.SetFileInformationByHandle(self.handle, FILE_DISPOSITION_INFO, ctypes.byref(plain), 1):
             raise _fail(self.path)
+
+    def gone(self) -> bool:
+        """Someone already deleted this file; this handle only keeps the bytes alive."""
+        info = FILE_STANDARD_INFO()
+        if not _k32.GetFileInformationByHandleEx(self.handle, FILE_STANDARD_INFO_CLASS, ctypes.byref(info),
+                                                 ctypes.sizeof(info)):
+            raise _fail(self.path)
+        return bool(info.DeletePending) or info.NumberOfLinks == 0
+
+    def owner(self) -> str | None:
+        owner, descriptor = ctypes.c_void_p(), ctypes.c_void_p()
+        if _adv.GetSecurityInfo(self.handle, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, ctypes.byref(owner),
+                                None, None, None, ctypes.byref(descriptor)):
+            return None
+        try:
+            text = wintypes.LPWSTR()
+            if not _adv.ConvertSidToStringSidW(owner, ctypes.byref(text)):
+                return None
+            try:
+                return text.value
+            finally:
+                _k32.LocalFree(text)
+        finally:
+            _k32.LocalFree(descriptor)
+
+    def system_owned(self) -> bool:
+        # Not knowing counts as the system's: the mistake to avoid is breaking Windows.
+        found = self.owner()
+        return found is None or found in SYSTEM_OWNERS
+
+    def write_stream(self, name: str, data: bytes) -> None:
+        """Writes a stream of the file this handle holds; a path would be looked up again."""
+        length = len(name) * 2
+        text = UNICODE_STRING(length, length, name)
+        attributes = OBJECT_ATTRIBUTES(ctypes.sizeof(OBJECT_ATTRIBUTES), self.handle, ctypes.pointer(text),
+                                       OBJ_CASE_INSENSITIVE, None, None)
+        status_block = IO_STATUS_BLOCK()
+        opened = wintypes.HANDLE()
+        status = _nt.NtCreateFile(ctypes.byref(opened), FILE_GENERIC_WRITE, ctypes.byref(attributes),
+                                  ctypes.byref(status_block), None, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_ALL, FILE_CREATE,
+                                  FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE, None, 0)
+        if status:
+            raise TargetError("FAILED", f"stream status {status & 0xFFFFFFFF:#x}")
+        try:
+            done = wintypes.DWORD()
+            if not _k32.WriteFile(opened, data, len(data), ctypes.byref(done), None) or done.value != len(data):
+                raise _fail(name)
+        finally:
+            _k32.CloseHandle(opened)
 
     def close(self) -> None:
         self.stream.close()
@@ -193,6 +294,38 @@ def create_new(path: str) -> Target:
     return target
 
 
+def make_parents(path: str) -> None:
+    """Creates missing folders one by one, proving each landed where it was named.
+
+    One a junction redirected would otherwise be left behind wherever it pointed.
+    """
+    missing: list[str] = []
+    folder = ntpath.dirname(path)
+    while folder and not os.path.lexists(folder):
+        missing.append(folder)
+        parent = ntpath.dirname(folder)
+        if parent == folder:
+            break
+        folder = parent
+    for item in reversed(missing):
+        try:
+            os.mkdir(item)
+        except FileExistsError:
+            continue
+        handle = _k32.CreateFileW(item, DELETE | FILE_READ_ATTRIBUTES, FILE_SHARE_ALL, None, OPEN_EXISTING,
+                                  FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, None)
+        if handle in (None, INVALID_HANDLE):
+            raise _fail(item)
+        descriptor = msvcrt.open_osfhandle(handle, os.O_RDONLY)
+        try:
+            if not same_path(identity._final_path(descriptor, item), item):
+                remove = ctypes.c_ubyte(1)
+                _k32.SetFileInformationByHandle(handle, FILE_DISPOSITION_INFO, ctypes.byref(remove), 1)
+                raise TargetError("MOVED", item)
+        finally:
+            os.close(descriptor)
+
+
 def _link_names(final: str) -> list[str]:
     drive = ntpath.splitdrive(final)[0]
     name = ctypes.create_unicode_buffer(32768)
@@ -233,7 +366,7 @@ def protected_roots() -> tuple[str, ...]:
 
 def is_protected(path: str, roots: tuple[str, ...] | None = None) -> bool:
     found = ntpath.normcase(ntpath.normpath(path))
-    windows_temp = ntpath.normcase(ntpath.join(_windows_dir(), "Temp")) + "\\"
-    if found.startswith(windows_temp):
-        return False  # a place droppers like, and nothing the system depends on
+    windows = _windows_dir()
+    if any(found.startswith(ntpath.normcase(ntpath.join(windows, folder)) + "\\") for folder in USER_WRITABLE):
+        return False
     return any(found == root or found.startswith(root + "\\") for root in (roots or protected_roots()))

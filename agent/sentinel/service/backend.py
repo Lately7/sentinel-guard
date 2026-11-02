@@ -10,13 +10,14 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import os
+import queue
 import re
 import threading
 import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -29,13 +30,13 @@ from ..engine.signatures import SignatureEngine
 from ..engine.verdict import Verdict
 from ..gate_v2 import identity, scope
 from ..gate_v2.actions import ProtectionBarrier, ProtectionStopped
-from ..protection import act_on, escalate_origin, top_reason
+from ..protection import act_on, top_reason
 from . import repair, winpipe
 from .authz import Caller
 from .observers import DbCursorStore, Observers
 from .procwatch import ProcessWatcher, windows_resolve, windows_snapshot
 from .protocol import ProtocolError
-from .repair import shown
+from .repair import shown, shown_path
 from .rescan import DbDownloadStore, Download, RescanQueue
 from .usn import WindowsVolume
 
@@ -51,6 +52,14 @@ OFF_BARRIER_SECONDS = 20.0
 MAINTENANCE_SECONDS = 600.0
 FIRST_MAINTENANCE_SECONDS = 30.0  # a fresh install has no threat data at all until this runs
 MAX_REPAIRS = 64
+WATCH_SECONDS = 5.0
+# A job past this is written off: opening a file can wait on a hostile oplock for
+# ever and nothing can interrupt it. Past MAX_STUCK at once, no more threads.
+STALL_SECONDS = config.SCAN_DEADLINE_SECONDS + 30.0
+MAX_STUCK = 16
+# A file that would not hold still is looked at again, a few times, then reported.
+RETRY_SECONDS = (5.0, 30.0, 120.0, 600.0)
+MAX_RETRIES = 1024
 PAGE_BYTES = 600_000  # a frame holds 1 MiB, and a page of long names can exceed that
 HOST = re.compile(r"(?=.{1,253}\Z)[a-z0-9-]+(\.[a-z0-9-]+)*\Z")
 OFF_META = "protection_off"
@@ -81,6 +90,65 @@ class _Job:
     state: str = "queued"
     result: dict[str, Any] = field(default_factory=dict)
     use_cache: bool = True
+    attempts: int = 0
+
+
+class _Lane:
+    """Worker threads a stuck file cannot use up.
+
+    A job past its time is written off and a new thread takes its place; the
+    stuck one ends by itself when its open finally returns.
+    """
+
+    def __init__(self, name: str, workers: int, run: Callable[[_Job], None], *, limit: float = STALL_SECONDS,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self.name, self.run, self.limit, self.clock = name, run, limit, clock
+        self.jobs: queue.SimpleQueue[_Job] = queue.SimpleQueue()
+        self.running: dict[threading.Thread, tuple[_Job, float]] = {}
+        self.stalled = 0
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        for _ in range(workers):
+            self._add()
+
+    def _add(self) -> None:
+        threading.Thread(target=self._work, name=f"service-{self.name}", daemon=True).start()
+
+    def submit(self, job: _Job) -> None:
+        self.jobs.put(job)
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _work(self) -> None:
+        me = threading.current_thread()
+        while not self._stop.is_set():
+            try:
+                job = self.jobs.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            with self._lock:
+                self.running[me] = (job, self.clock())
+            try:
+                self.run(job)
+            finally:
+                with self._lock:
+                    written_off = self.running.pop(me, None) is None
+            if written_off:
+                return  # a replacement has this place
+
+    def sweep(self) -> None:
+        now = self.clock()
+        with self._lock:
+            stuck = [(thread, job) for thread, (job, started) in self.running.items() if now - started > self.limit]
+            for thread, _ in stuck:
+                del self.running[thread]
+        for _, job in stuck:
+            self.stalled += 1
+            job.cancel.cancel()
+            job.result, job.state = {"code": "STALLED"}, "failed"
+            if self.stalled <= MAX_STUCK:
+                self._add()
 
 
 class ProductBackend:
@@ -101,9 +169,10 @@ class ProductBackend:
         self._file_owner = file_owner
         self._jobs: OrderedDict[str, _Job] = OrderedDict()
         self._lock = threading.Lock()
-        self._pool = ThreadPoolExecutor(max_workers=SCAN_THREADS, thread_name_prefix="service-scan")
-        self._observed_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="service-observed")
+        self._asked_lane = _Lane("scan", SCAN_THREADS, self._run)
+        self._observed_lane = _Lane("observed", 1, self._run_observed)
         self._observed = threading.BoundedSemaphore(MAX_OBSERVED)
+        self._later: list[tuple[float, str, str, int]] = []
         self._stop = threading.Event()
         self._maintenance: threading.Thread | None = None
         self.rescans = RescanQueue(DbDownloadStore(db))
@@ -121,6 +190,7 @@ class ProductBackend:
             self.barrier.revoke(0)  # "off" was approved; a restart must not undo it
         self._maintenance = threading.Thread(target=self._maintain, name="service-maintenance", daemon=True)
         self._maintenance.start()
+        threading.Thread(target=self._watch, name="service-watch", daemon=True).start()
         if self.observers is not None:
             self.observers.start()
 
@@ -135,8 +205,8 @@ class ProductBackend:
         for job in jobs:
             job.cancel.cancel()
         if closed:
-            self._pool.shutdown(wait=False, cancel_futures=True)
-            self._observed_pool.shutdown(wait=False, cancel_futures=True)
+            self._asked_lane.stop()
+            self._observed_lane.stop()
             if self.scanner.isolation is not None:
                 self.scanner.isolation.close()
         return closed
@@ -159,6 +229,23 @@ class ProductBackend:
             except Exception:
                 log.exception("maintenance failed")
 
+    def _watch(self) -> None:
+        while not self._stop.wait(WATCH_SECONDS):
+            try:
+                self._asked_lane.sweep()
+                self._observed_lane.sweep()
+                self._retry_due()
+            except Exception:
+                log.exception("watch failed")
+
+    def _retry_due(self) -> None:
+        now = time.monotonic()
+        with self._lock:
+            due = [item for item in self._later if item[0] <= now]
+            self._later = [item for item in self._later if item[0] > now]
+        for _, path, reason, attempts in due:
+            self.observe(path, reason, attempts=attempts)
+
     def rescan_on_new_rules(self) -> None:
         generation = self.scanner.gate_id()
         if self._rule_generation not in (None, generation):
@@ -174,7 +261,8 @@ class ProductBackend:
                 "quarantined": len(self.db.quarantine_items()), "blocklist_version": self.db.get_meta("blocklist_version", "0"),
                 "allow_version": self.db.allow_version(),
                 # Said out loud: seeing a file after it appeared is not stopping it.
-                "observation": self.observers.report() if self.observers is not None else {"prevention": "none"}}
+                "observation": self.observers.report() if self.observers is not None else {"prevention": "none"},
+                "stalled": self._asked_lane.stalled + self._observed_lane.stalled}
 
     def check_url(self, url: str) -> dict[str, Any]:
         return urlintel.check(self.db, url)
@@ -197,9 +285,23 @@ class ProductBackend:
         items = []
         for item in self.db.quarantine_items():
             if caller.is_admin or _owner(item) == caller.sid:
-                items.append({"id": item["id"], "original_path": item["original_path"], "sha256": item["sha256"],
-                              "size": item["size"], "ts": item["ts"]})
+                items.append({"id": item["id"], "original_path": quarantine.real_path(item["original_path"]),
+                              "sha256": item["sha256"], "size": item["size"], "ts": item["ts"]})
         return items
+
+    def events_for(self, caller: Caller, after: int, limit: int) -> dict[str, Any]:
+        """What happened since `after`: what the service does alone reaches its owner this way."""
+        rows = self.db.events_after(after, limit)
+        shown_rows = []
+        for row in rows:
+            try:
+                data = json.loads(row["data"]) if row["data"] else {}
+            except ValueError:
+                data = {}
+            if caller.is_admin or data.get("owner_sid", caller.sid) == caller.sid:
+                shown_rows.append({"id": row["id"], "ts": row["ts"], "level": row["level"], "title": row["title"],
+                                   "detail": row["detail"], "repair_id": data.get("repair_id")})
+        return {"events": shown_rows, "last": rows[-1]["id"] if rows else after}
 
     # -- scans
 
@@ -211,26 +313,44 @@ class ProductBackend:
         with self._lock:
             self._jobs[job.job_id] = job
             self._trim()
-        self._pool.submit(self._run, job)
+        self._asked_lane.submit(job)
         return job.job_id
 
-    def observe(self, path: str, reason: str, fresh: bool = False) -> bool:
+    def observe(self, path: str, reason: str, fresh: bool = False, *, attempts: int = 0) -> bool:
         """Work the service gave itself; False when the queue is full."""
         if self._stop.is_set() or not self._observed.acquire(blocking=False):
             return False
-        job = _Job(uuid.uuid4().hex, path, reason, None, self._file_owner(path) or "", None, use_cache=not fresh)
-        try:
-            self._observed_pool.submit(self._run_observed, job)
-        except RuntimeError:  # the pool is shutting down
-            self._observed.release()
-            return False
+        self._observed_lane.submit(_Job(uuid.uuid4().hex, path, reason, None, "", None, use_cache=not fresh,
+                                        attempts=attempts))
         return True
 
     def _run_observed(self, job: _Job) -> None:
         try:
+            # In the lane, never in the caller: looking up an owner opens the file,
+            # and the journal thread must not wait on anybody's oplock.
+            job.owner = self._file_owner(job.path) or ""
             self._run(job)
+            self._after_observed(job)
+        except Exception:
+            log.exception("observed job failed")
         finally:
             self._observed.release()
+
+    def _after_observed(self, job: _Job) -> None:
+        verdict = job.result.get("verdict") or {}
+        unfinished = (job.state == "failed" or job.result.get("code") == "CHANGED"
+                      or verdict.get("label") == "unknown")
+        if not unfinished or not os.path.lexists(job.path):
+            return
+        if job.attempts < len(RETRY_SECONDS):
+            with self._lock:
+                if len(self._later) < MAX_RETRIES:
+                    self._later.append((time.monotonic() + RETRY_SECONDS[job.attempts], job.path, job.reason,
+                                        job.attempts + 1))
+                    return
+        self.db.add_event("realtime", "warning", "Chưa kiểm tra xong tệp",
+                          f"{shown_path(job.path)}: tệp liên tục bị giữ hoặc thay đổi. Hãy chạy Quét ngay để thử lại.",
+                          {"owner_sid": job.owner, "path": job.path})
 
     def _trim(self) -> None:
         for job_id in list(self._jobs):
@@ -259,8 +379,9 @@ class ProductBackend:
                 return
             job.state = "running"
             verdict = self.scanner.scan_file(job.path, barrier=self.barrier, cancel=job.cancel, use_cache=job.use_cache)
+            # The client names the URL, so it can name any listed address: reported
+            # to the browser, and never a reason to touch a file (R13 §4).
             reputation = urlintel.check(self.db, job.url) if job.url else None
-            escalate_origin(verdict, reputation)
             if job.cancel.cancelled() and verdict.label != "malicious":
                 job.state = "cancelled"
                 return
@@ -279,7 +400,9 @@ class ProductBackend:
         # The name may have been re-pointed since the client's access was checked:
         # what was really measured is what the client must be allowed to read,
         # or it learns about (and acts on) a file that is none of its business.
-        measured = verdict.decision.identity.canonical_path if getattr(verdict, "decision", None) else None
+        decision = getattr(verdict, "decision", None)
+        seen = decision.identity if decision is not None else None  # none: the file could not be opened
+        measured = seen.canonical_path if seen is not None else None
         if job.token is not None and measured and not self._readable(job.token, measured):
             return {"code": "ACCESS_DENIED"}
         source = SOURCES.get(job.reason, "scan")
@@ -290,18 +413,26 @@ class ProductBackend:
         except ProtectionStopped:
             outcome = act_on(self.db, verdict, dataclasses.replace(self.settings, auto_quarantine=False), source,
                              extra=owner, authority=True)
-        decision = getattr(verdict, "decision", None)
         result = {**outcome, "verdict": verdict.to_dict(max_findings=30), "reason": top_reason(verdict),
                   "url_reputation": reputation,
-                  "engines": sorted(r.engine_id for r in decision.engine_results) if decision else [],
+                  # Only what really looked: "found nothing" means nothing from the others.
+                  "engines": sorted(r.engine_id for r in decision.engine_results
+                                    if r.status.value in ("completed", "partial")) if decision else [],
                   "trusted": bool(decision) and "USER_TRUST" in decision.reason_codes}
-        if outcome.get("code") == "IN_USE" and decision is not None:
-            result["repair_id"] = self._offer_repair(verdict, decision.identity.sha256)
-        if job.reason == "download" and decision is not None and not outcome["quarantined"]:
-            self._remember_download(job, decision)
+        if reputation and reputation.get("verdict") == "malicious" and not outcome["quarantined"]:
+            self.db.add_event("download", "warning", "Tải về từ nguồn bị chặn", shown_path(job.path),
+                              {**owner, "source": reputation.get("matched")})
+        if outcome.get("code") == "IN_USE" and seen is not None:
+            result["repair_id"] = self._offer_repair(verdict, seen.sha256, job.owner)
+        if job.reason == "download" and seen is not None and not outcome["quarantined"]:
+            self._remember_download(job, seen)
         return result
 
-    def _offer_repair(self, verdict: Verdict, sha256: str) -> str | None:
+    def _offer_repair(self, verdict: Verdict, sha256: str, owner: str) -> str | None:
+        with self._lock:
+            for known in self._repairs.values():
+                if known.path == str(verdict.path) and known.sha256 == sha256:
+                    return known.repair_id
         try:
             proposal = repair.plan(str(verdict.path), sha256)
         except (repair.RepairError, OSError):
@@ -310,10 +441,12 @@ class ProductBackend:
             self._repairs[proposal.repair_id] = proposal
             while len(self._repairs) > MAX_REPAIRS:
                 self._repairs.popitem(last=False)
+        # Found with nobody watching, it still has to reach somebody.
+        self.db.add_event("realtime", "threat", "Chương trình độc hại đang chạy", shown_path(proposal.path),
+                          {"owner_sid": owner, "repair_id": proposal.repair_id})
         return proposal.repair_id
 
-    def _remember_download(self, job: _Job, decision: Any) -> None:
-        seen = decision.identity
+    def _remember_download(self, job: _Job, seen: Any) -> None:
         if seen.volume_serial is not None and seen.file_id_hex is not None:
             self.rescans.remember(Download(seen.volume_serial, int(seen.file_id_hex, 16), job.path, seen.sha256,
                                            self.scanner.gate_id(), time.time()))
@@ -336,7 +469,7 @@ class ProductBackend:
             item = self.db.quarantine_item(params["quarantine_id"])
             if item is None:
                 return None
-            where = shown(item["original_path"])
+            where = shown_path(quarantine.real_path(item["original_path"]))
             if kind == "delete_quarantine":
                 return f"Xóa vĩnh viễn bản cách ly của {where}. Không khôi phục lại được."
             return (f"Khôi phục {where}, SHA-256 {item['sha256'][:16]}. Chỉ tệp này ở đúng vị trí này được bỏ qua "
@@ -349,7 +482,9 @@ class ProductBackend:
             found = identity.measure(params["path"], max_bytes=config.MAX_SCAN_BYTES)
             if not found.ok or found.identity is None or found.identity.sha256 != params["sha256"].lower():
                 return None
-            return (f"Luôn tin cậy nội dung của {shown(params['path'])}, SHA-256 {found.identity.sha256[:16]}: "
+            # What was measured, not what the caller typed: the two can differ.
+            where = shown_path(found.identity.canonical_path or params["path"])
+            return (f"Luôn tin cậy nội dung của {where}, SHA-256 {found.identity.sha256[:16]}: "
                     "mọi bản sao của nội dung này trên máy sẽ được bỏ qua khi quét.")
         return None
 
@@ -373,7 +508,7 @@ class ProductBackend:
             except quarantine.QuarantineError as e:
                 raise ProtocolError("ACTION_FAILED", e.code) from e
             back = repair.undo(self.db, params["quarantine_id"])
-            self.db.add_event("system", "warning", "Đã khôi phục tệp", shown(str(target)))
+            self.db.add_event("system", "warning", "Đã khôi phục tệp", shown_path(str(target)), {"owner_sid": ""})
             return {"restored": str(target), "autostart_restored": back}
         if kind == "delete_quarantine":
             quarantine.delete(self.db, params["quarantine_id"])
@@ -387,13 +522,14 @@ class ProductBackend:
                 done = repair.execute(self.db, proposal, {"owner_sid": self._file_owner(proposal.path) or ""})
             except repair.RepairError as e:
                 raise ProtocolError("ACTION_FAILED", e.code) from e
-            self.db.add_event("system", "threat", "Đã xử lý chương trình đang chạy", shown(proposal.path), done)
+            self.db.add_event("system", "threat", "Đã xử lý chương trình đang chạy", shown_path(proposal.path),
+                              {**done, "owner_sid": self._file_owner(proposal.path) or ""})
             return done
         if kind == "add_exclusion":
             self.db.allow_hash(params["sha256"])
             self.db.bump_generation()
-            self.db.add_event("system", "warning", "Đã tin cậy nội dung tệp", shown(params["path"]),
-                              {"sha256": params["sha256"]})
+            self.db.add_event("system", "warning", "Đã tin cậy nội dung tệp", shown_path(params["path"]),
+                              {"sha256": params["sha256"], "owner_sid": ""})
             return {"trusted": True}
         raise ProtocolError("NOT_FOUND", "nothing to act on")
 
@@ -423,11 +559,12 @@ def _machine_observers(backend: ProductBackend) -> Observers:
         except OSError:
             log.warning("no journal for %s", root)
 
-    def reconcile() -> None:
+    def reconcile() -> bool:
         # Autostart and what is running now; the folders of each user are the tray's.
         for target in scope.discover("smart", scope.windows_sources("smart", []), data_root=str(config.data_dir())):
             if not backend.observe(target.path, "reconcile"):
-                return
+                return False  # still owed
+        return True
 
     return Observers(backend.observe, volumes, DbCursorStore(backend.db),
                      processes=ProcessWatcher(windows_snapshot, windows_resolve), rescans=backend.rescans,

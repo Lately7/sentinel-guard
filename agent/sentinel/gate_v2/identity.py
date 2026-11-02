@@ -217,10 +217,9 @@ def revalidate(
         return actual
     assert actual.identity is not None
     observed = actual.identity
-    if (observed.volume_serial, observed.file_id_hex, observed.size,
-        observed.mtime_ns, observed.change_time_ns) != (
-        expected.volume_serial, expected.file_id_hex, expected.size,
-        expected.mtime_ns, expected.change_time_ns,
-    ) or (rehash and observed.sha256 != expected.sha256):
+    # The same file with the same bytes: timestamps add nothing to that proof,
+    # and touching a file in a loop must not be a way to dodge every action.
+    if (observed.volume_serial, observed.file_id_hex, observed.size, observed.sha256) != (
+            expected.volume_serial, expected.file_id_hex, expected.size, expected.sha256):
         return IdentityResult(None, "CHANGED")
     return actual

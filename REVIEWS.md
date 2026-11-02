@@ -475,3 +475,32 @@ Run on this machine with a temporary `SENTINEL_HOME`, no external engines, no YA
 Not run, and only the owner can: the installed service as LocalSystem, `sentinel service verify`,
 reading the USN journal (query works unelevated, read does not), real ETW.
 Never run anywhere: a real clamd with a real database, real MpCmdRun (Defender is passive here).
+
+## Independent review of the action and service code (fresh agent, read-only)
+
+Claude wrote M7 and A6, so a fresh agent read them without being told what to think. It reported 15
+findings, ran most of them, and every one held when checked against the code. All were fixed in one
+commit with tests in `tests/test_m7_review.py`; 27 mutations of those fixes were run, 5 survived and
+got tests, and one of those tests found another real fault (a long path still lost its end).
+
+| # | Finding | Outcome |
+|---|---|---|
+| IR-1 | A URL from a client made LocalSystem quarantine a clean file the client could not even write | URL is reported, never acted on (R13 §4). Portable behaviour unchanged until owner question 2 |
+| IR-2 | `\\/srv/share` passed the path check; `add_exclusion` skipped it and answered as a hash oracle | One plain spelling only; exclusion plans are access-checked |
+| IR-3 | **Real clients could not connect**: GENERIC_WRITE asks for a right the pipe rightly refuses, so a tray would have run portable for ever beside a working service | Client asks for exactly the grant. Same-user tests had hidden this |
+| IR-4 | Restore created folders through a junction and wrote the zone stream by name | Each new folder proved; stream written through the held handle |
+| IR-5 | A hostile oplock froze the journal thread and, under the action lock, every quarantine | Opens outside the lock; lanes write a stuck job off and replace the thread |
+| IR-6 | A lone surrogate in a name failed the scan silently, orphaned a blob, lost a USN batch | Stored, framed and parsed safely; the file goes back under its exact name |
+| IR-7 | Quarantine reported success while an earlier handle kept the file alive | POSIX delete; what is on disk afterwards decides |
+| IR-8 | Threats the service could not quarantine reached nobody | `events` operation by owner; tray lists them with "Dừng và cách ly" |
+| IR-9 | Identity None crashed the job; CHANGED was never retried; a touch loop dodged quarantine for ever | Guarded; retried then reported; same file and same bytes are enough |
+| IR-10 | `Windows\\Tasks` and friends were "protected", so one hard link there blocked quarantine | Listed as user-writable; a user-owned file is not the system's wherever a link of it sits |
+| IR-11 | Rewrites inside the window, a full queue and a second gap were dropped silently | Offered again; reconciliation owed until it really ran |
+| IR-12 | 320 spaces hid the end of a path in the prompt | Measured path, both ends shown, whitespace collapsed |
+| IR-13 | An errored engine counted as having looked; a refusal left tray hits unacted | Only finished engines count; refused means this process acts with its own rights |
+| IR-14 | Confirmations over 500 characters always failed as stale | Compared at the stored length |
+| IR-15 | No fsync before deletion; `%APPDATA%` expanded in SYSTEM's environment | Fixed. Named streams other than the download mark are still lost on restore, by choice |
+
+Looked sound to the reviewer: hard-link key check, generation and hash binding, final-component
+reparse refusal, the `create_new` landing check, stop by pid and creation time, single-use plans and
+claiming, token lifetimes, barrier logic, crash reconcile.

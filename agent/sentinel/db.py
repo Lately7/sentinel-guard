@@ -118,6 +118,14 @@ CREATE TABLE IF NOT EXISTS meta (
 """
 
 
+def _storable(value: Any) -> Any:
+    # NTFS allows lone surrogates in names and SQLite's UTF-8 does not, so a file
+    # could otherwise fail its own scan just by what it is called.
+    if isinstance(value, str) and not value.isascii():
+        return value.encode("utf-8", "replace").decode("utf-8")
+    return value
+
+
 class _Rows:
     """Already-fetched result: the subset of the Cursor API callers use."""
 
@@ -294,7 +302,7 @@ class Database:
         # Rows are fetched while holding the lock: iterating a cursor after
         # another thread has reused the connection returns mixed-up results.
         with self._lock:
-            cur = self._conn.execute(sql, tuple(args))
+            cur = self._conn.execute(sql, tuple(_storable(a) for a in args))
             return _Rows(cur.fetchall(), cur.lastrowid)
 
     def _many(self, sql: str, rows: Iterable[tuple[Any, ...]]) -> None:
@@ -379,7 +387,7 @@ class Database:
 
     def _exec_count(self, sql: str, args: Iterable[Any] = ()) -> int:
         with self._lock:
-            return self._conn.execute(sql, tuple(args)).rowcount
+            return self._conn.execute(sql, tuple(_storable(a) for a in args)).rowcount
 
     def hash_info(self, sha256: str) -> sqlite3.Row | None:
         sha256 = sha256.lower()
@@ -514,6 +522,9 @@ class Database:
         else:
             rows = self._exec("SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,))
         return [dict(r) for r in rows.fetchall()]
+
+    def events_after(self, last: int, limit: int) -> list[dict[str, Any]]:
+        return [dict(r) for r in self._exec("SELECT * FROM events WHERE id>? ORDER BY id LIMIT ?", (last, limit)).fetchall()]
 
     def take_unnotified(self) -> list[dict[str, Any]]:
         with self._lock:

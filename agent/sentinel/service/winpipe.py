@@ -28,6 +28,9 @@ PIPE_NAME = r"\\.\pipe\SentinelGuard\v1"
 # only — not FILE_CREATE_PIPE_INSTANCE (0x4, part of generic write), so a user
 # process cannot add its own instance of our pipe and receive our clients.
 SERVICE_SDDL = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x0012008B;;;IU)"
+# Exactly that grant: GENERIC_WRITE would also ask for the right to add an
+# instance, which is refused, and no client could connect at all.
+CLIENT_ACCESS = 0x0012008B
 MAX_CONNECTIONS = 32
 BUFFER = 64 * 1024
 SE_FILE_OBJECT, SE_KERNEL_OBJECT = 1, 6
@@ -47,7 +50,6 @@ if os.name == "nt":
     PIPE_TYPE_BYTE, PIPE_READMODE_BYTE, PIPE_WAIT = 0x0, 0x0, 0x0
     PIPE_REJECT_REMOTE_CLIENTS = 0x8
     PIPE_UNLIMITED_INSTANCES = 255
-    GENERIC_READ, GENERIC_WRITE = 0x80000000, 0x40000000
     OPEN_EXISTING = 3
     SECURITY_SQOS_PRESENT = 0x00100000
     SECURITY_IDENTIFICATION = 0x00010000
@@ -417,7 +419,7 @@ def connect(name: str = PIPE_NAME) -> PipeStream:
     squatter on the name) learns who we are but cannot act as us."""
     if os.name != "nt":
         raise PipeError(0, "named pipes need Windows")
-    handle = _k32.CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, None, OPEN_EXISTING,
+    handle = _k32.CreateFileW(name, CLIENT_ACCESS, 0, None, OPEN_EXISTING,
                               SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, None)
     if handle in (None, INVALID_HANDLE):
         raise _fail("CreateFile(pipe)")

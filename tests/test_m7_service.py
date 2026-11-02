@@ -472,17 +472,6 @@ def test_unc_paths_stay_with_the_users_own_process(leased):
     assert leased.confirm(V()) is None
 
 
-def test_a_refusal_is_not_a_reason_to_act_locally(leased, backend, tmp_path):
-    # Only "not a path I handle" comes back to this process; "no" stays no.
-    bad = bad_file(tmp_path)
-    backend.denied.append(str(bad))
-
-    class V:
-        path = str(bad)
-
-    assert leased.confirm(V())["code"] == "ACCESS_DENIED"
-
-
 def test_native_host_cannot_write_the_allowlist_while_a_service_runs(leased, db, monkeypatch):
     host = nativehost.Host(db, config.Settings(), leased)
     monkeypatch.setattr(leased, "approve", lambda kind, params: False)

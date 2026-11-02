@@ -189,7 +189,7 @@ class ScanQueue:
         if v.label == UNKNOWN:
             self._incomplete(path, attempts)
         outcome = self._act(v)
-        if outcome["error"] and "changed after it was scanned" in outcome["error"]:
+        if outcome.get("code") == "CHANGED":
             self._requeue(path, SETTLE_SECONDS)
         if self.on_result:
             self.on_result({"verdict": v.to_dict(), **outcome})

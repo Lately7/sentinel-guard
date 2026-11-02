@@ -125,10 +125,9 @@ def parse_record(data: bytes) -> UsnRecord | None:
     if (usn < 0 or name_length % 2 or name_offset < header or
             name_offset > length or name_length > length - name_offset or name_length > 32768):
         return None
-    try:
-        name = data[name_offset:name_offset + name_length].decode("utf-16-le", "strict")
-    except UnicodeError:
-        return None
+    # surrogatepass: NTFS allows any UTF-16 unit, and refusing one odd name would
+    # throw away the whole batch around it.
+    name = data[name_offset:name_offset + name_length].decode("utf-16-le", "surrogatepass")
     return UsnRecord(major, file_ref, parent_ref, usn, reason, name)
 
 

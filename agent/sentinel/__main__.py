@@ -279,6 +279,11 @@ def cmd_rules(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    # A file name can hold what the console encoding cannot, and printing it must
+    # not be what ends a scan.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="backslashreplace")
     # Browsers launch the host executable directly with the caller origin
     # (and on Windows a --parent-window flag) as its arguments.
     if argv and (argv[0] == "native-host" or argv[0].startswith("chrome-extension://")):

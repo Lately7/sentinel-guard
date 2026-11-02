@@ -22,7 +22,7 @@ from typing import Any
 
 from .. import config, quarantine
 from ..db import Database
-from ..gate_v2 import identity, winfile
+from ..gate_v2 import identity, scope, winfile
 from .procwatch import ProcessKey, windows_resolve, windows_snapshot
 
 log = logging.getLogger(__name__)
@@ -40,7 +40,17 @@ def shown(text: str) -> str:
     Direction overrides and control characters are how a name is made to read
     as something else in the one prompt the user trusts.
     """
-    return "".join(c for c in text if c.isprintable())[:300]
+    return _plain(text)[:300]
+
+
+def _plain(text: str) -> str:
+    return " ".join("".join(c for c in text if c.isprintable()).split())
+
+
+def shown_path(path: str) -> str:
+    """Both ends of a path: padding the middle is how a prompt is made to hide the end."""
+    text = _plain(path)
+    return text if len(text) <= 160 else f"{text[:80]} … {text[-70:]}"
 
 
 class RepairError(Exception):
@@ -116,6 +126,10 @@ def find_autostart(path: str, reg: Any = None) -> tuple[RunValue, ...]:
         import winreg as reg
     from ..watcher import RUN_KEYS, command_files
 
+    try:
+        profiles = dict(scope._profiles(reg))
+    except OSError:
+        profiles = {}
     found: dict[tuple[str, str, int, str], RunValue] = {}
     for hive, root, prefix in _hives(reg):
         for key in RUN_KEYS:
@@ -129,7 +143,8 @@ def find_autostart(path: str, reg: Any = None) -> tuple[RunValue, ...]:
                             except OSError:
                                 break
                             index += 1
-                            if any(_same_file(f, path) for f in command_files(str(data))):
+                            command = scope.for_profile(str(data), profiles.get(hive))
+                            if any(_same_file(f, path) for f in command_files(command)):
                                 found[(hive, key, view, name)] = RunValue(hive, key, view, name, str(data), kind)
                 except OSError:
                     continue  # a missing or denied key holds nothing this repair can change
@@ -145,7 +160,7 @@ def plan(path: str, sha256: str, *, snapshot: Callable[[], Any] = windows_snapsh
 
 
 def describe(repair: Repair) -> str:
-    lines = [f"Xử lý {shown(repair.path)}, SHA-256 {repair.sha256[:16]}:"]
+    lines = [f"Xử lý {shown_path(repair.path)}, SHA-256 {repair.sha256[:16]}:"]
     if repair.processes:
         lines.append(f"Dừng {len(repair.processes)} chương trình đang chạy từ tệp này (không hoàn tác được).")
     lines.append("Cách ly tệp.")

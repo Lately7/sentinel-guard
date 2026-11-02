@@ -46,7 +46,8 @@ def test_quarantine_removes_every_hard_link(tmp_path, db):
 
 
 def test_a_hard_link_in_a_protected_folder_stops_the_action(tmp_path, db, monkeypatch):
-    # System files are hard links into WinSxS: the second name decides.
+    # System files are hard links into WinSxS: the second name decides. Only for
+    # a system-owned file: a user's own link there is no shield (test_m7_review).
     first = tmp_path / "first.bin"
     first.write_bytes(BODY)
     (tmp_path / "system").mkdir()
@@ -54,6 +55,7 @@ def test_a_hard_link_in_a_protected_folder_stops_the_action(tmp_path, db, monkey
     os.link(first, second)
     root = os.path.normcase(str(tmp_path / "system"))
     monkeypatch.setattr(winfile, "protected_roots", lambda: (root,))
+    monkeypatch.setattr(winfile.Target, "owner", lambda self: winfile.TRUSTED_INSTALLER)
     with pytest.raises(quarantine.QuarantineError) as caught:
         quarantine.quarantine(db, str(first), {"sha256": _sha()})
     assert caught.value.code == "PROTECTED_PATH"

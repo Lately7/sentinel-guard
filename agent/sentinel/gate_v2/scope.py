@@ -11,6 +11,7 @@ from __future__ import annotations
 import ctypes
 import ntpath
 import os
+import re
 import stat
 import subprocess
 import time
@@ -27,6 +28,8 @@ MAX_TASK_XML = 16 * 1024 * 1024
 MAX_WMI_OUTPUT = 1024 * 1024
 PROFILE_LIST = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
 STARTUP_TAIL = r"AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
+PROFILE_VARIABLES = (("%APPDATA%", r"AppData\Roaming"), ("%LOCALAPPDATA%", r"AppData\Local"),
+                     ("%TEMP%", r"AppData\Local\Temp"), ("%TMP%", r"AppData\Local\Temp"), ("%USERPROFILE%", ""))
 FOLDERID_STARTUP = "{B97D20BB-F46A-4C97-BA10-5E3608430854}"
 FOLDERID_COMMON_STARTUP = "{82A5EA35-D9CD-47C5-9629-E15D2F714E6E}"
 
@@ -269,17 +272,28 @@ def walk_folder(root: str, source: str, *, max_depth: int = 64) -> Iterator[Sour
                     yield SourceEntry(source, item.path, reason="source_error")
 
 
-def _command_entries(source: str, entry_id: str, command: str) -> Iterator[SourceEntry]:
+def for_profile(command: str, profile: str | None) -> str:
+    """Another user's command in that user's terms; this process has its own %APPDATA%."""
+    if not profile:
+        return command
+    for name, tail in PROFILE_VARIABLES:
+        command = re.sub(re.escape(name), lambda _: ntpath.join(profile, tail) if tail else profile, command,
+                         flags=re.IGNORECASE)
+    return command
+
+
+def _command_entries(source: str, entry_id: str, command: str, profile: str | None = None) -> Iterator[SourceEntry]:
     from ..watcher import command_files
 
-    paths = command_files(command)
+    paths = command_files(for_profile(command, profile))
     if not paths:
         yield SourceEntry(source, entry_id, reason="unresolved")
     for path in paths:
         yield SourceEntry(source, f"{entry_id}:{path}", path)
 
 
-def _run_values(reg: object, hive: object, key: str, view: int, source: str, key_id: str) -> Iterator[SourceEntry]:
+def _run_values(reg: object, hive: object, key: str, view: int, source: str, key_id: str,
+                profile: str | None = None) -> Iterator[SourceEntry]:
     try:
         with reg.OpenKey(hive, key, 0, reg.KEY_READ | view) as opened:  # type: ignore[attr-defined]
             index = 0
@@ -289,7 +303,7 @@ def _run_values(reg: object, hive: object, key: str, view: int, source: str, key
                 except OSError:
                     return
                 index += 1
-                yield from _command_entries(source, f"{key_id}:{name}", str(value))
+                yield from _command_entries(source, f"{key_id}:{name}", str(value), profile)
     except FileNotFoundError:
         yield SourceEntry(source, key_id, reason="missing_key")
     except PermissionError:
@@ -401,7 +415,7 @@ def other_user_run_entries(reg: object = None) -> Iterator[SourceEntry]:
         import winreg as reg
     from ..watcher import RUN_KEYS
 
-    for sid, _ in _profiles(reg):
+    for sid, profile in _profiles(reg):
         try:
             reg.CloseKey(reg.OpenKey(reg.HKEY_USERS, sid))  # type: ignore[attr-defined]
         except FileNotFoundError:
@@ -416,7 +430,7 @@ def other_user_run_entries(reg: object = None) -> Iterator[SourceEntry]:
         for key in RUN_KEYS:
             for view_name, view in (("64", reg.KEY_WOW64_64KEY), ("32", reg.KEY_WOW64_32KEY)):  # type: ignore[attr-defined]
                 yield from _run_values(reg, reg.HKEY_USERS, f"{sid}\\{key}", view, "hku",  # type: ignore[attr-defined]
-                                       f"{sid}:{view_name}:{key}")
+                                       f"{sid}:{view_name}:{key}", profile)
 
 
 def _profiles(reg: object) -> Iterator[tuple[str, str]]:

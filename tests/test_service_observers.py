@@ -108,7 +108,6 @@ def test_both_record_versions_parse():
     lambda r: r[:56] + struct.pack("<HH", 60000, 60) + r[60:],
     lambda r: r[:56] + struct.pack("<HH", 2, 4) + r[60:],
     lambda r: r[:24] + struct.pack("<q", -1) + r[32:],
-    lambda r: r[:60] + b"\x00\xd8\x00\x00" + r[64:],  # a lone surrogate is not a name
 ])
 def test_hostile_records_never_raise(damage):
     assert parse_record(damage(record_v2(name="abcd.exe"))) is None

@@ -17,6 +17,7 @@ MAX_FRAME = 1024 * 1024
 MAX_STR = 8192
 MAX_PATH = 4096
 MAX_PAGE = 20_000
+MAX_EVENTS = 200
 
 
 class ProtocolError(Exception):
@@ -29,7 +30,8 @@ class ProtocolError(Exception):
 
 
 def write_frame(stream: BinaryIO, obj: dict[str, Any]) -> None:
-    data = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    # Escaped, not UTF-8: a lone surrogate is a legal NTFS name and has no UTF-8 form.
+    data = json.dumps(obj, separators=(",", ":")).encode("ascii")
     if len(data) > MAX_FRAME:
         raise ProtocolError("TOO_LARGE", "response frame over the limit")
     stream.write(struct.pack("<I", len(data)) + data)
@@ -157,6 +159,10 @@ def _page(args: dict[str, Any]) -> dict[str, Any]:
             "limit": integer(args, "limit", 1, MAX_PAGE, default=MAX_PAGE)}
 
 
+def _events(args: dict[str, Any]) -> dict[str, Any]:
+    return {"after": integer(args, "after", 0, 2**53), "limit": integer(args, "limit", 1, MAX_EVENTS, default=MAX_EVENTS)}
+
+
 def _plan_ref(args: dict[str, Any]) -> dict[str, Any]:
     return {"plan_id": text(args, "plan_id", max_len=64)}
 
@@ -176,6 +182,7 @@ OPS: dict[str, Op] = {op.name: op for op in (
     # Only ever makes protection stronger, so it needs no confirmation.
     Op("enable_protection", "user", frozenset(), _none),
     Op("list_quarantine", "user", frozenset(), _none),
+    Op("events", "user", frozenset({"after", "limit"}), _events),
     Op("allowed_hosts", "user", frozenset({"offset", "limit"}), _page),
     # Asking is harmless: a plan does nothing until an elevated caller approves it.
     Op("request_plan", "user", frozenset({"kind", "params"}), _plan_request),
