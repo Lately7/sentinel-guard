@@ -36,6 +36,7 @@ MAX_ZONE_BYTES = 4096
 # A journal row lives for a moment around the deletion; one older than this was
 # left by a process that died, not by another process still acting.
 JOURNAL_GRACE_SECONDS = 60.0
+LINK_ROUNDS = 8
 
 # Two scans of one file must not both claim it.
 _action_lock = threading.RLock()
@@ -155,11 +156,11 @@ def _quarantine(db: Database, src: Path, names: list[winfile.Target], verdict: d
     dest = config.quarantine_dir() / f"{qid}.qbin"
     recorded = False
     first = names[0]
-    held = [n.path for n in names]
-    key = first.key
+    watch: winfile.Target | None = None
     try:
         if first.gone():
             raise QuarantineError(f"{src} is already gone", "MISSING")
+        watch = winfile.open_watch(first.path)
         sha = _copy_xor(first, dest)
         wanted = verdict.get("sha256") or (expected.sha256 if expected else None)
         if wanted and sha != wanted:
@@ -169,7 +170,9 @@ def _quarantine(db: Database, src: Path, names: list[winfile.Target], verdict: d
             db.add_quarantine(qid, kept_path(str(src)), sha, first.size,
                               {**verdict, "zone_identifier": zone} if zone else verdict)
         recorded = True
+        db.flush()  # the record of where this came from is what makes the blob worth anything
         try:
+            _take_new_names(names)
             for n in names:
                 n.mark_delete()
         except TargetError as e:
@@ -180,11 +183,12 @@ def _quarantine(db: Database, src: Path, names: list[winfile.Target], verdict: d
                 except TargetError:
                     log.exception("could not clear the deletion mark of %s", n.path)
             raise QuarantineError(f"cannot remove {src}: {e}", "IN_USE") from e
+        posix = all(n.posix for n in names)
         for n in names:
             n.close()
-        # What counts is what is there now: a handle opened before ours can clear
-        # the mark right up to the end, and "quarantined" must not be a claim.
-        if any(_same_file_here(path, key) for path in held):
+        # What counts is what is there now, and only a handle that outlives them
+        # can say: a name can appear and a mark can be cleared right up to the end.
+        if watch.survives(posix=posix):
             raise QuarantineError(f"{src} is still there", "IN_USE")
     except (QuarantineError, OSError, sqlite3.Error, TargetError, ValueError) as e:
         if recorded:
@@ -198,16 +202,25 @@ def _quarantine(db: Database, src: Path, names: list[winfile.Target], verdict: d
     finally:
         for n in names:
             n.close()
+        if watch is not None:
+            watch.close()
     db.close_action(qid)
     return qid
 
 
-def _same_file_here(path: str, key: tuple[int, str]) -> bool:
-    try:
-        info = os.stat(path, follow_symlinks=False)
-    except OSError:
-        return False
-    return (info.st_dev, f"{info.st_ino:032x}") == key
+def _take_new_names(names: list[winfile.Target]) -> None:
+    """Hard links made while the copy ran; anything later shows up as a failure."""
+    first = names[0]
+    for _ in range(LINK_ROUNDS):
+        new = [name for name in first.other_names() if not any(winfile.same_path(name, n.path) for n in names)]
+        if not new:
+            return
+        for name in new:
+            other = winfile.open_target(name)
+            names.append(other)
+            if other.key != first.key:
+                raise TargetError("MOVED", name)
+    raise TargetError("IN_USE", "new names keep appearing")
 
 
 def reconcile(db: Database, *, grace: float = JOURNAL_GRACE_SECONDS) -> int:

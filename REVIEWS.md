@@ -504,3 +504,29 @@ got tests, and one of those tests found another real fault (a long path still lo
 Looked sound to the reviewer: hard-link key check, generation and hash binding, final-component
 reparse refusal, the `create_new` landing check, stop by pid and creation time, single-use plans and
 claiming, token lifetimes, barrier logic, crash reconcile.
+
+### Second round: the same reviewer on the fixes
+
+Re-running its own scripts it confirmed 7 fixed, 8 partly, and found 4 new faults in the fixes.
+
+| # | Finding | Outcome |
+|---|---|---|
+| N1 | `stalled` counted write-offs for ever, so the 17th left a lane with no threads for good | Counts what is stuck now; returning threads give their place back |
+| N2 | Hard links made during the copy stayed, and quarantine reported success | Names taken again after the copy; a handle that outlives them decides |
+| N3 | Cleanup deleted whatever the name led to after a junction flip: an arbitrary empty folder as LocalSystem | Handle comes from the creation itself |
+| N4 | An events page could pass the frame limit; `after` could not move, so later events never arrived | Bounded by encoded size |
+| IR-2 | A junction to `\\Device\\NamedPipe` passed; the hash oracle survived a name swap | Non-disk handles refused at anonymous level; a wrong hash now answers the same as a right one, only the elevated helper sees the difference |
+| IR-5 | One oplock held the observed lane 150 s, and a written-off file reached nobody | 60 s for work nobody waits on; written-off files are reported |
+| IR-8 | Events owned by Administrators or SYSTEM reached no unelevated tray | Only a user's own files are private |
+| IR-9 | A touch loop still kept a detected file unknown, at the gate this time | Held without write sharing, only which file it is matters; bytes cannot move |
+| IR-11 | A reconcile that raised lost its debt; refused rescans and retries were dropped | Kept until it really ran |
+| IR-15 | WAL at NORMAL could lose the record in a power cut, leaving a nameless blob | Checkpoint before the original goes |
+
+Measured for N2 on NTFS: the link count leaves out deleted names, while the pending flag stays set once
+one name went, even if another lives. The first version of this fix read the flag and would have lied again.
+
+Known and left: `Scanner.scan_file` opens by name, so a junction swapped in after the access check can make
+it open a pipe. It gets an identification-level token at most, since a medium-integrity server has no
+`SeImpersonatePrivilege`, and the gate refuses it as not a regular file. Named streams other than the
+download mark are lost on restore. A hard link created after the last enumeration leaves the file in place
+and reports `IN_USE`: the file stays, and nothing false is said.

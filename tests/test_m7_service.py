@@ -182,8 +182,9 @@ def test_trusting_content_needs_the_hash_of_the_file_now(core, db, tmp_path):
     path = tmp_path / "tool.bin"
     path.write_bytes(b"harmless")
     sha = hashlib.sha256(b"harmless").hexdigest()
-    wrong = core.handle(USER, frame("request_plan", kind="add_exclusion", params={"path": str(path), "sha256": "0" * 64}))
-    assert wrong["error"]["code"] == "NOT_FOUND"
+    # Refused only at the elevated step: an unelevated caller learns nothing from the answer.
+    assert plan(core, "add_exclusion", {"path": str(path), "sha256": "0" * 64})["error"]["code"] == "STALE_PLAN"
+    assert not db.is_hash_allowed("0" * 64)
     assert plan(core, "add_exclusion", {"path": str(path), "sha256": sha})["ok"]
     assert db.is_hash_allowed(sha)
 

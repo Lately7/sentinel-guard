@@ -57,10 +57,12 @@ WATCH_SECONDS = 5.0
 # ever and nothing can interrupt it. Past MAX_STUCK at once, no more threads.
 STALL_SECONDS = config.SCAN_DEADLINE_SECONDS + 30.0
 MAX_STUCK = 16
+OBSERVED_STALL_SECONDS = 60.0  # nobody is waiting on these, and one must not hold up the next
 # A file that would not hold still is looked at again, a few times, then reported.
 RETRY_SECONDS = (5.0, 30.0, 120.0, 600.0)
 MAX_RETRIES = 1024
 PAGE_BYTES = 600_000  # a frame holds 1 MiB, and a page of long names can exceed that
+MAX_EVENT_TEXT = 1000
 HOST = re.compile(r"(?=.{1,253}\Z)[a-z0-9-]+(\.[a-z0-9-]+)*\Z")
 OFF_META = "protection_off"
 SOURCES = {"download": "download", "on_demand": "scan", "journal": "realtime", "process": "realtime",
@@ -101,11 +103,14 @@ class _Lane:
     """
 
     def __init__(self, name: str, workers: int, run: Callable[[_Job], None], *, limit: float = STALL_SECONDS,
-                 clock: Callable[[], float] = time.monotonic) -> None:
-        self.name, self.run, self.limit, self.clock = name, run, limit, clock
+                 clock: Callable[[], float] = time.monotonic,
+                 on_stall: Callable[[_Job], None] = lambda job: None) -> None:
+        self.name, self.run, self.limit, self.clock, self.on_stall = name, run, limit, clock, on_stall
         self.jobs: queue.SimpleQueue[_Job] = queue.SimpleQueue()
         self.running: dict[threading.Thread, tuple[_Job, float]] = {}
-        self.stalled = 0
+        self.stalled = 0  # ever
+        self.stuck = 0  # right now
+        self.missing = 0  # replacements not started because too many are stuck
         self._lock = threading.Lock()
         self._stop = threading.Event()
         for _ in range(workers):
@@ -134,7 +139,11 @@ class _Lane:
             finally:
                 with self._lock:
                     written_off = self.running.pop(me, None) is None
-            if written_off:
+                    if written_off:
+                        self.stuck -= 1
+                        wanted = self.missing > 0
+                        self.missing -= 1 if wanted else 0
+            if written_off and not wanted:
                 return  # a replacement has this place
 
     def sweep(self) -> None:
@@ -144,11 +153,16 @@ class _Lane:
             for thread, _ in stuck:
                 del self.running[thread]
         for _, job in stuck:
-            self.stalled += 1
             job.cancel.cancel()
             job.result, job.state = {"code": "STALLED"}, "failed"
-            if self.stalled <= MAX_STUCK:
+            with self._lock:
+                self.stalled += 1
+                self.stuck += 1
+                room = self.stuck <= MAX_STUCK
+                self.missing += 0 if room else 1
+            if room:
                 self._add()
+            self.on_stall(job)
 
 
 class ProductBackend:
@@ -170,7 +184,8 @@ class ProductBackend:
         self._jobs: OrderedDict[str, _Job] = OrderedDict()
         self._lock = threading.Lock()
         self._asked_lane = _Lane("scan", SCAN_THREADS, self._run)
-        self._observed_lane = _Lane("observed", 1, self._run_observed)
+        self._observed_lane = _Lane("observed", 1, self._run_observed, limit=OBSERVED_STALL_SECONDS,
+                                    on_stall=self._gave_up)
         self._observed = threading.BoundedSemaphore(MAX_OBSERVED)
         self._later: list[tuple[float, str, str, int]] = []
         self._stop = threading.Event()
@@ -244,14 +259,17 @@ class ProductBackend:
             due = [item for item in self._later if item[0] <= now]
             self._later = [item for item in self._later if item[0] > now]
         for _, path, reason, attempts in due:
-            self.observe(path, reason, attempts=attempts)
+            if not self.observe(path, reason, attempts=attempts):
+                with self._lock:
+                    self._later.append((now + WATCH_SECONDS, path, reason, attempts))
 
     def rescan_on_new_rules(self) -> None:
         generation = self.scanner.gate_id()
         if self._rule_generation not in (None, generation):
             self.rescans.signatures_changed(generation)
             while (item := self.rescans.pop()) is not None:
-                self.observe(item.path, "rescan", True)
+                if not self.observe(item.path, "rescan", True):
+                    return  # the generation stays old, so the next round asks again
         self._rule_generation = generation
 
     # -- reads
@@ -284,24 +302,31 @@ class ProductBackend:
     def quarantine_items(self, caller: Caller) -> list[dict[str, Any]]:
         items = []
         for item in self.db.quarantine_items():
-            if caller.is_admin or _owner(item) == caller.sid:
+            if _visible(caller, _owner(item)):
                 items.append({"id": item["id"], "original_path": quarantine.real_path(item["original_path"]),
                               "sha256": item["sha256"], "size": item["size"], "ts": item["ts"]})
         return items
 
     def events_for(self, caller: Caller, after: int, limit: int) -> dict[str, Any]:
         """What happened since `after`: what the service does alone reaches its owner this way."""
-        rows = self.db.events_after(after, limit)
-        shown_rows = []
-        for row in rows:
+        shown_rows: list[dict[str, Any]] = []
+        last, size = after, 0
+        for row in self.db.events_after(after, limit):
             try:
                 data = json.loads(row["data"]) if row["data"] else {}
             except ValueError:
                 data = {}
-            if caller.is_admin or data.get("owner_sid", caller.sid) == caller.sid:
-                shown_rows.append({"id": row["id"], "ts": row["ts"], "level": row["level"], "title": row["title"],
-                                   "detail": row["detail"], "repair_id": data.get("repair_id")})
-        return {"events": shown_rows, "last": rows[-1]["id"] if rows else after}
+            if _visible(caller, data.get("owner_sid")) and (caller.is_admin or not data.get("admin_only")):
+                entry = {"id": row["id"], "ts": row["ts"], "level": row["level"], "title": row["title"],
+                         "detail": row["detail"][:MAX_EVENT_TEXT], "repair_id": data.get("repair_id")}
+                # Bounded by what it encodes to: a page over the frame limit would
+                # fail, `after` could not move, and nothing later would ever arrive.
+                size += len(json.dumps(entry))
+                if size > PAGE_BYTES:
+                    break
+                shown_rows.append(entry)
+            last = row["id"]
+        return {"events": shown_rows, "last": last}
 
     # -- scans
 
@@ -348,6 +373,9 @@ class ProductBackend:
                     self._later.append((time.monotonic() + RETRY_SECONDS[job.attempts], job.path, job.reason,
                                         job.attempts + 1))
                     return
+        self._gave_up(job)
+
+    def _gave_up(self, job: _Job) -> None:
         self.db.add_event("realtime", "warning", "Chưa kiểm tra xong tệp",
                           f"{shown_path(job.path)}: tệp liên tục bị giữ hoặc thay đổi. Hãy chạy Quét ngay để thử lại.",
                           {"owner_sid": job.owner, "path": job.path})
@@ -508,7 +536,7 @@ class ProductBackend:
             except quarantine.QuarantineError as e:
                 raise ProtocolError("ACTION_FAILED", e.code) from e
             back = repair.undo(self.db, params["quarantine_id"])
-            self.db.add_event("system", "warning", "Đã khôi phục tệp", shown_path(str(target)), {"owner_sid": ""})
+            self.db.add_event("system", "warning", "Đã khôi phục tệp", shown_path(str(target)), {"admin_only": True})
             return {"restored": str(target), "autostart_restored": back}
         if kind == "delete_quarantine":
             quarantine.delete(self.db, params["quarantine_id"])
@@ -518,20 +546,27 @@ class ProductBackend:
                 proposal = self._repairs.pop(params["repair_id"], None)
             if proposal is None:
                 raise ProtocolError("NOT_FOUND", "nothing to act on")
+            owner = self._file_owner(proposal.path) or ""  # asked first: the file is gone afterwards
             try:
-                done = repair.execute(self.db, proposal, {"owner_sid": self._file_owner(proposal.path) or ""})
+                done = repair.execute(self.db, proposal, {"owner_sid": owner})
             except repair.RepairError as e:
                 raise ProtocolError("ACTION_FAILED", e.code) from e
             self.db.add_event("system", "threat", "Đã xử lý chương trình đang chạy", shown_path(proposal.path),
-                              {**done, "owner_sid": self._file_owner(proposal.path) or ""})
+                              {**done, "owner_sid": owner})
             return done
         if kind == "add_exclusion":
             self.db.allow_hash(params["sha256"])
             self.db.bump_generation()
             self.db.add_event("system", "warning", "Đã tin cậy nội dung tệp", shown_path(params["path"]),
-                              {"sha256": params["sha256"], "owner_sid": ""})
+                              {"sha256": params["sha256"], "admin_only": True})
             return {"trusted": True}
         raise ProtocolError("NOT_FOUND", "nothing to act on")
+
+
+def _visible(caller: Caller, owner: str | None) -> bool:
+    # A user's own file is private to them. One owned by Administrators or SYSTEM,
+    # as anything an elevated process wrote is, must not reach nobody at all.
+    return caller.is_admin or owner == caller.sid or not (owner or "").startswith("S-1-5-21-")
 
 
 def _owner(item: dict[str, Any]) -> str | None:

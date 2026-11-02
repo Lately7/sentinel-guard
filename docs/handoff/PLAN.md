@@ -31,7 +31,9 @@ cd "C:\Users\lately07\Desktop\Folder Group\sentinel-guard"
 * `tools/admin_acceptance.ps1` chưa có fixture: chờ câu hỏi 13. Trong lúc đó dùng `sentinel service verify`.
 * Bước 9: đo báo nhầm có đủ engine, chủ dự án chốt ngân sách, rồi mới cân nhắc `evidence-v1`.
 * Bước 10: nối canary và ETW sau khi kiểm schema; tự dừng tiến trình cần 30 ngày quan sát (R14).
-* Chưa có ai đọc độc lập M7 và A6: Codex còn hạn mức thì giao review chỉ-đọc.
+* M7, A6 và phần dịch vụ đã qua rà soát độc lập hai vòng, xem `REVIEWS.md`. Tải về từ URL bị chặn trong
+  dịch vụ nay chỉ cảnh báo, không cách ly theo URL: URL do client gửi nên không được quyền quyết định
+  (câu hỏi 2 vẫn mở cho chế độ không có dịch vụ).
 
 ## 0. Cập nhật tối 2026-11-02 (chủ dự án)
 

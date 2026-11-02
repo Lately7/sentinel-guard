@@ -220,5 +220,5 @@ cần xử lý mới sáng lên (333 ms); tắt hết khi Windows tắt hiệu �
 
 ## Kiểm thử gần nhất
 
-pytest **733 passed, 10 skipped, 1 xfailed** (không có clamd; xfail còn lại = RT-001; chỗ bỏ qua chủ yếu cần quyền nâng hoặc symlink) · extension **40 passed** · Helium 156 e2e đạt, `sw_errors: []`
+pytest **817 passed, 10 skipped, 1 xfailed** (không có clamd; xfail còn lại = RT-001; chỗ bỏ qua chủ yếu cần quyền nâng hoặc symlink) · extension **40 passed** · Helium 156 e2e đạt, `sw_errors: []`
 Baseline tại C2a: `docs/baseline.md`.

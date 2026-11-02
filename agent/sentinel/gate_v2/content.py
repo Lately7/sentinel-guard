@@ -69,7 +69,8 @@ class BoundReader:
                      cancel: CancellationToken, resident_limit: int = 64 * 1024 * 1024) -> BoundReader:
         stream = _open_measured(path)
         try:
-            result = identity.measure_stream(stream, path, max_bytes=max_bytes, cancel=cancel)
+            result = identity.measure_stream(stream, path, max_bytes=max_bytes, cancel=cancel,
+                                             deny_write=os.name == "nt")
             if not result.ok:
                 raise ContentError(result.code)
             assert result.identity is not None
@@ -95,10 +96,11 @@ class BoundReader:
         if self._stream is None:
             return
         info = os.fstat(self._stream.fileno())
-        actual = (info.st_dev, f"{info.st_ino:032x}", info.st_size, info.st_mtime_ns,
-                  identity._change_time(self._stream.fileno(), info))
-        expected = (self.identity.volume_serial, self.identity.file_id_hex, self.identity.size,
-                    self.identity.mtime_ns, self.identity.change_time_ns)
+        actual = (info.st_dev, f"{info.st_ino:032x}", info.st_size)
+        expected = (self.identity.volume_serial, self.identity.file_id_hex, self.identity.size)
+        if os.name != "nt":  # no write-denying open there: the timestamps are all there is
+            actual += (info.st_mtime_ns, identity._change_time(self._stream.fileno(), info))
+            expected += (self.identity.mtime_ns, self.identity.change_time_ns)
         if actual != expected:
             raise ContentError("CHANGED")
 

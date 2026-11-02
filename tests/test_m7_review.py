@@ -719,5 +719,206 @@ def test_a_verdict_with_no_decision_is_still_an_answer(backend):
     assert backend._finish(job, verdict, None)["engines"] == []
 
 
+# Second round: what the same reviewer found in the fixes
+
+
+def test_a_lane_gets_its_threads_back_after_many_stalls():
+    release = threading.Event()
+    done: list[str] = []
+
+    def run(job: _Job) -> None:
+        if job.path.startswith("stuck"):
+            release.wait(10)
+        done.append(job.path)
+
+    now = [0.0]
+    lane = _Lane("test", 1, run, limit=1.0, clock=lambda: now[0])
+    try:
+        for i in range(backend_module.MAX_STUCK + 4):
+            lane.submit(_Job(str(i), f"stuck{i}", "journal", None, "", None))
+            deadline = time.monotonic() + 5
+            while not lane.running and time.monotonic() < deadline:
+                time.sleep(0.005)
+            now[0] += 5.0
+            lane.sweep()
+            time.sleep(0.01)
+        assert lane.stalled >= backend_module.MAX_STUCK
+        release.set()
+        lane.submit(_Job("z", "clean", "journal", None, "", None))
+        deadline = time.monotonic() + 5
+        while "clean" not in done and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert "clean" in done, "stuck threads gave their places back"
+        assert lane.stuck == 0
+    finally:
+        release.set()
+        lane.stop()
+
+
+def test_a_written_off_file_reaches_somebody(backend, db):
+    job = _Job("1", "C:\\x\\y.exe", "journal", None, USER.sid, None)
+    backend._observed_lane.on_stall(job)
+    assert any("Chưa kiểm tra" in e["title"] for e in db.events(5))
+
+
+def test_a_hard_link_made_during_the_copy_goes_too(db, tmp_path, monkeypatch):
+    path = tmp_path / "x.bin"
+    path.write_bytes(BODY)
+    late = tmp_path / "late.bin"
+    real = quarantine._copy_xor
+
+    def copy(src, dest):
+        os.link(path, late)
+        return real(src, dest)
+
+    monkeypatch.setattr(quarantine, "_copy_xor", copy)
+    quarantine.quarantine(db, str(path), {})
+    assert not path.exists() and not late.exists()
+
+
+def test_a_link_too_late_to_catch_is_a_failure_not_a_claim(db, tmp_path, monkeypatch):
+    path = tmp_path / "x.bin"
+    path.write_bytes(BODY)
+    late = tmp_path / "late.bin"
+    real = winfile.Target.mark_delete
+
+    def mark(self, delete=True):
+        if delete and not late.exists():
+            os.link(path, late)
+        real(self, delete)
+
+    monkeypatch.setattr(winfile.Target, "mark_delete", mark)
+    with pytest.raises(quarantine.QuarantineError) as caught:
+        quarantine.quarantine(db, str(path), {})
+    assert caught.value.code == "IN_USE"
+    assert late.read_bytes() == BODY
+    assert not db.quarantine_items() and not list(config.quarantine_dir().glob("*.qbin"))
+
+
+def test_cleaning_up_a_redirected_folder_removes_only_what_was_created(tmp_path, monkeypatch):
+    item = tmp_path / "new"
+    decoy = str(item)
+    real = winfile.identity._final_path
+
+    def flipped(descriptor, path):
+        os.rename(str(item), str(tmp_path / "ours"))
+        os.mkdir(decoy)  # by now the name leads to something that was already there
+        return "C:\\elsewhere"
+
+    monkeypatch.setattr(winfile.identity, "_final_path", flipped)
+    with pytest.raises(winfile.TargetError):
+        winfile.make_parents(str(item / "x.bin"))
+    monkeypatch.setattr(winfile.identity, "_final_path", real)
+    assert item.is_dir(), "what the name led to afterwards is not ours to remove"
+    assert not (tmp_path / "ours").exists()
+
+
+def test_a_page_of_events_fits_a_frame_and_later_events_still_arrive(core, db):
+    for i in range(195):
+        db.add_event("realtime", "warning", "t", "\U0001f600" * 400 + str(i), {"owner_sid": USER.sid})
+    db.add_event("realtime", "threat", "last", "the one that matters", {"owner_sid": USER.sid})
+    seen: list[str] = []
+    after = 0
+    for _ in range(20):
+        reply = core.handle(USER, frame("events", after=after))
+        assert reply["ok"], reply
+        buffer = io.BytesIO()
+        write_frame(buffer, reply)
+        seen += [e["title"] for e in reply["result"]["events"]]
+        if reply["result"]["last"] == after:
+            break
+        after = reply["result"]["last"]
+    assert "last" in seen
+
+
+def test_a_pipe_behind_a_path_is_not_a_file():
+    me = winpipe.current_process_caller()
+    name = rf"\\.\pipe\SentinelGuardTest\{uuid.uuid4().hex}"
+    server = winpipe.PipeServer(ServiceCore(SimpleNamespace()), name=name, sddl=f"D:P(A;;GA;;;{me.sid})")
+    try:
+        assert winpipe.open_for_query(name) is None
+        assert winpipe.file_owner(name) is None
+    finally:
+        winpipe._k32.CloseHandle(server._pending)
+
+
+def test_a_wrong_hash_tells_an_unelevated_caller_nothing(core, tmp_path):
+    path = tmp_path / "tool.bin"
+    path.write_bytes(BODY)
+    wrong = core.handle(USER, frame("request_plan", kind="add_exclusion", params={"path": str(path), "sha256": "0" * 64}))
+    right = core.handle(USER, frame("request_plan", kind="add_exclusion",
+                                    params={"path": str(path), "sha256": hashlib.sha256(BODY).hexdigest()}))
+    assert wrong["ok"] and right["ok"] and set(wrong["result"]) == set(right["result"])
+
+
+def test_files_owned_by_the_system_reach_every_tray(core, db):
+    db.add_event("realtime", "threat", "t", "admin-owned.exe", {"owner_sid": "S-1-5-32-544"})
+    db.add_event("system", "warning", "t", "private", {"admin_only": True})
+    seen = [e["detail"] for e in core.handle(USER, frame("events", after=0))["result"]["events"]]
+    assert seen == ["admin-owned.exe"]
+
+
+def test_a_touch_loop_cannot_keep_a_detected_file_unknown(db, scanner, tmp_path):
+    bad = bad_file(tmp_path)
+    stop = threading.Event()
+
+    def touch() -> None:
+        tick = 1000
+        while not stop.is_set():
+            tick += 1
+            os.utime(bad, (tick, tick))
+
+    thread = threading.Thread(target=touch, daemon=True)
+    thread.start()
+    try:
+        labels = {scanner.scan_file(bad, use_cache=False).label for _ in range(5)}
+    finally:
+        stop.set()
+        thread.join(5)
+    assert labels == {"malicious"}
+
+
+def test_a_reconciliation_that_raises_is_still_owed(db):
+    def broken():
+        raise OSError("no")
+
+    now = [0.0]
+    seen = watcher(db, lambda path, reason, fresh=False: True, reconcile=broken, clock=lambda: now[0])
+    seen._owed = True
+    with pytest.raises(OSError):
+        seen.tick_journal()
+    assert seen._owed is True
+
+
+def test_a_rescan_the_queue_refused_is_asked_again(backend, monkeypatch):
+    from sentinel.service.rescan import Download
+
+    offered: list[bool] = []
+    monkeypatch.setattr(backend, "observe", lambda path, reason, fresh=False: offered.append(True) and False)
+    backend.rescans.remember(Download(1, 2, "C:\\d\\x.exe", "a" * 64, "g1", time.time()))
+    backend._rule_generation = "g1"
+    monkeypatch.setattr(backend.scanner, "gate_id", lambda: "g2")
+    backend.rescan_on_new_rules()
+    assert backend._rule_generation == "g1", "not done, so not marked done"
+
+
+def test_a_retry_the_queue_refused_comes_round_again(backend, monkeypatch):
+    monkeypatch.setattr(backend, "observe", lambda path, reason, fresh=False, attempts=0: False)
+    backend._later.append((0.0, "C:\\x.exe", "journal", 2))
+    backend._retry_due()
+    assert [item[1:] for item in backend._later] == [("C:\\x.exe", "journal", 2)]
+
+
+def test_the_record_is_on_disk_before_the_original_goes(db, tmp_path, monkeypatch):
+    path = tmp_path / "x.bin"
+    path.write_bytes(BODY)
+    order: list[str] = []
+    real_flush, real_mark = db.flush, winfile.Target.mark_delete
+    monkeypatch.setattr(db, "flush", lambda: (order.append("flush"), real_flush())[1])
+    monkeypatch.setattr(winfile.Target, "mark_delete", lambda self, delete=True: (order.append("delete"), real_mark(self, delete))[1])
+    quarantine.quarantine(db, str(path), {})
+    assert order[:2] == ["flush", "delete"]
+
+
 def test_ctypes_structures_match_windows():
     assert ctypes.sizeof(winfile.FILE_STANDARD_INFO) == 24

@@ -145,10 +145,12 @@ class Observers:
         if self._owed and now - self._reconciled_at >= RECONCILE_SECONDS:
             # After the cursors moved: whatever changes during this scan is in the journal.
             self._reconciled_at = now
-            self._owed = False
             self.counts["reconciliations"] += 1
-            if self.reconcile() is False:
-                self._owed = True
+            finished = False
+            try:
+                finished = self.reconcile() is not False
+            finally:
+                self._owed = not finished
 
     def tick_processes(self) -> None:
         if self.processes is None:

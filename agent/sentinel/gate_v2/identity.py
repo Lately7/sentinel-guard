@@ -128,9 +128,14 @@ def measure(
 def measure_stream(
     stream: BinaryIO, path: str, *, max_bytes: int,
     cancel: CancellationToken | None = None, chunk_size: int = CHUNK_SIZE,
-    between_chunks: Callable[[int], None] | None = None,
+    between_chunks: Callable[[int], None] | None = None, deny_write: bool = False,
 ) -> IdentityResult:
-    """Measure an already opened generation; the caller owns the stream."""
+    """Measure an already opened generation; the caller owns the stream.
+
+    With `deny_write` nobody can write while the stream is held, so only which
+    file it is matters. Touching a file needs no write access, and a loop of
+    that must not be a way to keep a detected file unknown for ever.
+    """
     if max_bytes < 0 or chunk_size <= 0:
         raise ValueError("invalid measurement limit")
     if _cancelled(cancel):
@@ -159,7 +164,8 @@ def measure_stream(
                     between_chunks(count)
             after = os.fstat(stream.fileno())
             after_change = _change_time(stream.fileno(), after)
-            if _generation(before, before_change) != _generation(after, after_change) or count != after.st_size:
+            first, last = _generation(before, before_change), _generation(after, after_change)
+            if (first[:3] != last[:3] if deny_write else first != last) or count != after.st_size:
                 return IdentityResult(None, "CHANGED")
             return IdentityResult(FileIdentity(
                 canonical, after.st_dev, f"{after.st_ino:032x}", count,

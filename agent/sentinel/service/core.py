@@ -30,6 +30,7 @@ MAX_JOBS_PER_CALLER = 64
 MAX_JOBS = 4096
 FINISHED_JOB_STATES = ("done", "cancelled", "failed")
 MAX_SUMMARY = 500
+NO_MATCH = "Tệp không khớp với nội dung được đề nghị tin cậy. Sẽ không có gì được tin cậy."
 DRIVE_PATH = re.compile(r"[A-Za-z]:\\.+", re.DOTALL)
 DEVICE_NAMES = frozenset(("CON", "PRN", "AUX", "NUL", *(f"{p}{n}" for p in ("COM", "LPT") for n in range(1, 10))))
 
@@ -267,7 +268,11 @@ class ServiceCore:
             params["path"] = self._checked_path(caller, params["path"])
         summary = self.backend.describe_plan(args["kind"], params)
         if summary is None:
-            raise ProtocolError("NOT_FOUND", "nothing to act on")
+            if args["kind"] != "add_exclusion":
+                raise ProtocolError("NOT_FOUND", "nothing to act on")
+            # Whether a hash matches is an answer about a file, and the name can
+            # be swapped after the access check. Only the elevated helper hears it.
+            summary = NO_MATCH
         now = self._clock()
         with self._lock:
             self._expire(now)

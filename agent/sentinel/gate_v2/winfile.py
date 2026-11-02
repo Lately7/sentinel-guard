@@ -32,8 +32,9 @@ FILE_DISPOSITION_DELETE, FILE_DISPOSITION_POSIX, FILE_DISPOSITION_IMAGE_CHECK = 
 FILE_DISPOSITION_IGNORE_READONLY = 0x10
 FILE_STANDARD_INFO_CLASS = 1
 FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_SHARE_ALL = 0x120116, 0x80, 0x7
-FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
-FILE_CREATE, FILE_SYNCHRONOUS_IO_NONALERT, FILE_NON_DIRECTORY_FILE = 2, 0x20, 0x40
+FILE_CREATE, FILE_DIRECTORY_FILE, FILE_SYNCHRONOUS_IO_NONALERT, FILE_NON_DIRECTORY_FILE = 2, 0x1, 0x20, 0x40
+FILE_OPEN_REPARSE_POINT, SYNCHRONIZE = 0x00200000, 0x00100000
+STATUS_OBJECT_NAME_COLLISION = 0xC0000035
 OBJ_CASE_INSENSITIVE = 0x40
 SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION = 1, 0x1
 TRUSTED_INSTALLER = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
@@ -133,6 +134,7 @@ class Target:
         self.stream = stream
         self.path = path
         self.handle = msvcrt.get_osfhandle(stream.fileno())
+        self.posix = True  # the extended delete worked, or nothing was deleted yet
 
     @property
     def key(self) -> tuple[int, str]:
@@ -169,14 +171,29 @@ class Target:
         plain = ctypes.c_ubyte(1 if delete else 0)
         if not _k32.SetFileInformationByHandle(self.handle, FILE_DISPOSITION_INFO, ctypes.byref(plain), 1):
             raise _fail(self.path)
+        self.posix = False
 
-    def gone(self) -> bool:
-        """Someone already deleted this file; this handle only keeps the bytes alive."""
+    def _standard_info(self) -> FILE_STANDARD_INFO:
         info = FILE_STANDARD_INFO()
         if not _k32.GetFileInformationByHandleEx(self.handle, FILE_STANDARD_INFO_CLASS, ctypes.byref(info),
                                                  ctypes.sizeof(info)):
             raise _fail(self.path)
+        return info
+
+    def gone(self) -> bool:
+        """Someone already deleted this file; this handle only keeps the bytes alive."""
+        info = self._standard_info()
         return bool(info.DeletePending) or info.NumberOfLinks == 0
+
+    def survives(self, *, posix: bool) -> bool:
+        """After every name was deleted: is any still there?
+
+        Measured on NTFS: the link count leaves out deleted names, while the
+        pending flag stays set once this name went, even if another one lives.
+        The classic delete on file systems without links has only the flag.
+        """
+        info = self._standard_info()
+        return info.NumberOfLinks > 0 if posix else not info.DeletePending
 
     def owner(self) -> str | None:
         owner, descriptor = ctypes.c_void_p(), ctypes.c_void_p()
@@ -275,6 +292,11 @@ def open_target(path: str) -> Target:
     return target
 
 
+def open_watch(path: str) -> Target:
+    """A handle that only looks: it outlives the deletion and can tell if any name did."""
+    return _open(path, FILE_READ_ATTRIBUTES, FILE_SHARE_ALL, OPEN_EXISTING, 0, os.O_RDONLY | os.O_BINARY, "rb")
+
+
 def create_new(path: str) -> Target:
     """Creates a file and proves where it landed before any content is written.
 
@@ -294,10 +316,32 @@ def create_new(path: str) -> Target:
     return target
 
 
+def _new_directory(path: str) -> int | None:
+    """A handle to the folder this call created; None if the name was taken."""
+    name = "\\??\\" + path
+    length = len(name.encode("utf-16-le", "surrogatepass"))
+    text = UNICODE_STRING(length, length, name)
+    attributes = OBJECT_ATTRIBUTES(ctypes.sizeof(OBJECT_ATTRIBUTES), None, ctypes.pointer(text),
+                                   OBJ_CASE_INSENSITIVE, None, None)
+    status_block = IO_STATUS_BLOCK()
+    opened = wintypes.HANDLE()
+    status = _nt.NtCreateFile(ctypes.byref(opened), DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                              ctypes.byref(attributes), ctypes.byref(status_block), None, FILE_ATTRIBUTE_NORMAL,
+                              FILE_SHARE_ALL, FILE_CREATE,
+                              FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT, None, 0)
+    if status & 0xFFFFFFFF == STATUS_OBJECT_NAME_COLLISION:
+        return None
+    if status:
+        raise TargetError("FAILED", f"{path}: status {status & 0xFFFFFFFF:#x}")
+    return int(opened.value)
+
+
 def make_parents(path: str) -> None:
     """Creates missing folders one by one, proving each landed where it was named.
 
-    One a junction redirected would otherwise be left behind wherever it pointed.
+    The handle comes from the creation itself. Opening the name again afterwards
+    could reach any folder a junction was flipped to, and removing that would
+    hand LocalSystem's delete to whoever flipped it.
     """
     missing: list[str] = []
     folder = ntpath.dirname(path)
@@ -308,14 +352,9 @@ def make_parents(path: str) -> None:
             break
         folder = parent
     for item in reversed(missing):
-        try:
-            os.mkdir(item)
-        except FileExistsError:
-            continue
-        handle = _k32.CreateFileW(item, DELETE | FILE_READ_ATTRIBUTES, FILE_SHARE_ALL, None, OPEN_EXISTING,
-                                  FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, None)
-        if handle in (None, INVALID_HANDLE):
-            raise _fail(item)
+        handle = _new_directory(item)
+        if handle is None:
+            continue  # someone else made it meanwhile, and create_new checks where it leads
         descriptor = msvcrt.open_osfhandle(handle, os.O_RDONLY)
         try:
             if not same_path(identity._final_path(descriptor, item), item):

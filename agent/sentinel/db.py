@@ -577,6 +577,11 @@ class Database:
     def clear_repair_undos(self, qid: str) -> None:
         self._exec("DELETE FROM repair_undo WHERE qid=?", (qid,))
 
+    def flush(self) -> None:
+        """Onto the disk now: WAL at synchronous=NORMAL leaves commits to the next checkpoint."""
+        with self._lock:
+            self._conn.execute("PRAGMA wal_checkpoint(FULL)").fetchall()
+
     def open_action(self, qid: str, path: str, sha256: str) -> None:
         self._exec("INSERT INTO action_journal(qid,path,sha256,started) VALUES(?,?,?,?)",
                    (qid, path, sha256, time.time()))

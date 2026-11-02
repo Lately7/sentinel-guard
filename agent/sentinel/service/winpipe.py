@@ -52,7 +52,8 @@ if os.name == "nt":
     PIPE_UNLIMITED_INSTANCES = 255
     OPEN_EXISTING = 3
     SECURITY_SQOS_PRESENT = 0x00100000
-    SECURITY_IDENTIFICATION = 0x00010000
+    SECURITY_ANONYMOUS, SECURITY_IDENTIFICATION = 0x0, 0x00010000
+    FILE_TYPE_DISK = 1
     ERROR_PIPE_CONNECTED = 535
     ERROR_BROKEN_PIPE = 109
     ERROR_NO_DATA = 232
@@ -79,6 +80,8 @@ if os.name == "nt":
                                ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
     _k32.FlushFileBuffers.argtypes = [wintypes.HANDLE]
     _k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    _k32.GetFileType.argtypes = [wintypes.HANDLE]
+    _k32.GetFileType.restype = wintypes.DWORD
     _k32.GetCurrentThread.restype = wintypes.HANDLE
     _k32.GetCurrentProcess.restype = wintypes.HANDLE
     _k32.LocalFree.argtypes = [ctypes.c_void_p]
@@ -254,6 +257,22 @@ class GENERIC_MAPPING(ctypes.Structure):
                 ("execute", wintypes.DWORD), ("all", wintypes.DWORD)]
 
 
+def open_for_query(path: str) -> int | None:
+    """Enough to read a file's owner and DACL; a handle only if it really is a file.
+
+    A junction can lead a plain-looking path to \\Device\\NamedPipe. Anonymous
+    level, so a pipe at the other end learns nothing it could impersonate.
+    """
+    handle = _k32.CreateFileW(path, READ_CONTROL | FILE_READ_ATTRIBUTES, FILE_SHARE_ALL, None, OPEN_EXISTING,
+                              FILE_FLAG_BACKUP_SEMANTICS | SECURITY_SQOS_PRESENT | SECURITY_ANONYMOUS, None)
+    if handle in (None, INVALID_HANDLE):
+        return None
+    if _k32.GetFileType(handle) != FILE_TYPE_DISK:
+        _k32.CloseHandle(handle)
+        return None
+    return int(handle)
+
+
 def client_can_read(token: int | None, path: str) -> bool:
     """Whether the file's own DACL lets this client read it.
 
@@ -263,9 +282,8 @@ def client_can_read(token: int | None, path: str) -> bool:
     """
     if os.name != "nt" or token is None:
         return False
-    handle = _k32.CreateFileW(path, READ_CONTROL | FILE_READ_ATTRIBUTES, FILE_SHARE_ALL, None, OPEN_EXISTING,
-                              FILE_FLAG_BACKUP_SEMANTICS, None)
-    if handle in (None, INVALID_HANDLE):
+    handle = open_for_query(path)
+    if handle is None:
         return False
     descriptor = ctypes.c_void_p()
     try:
@@ -289,9 +307,8 @@ def file_owner(path: str) -> str | None:
     """Whose file this is, for work no client asked for: they should see what happened to it."""
     if os.name != "nt":
         return None
-    handle = _k32.CreateFileW(path, READ_CONTROL | FILE_READ_ATTRIBUTES, FILE_SHARE_ALL, None, OPEN_EXISTING,
-                              FILE_FLAG_BACKUP_SEMANTICS, None)
-    if handle in (None, INVALID_HANDLE):
+    handle = open_for_query(path)
+    if handle is None:
         return None
     owner, descriptor = ctypes.c_void_p(), ctypes.c_void_p()
     try:
