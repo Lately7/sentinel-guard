@@ -142,6 +142,10 @@ def _open_names(path: str, expected: FileIdentity | None) -> list[winfile.Target
 
 
 def quarantine(db: Database, path: str, verdict: dict[str, Any], *, expected: FileIdentity | None = None) -> str:
+    # A stream shares its file's links, so nothing here could tell it from the
+    # whole file: its rollback would remove the copy after the stream had gone.
+    if ":" in ntpath.splitdrive(path)[1]:
+        raise QuarantineError(f"{path} is a stream, not a file", "NOT_REGULAR")
     src = Path(path)
     zone = _zone_identifier(path)
     try:

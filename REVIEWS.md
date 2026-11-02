@@ -544,3 +544,11 @@ and reports `IN_USE`: the file stays, and nothing false is said.
 Left by choice: an event with no known owner reaches every local user, because a threat nobody hears
 about is worse than a path a local user can see. While 17 oplocks are held at once a lane stops; it
 recovers when they are released, and `status` shows `stalled`.
+
+### Fourth round, narrow
+
+Findings 5, 9 and the third-round faults confirmed fixed by re-running them, and no false "quarantined"
+found: a reconcile during a stalled delete, relinking from an earlier handle, and three threads on one
+file were all clean. One real loss, in portable mode only: quarantine of a `file:stream` path removed the
+stream and then, seeing the base file's links, rolled the copy back. Such paths are now refused; the
+service never accepted them. An event with no known owner still reaches every local user, by choice.

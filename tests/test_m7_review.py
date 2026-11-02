@@ -1070,5 +1070,19 @@ def test_nothing_observed_is_given_up_on_before_a_scan_could_have_finished(backe
     assert lane.limit < config.SCAN_DEADLINE_SECONDS < lane.give_up
 
 
+def test_a_stream_of_a_file_is_refused_and_nothing_is_lost(db, tmp_path):
+    base = tmp_path / "report.txt"
+    base.write_bytes(BODY)
+    stream = str(base) + ":evil"
+    with open(stream, "wb") as out:
+        out.write(b"harmless stream")
+    with pytest.raises(quarantine.QuarantineError) as caught:
+        quarantine.quarantine(db, stream, {})
+    assert caught.value.code == "NOT_REGULAR"
+    with open(stream, "rb") as back:
+        assert back.read() == b"harmless stream"
+    assert base.read_bytes() == BODY and not db.quarantine_items()
+
+
 def test_ctypes_structures_match_windows():
     assert ctypes.sizeof(winfile.FILE_STANDARD_INFO) == 24
