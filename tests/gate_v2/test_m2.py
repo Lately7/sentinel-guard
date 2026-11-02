@@ -102,10 +102,15 @@ def test_identity_swap_rename_link_and_failures(tmp_path: Path) -> None:
 def test_identity_changed_and_cancelled_between_chunks(tmp_path: Path) -> None:
     path = tmp_path / "chunks"
     path.write_bytes(b"A" * 64)
+    moved = path.stat().st_mtime_ns + 1_000_000_000
     def change(_: int) -> None:
         with path.open("r+b") as stream:
             stream.seek(0)
             stream.write(b"B")
+        # A write in the same system-clock tick as creation leaves NTFS timestamps
+        # equal (204 of 300 runs measured), so the test moves them itself. Real
+        # scans close that window with BoundReader's deny-write handle (H2).
+        os.utime(path, ns=(moved, moved))
     assert measure(str(path), chunk_size=8, between_chunks=change).code == "CHANGED"
     token = Token()
     assert measure(str(path), chunk_size=8, cancel=token,
