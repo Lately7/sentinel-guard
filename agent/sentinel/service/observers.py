@@ -14,6 +14,7 @@ import threading
 import time
 from collections import Counter, OrderedDict
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from ..db import Database
@@ -28,6 +29,10 @@ JOURNAL_SECONDS = 5.0
 RECONCILE_SECONDS = 3600.0  # a whole-machine scan: a journal that keeps failing must not repeat it
 RECENT_SECONDS = 10.0
 RECENT_CAP = 4096
+MAX_QUIET_SECONDS = 60.0
+REFUSED_CAP = 4096
+LOOKUP_CAP = 4096
+MAX_BATCHES_PER_TICK = 16
 # Files that can run, or carry something that can. Everything else changes all
 # day (browser caches, logs) and cannot start by being opened.
 RISKY_SUFFIXES = frozenset((
@@ -42,6 +47,21 @@ class Volume(Device, Protocol):
     root: str
 
     def resolve(self, record: UsnRecord) -> str | None: ...
+
+
+@dataclass(frozen=True)
+class _Deferred:
+    path: str
+    first: float
+    last: float
+
+
+@dataclass(frozen=True)
+class _Refused:
+    path: str
+    reason: str
+    fresh: bool
+    first: float | None = None
 
 
 class DbCursorStore:
@@ -78,8 +98,13 @@ class Observers:
         self.clock = clock
         self.counts: Counter[str] = Counter()
         self._recent: OrderedDict[str, float] = OrderedDict()
-        self._again: dict[str, tuple[str, str]] = {}  # changed again inside the window
+        self._again: OrderedDict[str, _Deferred] = OrderedDict()
+        self._refused: OrderedDict[str, _Refused] = OrderedDict()
+        self._lookup_failures: OrderedDict[tuple[str, bytes], tuple[Volume, UsnRecord, int]] = OrderedDict()
+        self._next_volume = 0
+        self._lock = threading.RLock()
         self._owed = False  # something was missed and a reconciliation has to make up for it
+        self._debt_version = 0
         self._gap_of: dict[str, str] = {}
         self._reconciled_at = float("-inf")
         self._stop = threading.Event()
@@ -94,75 +119,190 @@ class Observers:
         return not winfile.is_protected(path)  # nothing there may be acted on, and updates churn it
 
     def _offer(self, path: str, reason: str, *, fresh: bool = False) -> None:
+        with self._lock:
+            key = ntpath.normcase(path)
+            if reason == "journal" and not fresh:
+                now = self.clock()
+                previous = self._again.get(key)
+                refused = self._refused.get(key)
+                if refused is not None and refused.reason == "journal":
+                    # A later write invalidates the quiet window of a refused offer.
+                    del self._refused[key]
+                if previous is None and len(self._again) >= RECENT_CAP:
+                    self._mark_owed()
+                    return
+                first = now
+                if refused is not None and refused.first is not None:
+                    first = refused.first
+                if previous is not None:
+                    first = previous.first
+                self._again[key] = _Deferred(path, first, now)
+                return
+            if not fresh and self._seen_recently(key):
+                return  # twenty processes of one program are one file to scan
+            self._submit_offer(path, reason, fresh)
+
+    def _seen_recently(self, key: str) -> bool:
         now = self.clock()
-        key = ntpath.normcase(path)
         last = self._recent.get(key)
-        if last is not None and now - last < RECENT_SECONDS and not fresh:
-            # That scan may have read the file before this write: look again after the window.
-            if len(self._again) < RECENT_CAP:
-                self._again[key] = (path, reason)
-            else:
-                self._owed = True
-            return
+        if last is not None and now - last < RECENT_SECONDS:
+            return True
         self._recent[key] = now
         self._recent.move_to_end(key)
         while len(self._recent) > RECENT_CAP:
             self._recent.popitem(last=False)
+        return False
+
+    def _mark_owed(self) -> None:
+        self._owed = True
+        self._debt_version += 1
+
+    def owe(self) -> None:
+        with self._lock:
+            self._mark_owed()
+
+    def _submit_offer(self, path: str, reason: str, fresh: bool, first: float | None = None) -> bool:
         if self.submit(path, reason, fresh):
             self.counts[f"queued_{reason}"] += 1
-        else:
-            self.counts["queue_full"] += 1
-            self._owed = True
+            return True
+        self.counts["queue_full"] += 1
+        self._mark_owed()
+        key = ntpath.normcase(path)
+        previous = self._refused.get(key)
+        if previous is not None and previous.reason == "process" and reason != "process":
+            return False
+        if previous is not None and previous.reason == reason:
+            fresh = fresh or previous.fresh
+            if first is None:
+                first = previous.first
+        if previous is None and len(self._refused) >= REFUSED_CAP and reason == "process":
+            for older_key, older in self._refused.items():
+                if older.reason != "process":
+                    del self._refused[older_key]
+                    break
+        if previous is not None or len(self._refused) < REFUSED_CAP:
+            self._refused[key] = _Refused(path, reason, fresh, first)
+        return False
+
+    def _retry_refused(self, *, journal: bool = True, keys: set[str] | None = None) -> None:
+        with self._lock:
+            # A running image takes precedence when the observed lane has room again.
+            items = list(self._refused.items())
+            items.sort(key=lambda item: item[1].reason != "process")
+            for key, item in items:
+                if keys is not None and key not in keys:
+                    continue
+                if item.reason == "journal" and not journal:
+                    continue
+                if self.submit(item.path, item.reason, item.fresh):
+                    del self._refused[key]
+                    self.counts[f"queued_{item.reason}"] += 1
+                else:
+                    self.counts["queue_full"] += 1
+                    self._mark_owed()
+                    break
 
     def _offer_again(self) -> None:
-        now = self.clock()
-        for key, (path, reason) in list(self._again.items()):
-            if now - self._recent.get(key, float("-inf")) >= RECENT_SECONDS:
-                del self._again[key]
-                self._offer(path, reason)
+        with self._lock:
+            now = self.clock()
+            for key, item in list(self._again.items()):
+                if now - item.last >= RECENT_SECONDS or now - item.first >= MAX_QUIET_SECONDS:
+                    del self._again[key]
+                    self._submit_offer(item.path, "journal", False, item.first)
 
     def tick_journal(self) -> None:
-        self._offer_again()
-        for volume in self.volumes:
-            batch = read_batch(volume.root, volume, self.store, volume.resolve)
-            self.counts["records"] += len(batch.records)
-            self.counts["unresolved"] += batch.unresolved
-            for change in batch.records:
-                if self.wanted(change.path):
-                    self._offer(change.path, "journal")
-            if not batch.gaps:
+        retry_lookup = tuple(self._lookup_failures)
+        volumes = self.volumes[self._next_volume:] + self.volumes[:self._next_volume]
+        if self.volumes:
+            self._next_volume = (self._next_volume + 1) % len(self.volumes)
+        batch_budget = MAX_BATCHES_PER_TICK
+        for volume in volumes:
+            if not batch_budget:
+                break
+            previous_usn: int | None = None
+            for _ in range(batch_budget):
+                batch_budget -= 1
+                batch = read_batch(volume.root, volume, self.store, volume.resolve)
+                self.counts["records"] += len(batch.records)
+                self.counts["unresolved"] += batch.unresolved
+                self.counts["lookup_failed"] += batch.lookup_failed
+                for record in batch.failed_records:
+                    key = (volume.root, record.file_ref)
+                    if key not in self._lookup_failures:
+                        if len(self._lookup_failures) >= LOOKUP_CAP:
+                            self._mark_owed()
+                        else:
+                            self._lookup_failures[key] = (volume, record, 1)
+                for change in batch.records:
+                    self._lookup_failures.pop((volume.root, change.record.file_ref), None)
+                    if self.wanted(change.path):
+                        self._offer(change.path, "journal")
+                if batch.gaps:
+                    for gap in batch.gaps:
+                        self.counts[f"gap_{gap.reason}"] += 1
+                    # A volume with no journal says so every tick: one incident, not one a tick.
+                    reason = batch.gaps[0].reason
+                    if self._gap_of.get(volume.root) != reason:
+                        self._gap_of[volume.root] = reason
+                        if any(gap.reconciliation_required for gap in batch.gaps):
+                            with self._lock:
+                                self._mark_owed()
+                    reset_cursor(volume.root, volume, self.store)
+                    break
                 self._gap_of.pop(volume.root, None)
+                if (batch.cursor is None or batch.cursor.next_usn >= batch.journal_end or
+                        batch.cursor.next_usn == previous_usn):
+                    break
+                previous_usn = batch.cursor.next_usn
+        for key in retry_lookup:
+            pending = self._lookup_failures.get(key)
+            if pending is None:
                 continue
-            for gap in batch.gaps:
-                self.counts[f"gap_{gap.reason}"] += 1
-            # A volume with no journal says so every tick: one incident, not one a tick.
-            reason = batch.gaps[0].reason
-            if self._gap_of.get(volume.root) != reason:
-                self._gap_of[volume.root] = reason
-                self._owed = self._owed or any(gap.reconciliation_required for gap in batch.gaps)
-            reset_cursor(volume.root, volume, self.store)
+            volume, record, failures = pending
+            try:
+                path = volume.resolve(record)
+            except OSError:
+                self.counts["lookup_failed"] += 1
+                if failures >= 2:
+                    del self._lookup_failures[key]
+                    self._mark_owed()
+                else:
+                    self._lookup_failures[key] = (volume, record, failures + 1)
+            else:
+                del self._lookup_failures[key]
+                if path is not None and self.wanted(path):
+                    self._offer(path, "journal")
+        self._retry_refused()
+        self._offer_again()
         now = self.clock()
         if self._owed and now - self._reconciled_at >= RECONCILE_SECONDS:
             # After the cursors moved: whatever changes during this scan is in the journal.
             self._reconciled_at = now
             self.counts["reconciliations"] += 1
+            debt_version = self._debt_version
             finished = False
             try:
                 finished = self.reconcile() is not False
             finally:
-                self._owed = not finished
+                with self._lock:
+                    self._owed = not finished or self._debt_version != debt_version
 
     def tick_processes(self) -> None:
         if self.processes is None:
             return
+        with self._lock:
+            refused_before_poll = set(self._refused)
         self.processes.poll()
         while (target := self.processes.pop()) is not None:
             first = self.rescans is not None and self.rescans.first_run(target.identity)
             if first or not winfile.is_protected(target.path):
                 self._offer(target.path, "process", fresh=first)
+        self._retry_refused(journal=False, keys=refused_before_poll)
 
     def report(self) -> dict[str, Any]:
-        out: dict[str, Any] = {"prevention": "none", **self.counts}
+        with self._lock:
+            out: dict[str, Any] = {"prevention": "none", "lookup_failed": 0, **self.counts,
+                                   "refused_paths": len(self._refused)}
         if self.processes is not None:
             seen = self.processes.report
             out.update(process_observation=seen.process_observation, failed_polls=seen.failed_polls,

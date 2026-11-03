@@ -35,6 +35,9 @@ ERROR_ACCESS_DENIED = 5
 ERROR_JOURNAL_DELETE_IN_PROGRESS = 1178
 ERROR_JOURNAL_NOT_ACTIVE = 1179
 ERROR_JOURNAL_ENTRY_DELETED = 1181
+# 87 is what NTFS really answers for a deleted file's id (measured), 2 and 3 for
+# a folder that went. A delete still pending answers 5, so it is retried once.
+GONE = frozenset((2, 3, 87, 1168))
 MIN_RECORD = 60
 JOURNAL_DATA_BYTES = 56
 
@@ -85,7 +88,10 @@ class Batch:
     records: tuple[ResolvedChange, ...] = ()
     cursor: JournalCursor | None = None
     gaps: tuple[JournalGap, ...] = ()
-    unresolved: int = 0  # changed files with no path now: most were replaced or removed since
+    unresolved: int = 0
+    lookup_failed: int = 0
+    failed_records: tuple[UsnRecord, ...] = ()
+    journal_end: int = 0
 
 
 class CursorStore(Protocol):
@@ -219,12 +225,14 @@ def read_batch(volume: str, device: Device, store: CursorStore,
         return Batch(gaps=(JournalGap("wrapped_cursor"),))
     resolved: list[ResolvedChange] = []
     unresolved = 0
+    failed: list[UsnRecord] = []
     for record in records:
         if not record.reason & CHANGED or record.reason & USN_REASON_FILE_DELETE:
             continue
         try:
             path = resolver(record)
         except OSError:
+            failed.append(record)
             path = None
         if path is None:
             unresolved += 1
@@ -234,8 +242,9 @@ def read_batch(volume: str, device: Device, store: CursorStore,
     try:
         store.save(advanced)
     except OSError:
-        return Batch(tuple(resolved), None, (JournalGap("cursor_store_error"),), unresolved)
-    return Batch(tuple(resolved), advanced, (), unresolved)
+        return Batch(tuple(resolved), None, (JournalGap("cursor_store_error"),), unresolved,
+                     len(failed), tuple(failed), info.next_usn)
+    return Batch(tuple(resolved), advanced, (), unresolved, len(failed), tuple(failed), info.next_usn)
 
 
 class FILE_ID_DESCRIPTOR(ctypes.Structure):
@@ -304,12 +313,15 @@ class WindowsVolume:
         opened = _k32.OpenFileById(self.handle, ctypes.byref(descriptor), FILE_READ_ATTRIBUTES, FILE_SHARE_ALL,
                                    None, FILE_FLAG_BACKUP_SEMANTICS)
         if opened in (None, INVALID_HANDLE):
-            return None
+            error = ctypes.get_last_error()
+            if error in GONE:
+                return None
+            raise ctypes.WinError(error)
         try:
             buffer = ctypes.create_unicode_buffer(32768)
             length = _k32.GetFinalPathNameByHandleW(opened, buffer, len(buffer), 0)
             if not length or length >= len(buffer):
-                return None
+                raise ctypes.WinError(ctypes.get_last_error()) if not length else OSError("path too long")
             return buffer.value[4:] if buffer.value.startswith("\\\\?\\") else buffer.value
         finally:
             _k32.CloseHandle(opened)
