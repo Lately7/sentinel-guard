@@ -39,6 +39,8 @@ def protection_state(app: "App", now: float | None = None,
         return State("off", "Bảo vệ đang tắt", "Bật bảo vệ thời gian thực")
     if service_status and service_status.get("worker_failure"):
         return State("attention", "Cần chú ý", "Bộ quét không hoạt động; bảo vệ tệp trên máy đang bị gián đoạn")
+    if service_status and service_status.get("realtime") is False:
+        return State("attention", "Cần chú ý", "Bảo vệ của dịch vụ trên máy đang tắt; tệp bị phát hiện sẽ không được tự cách ly")
     issues = []
     last_feed = max((f["updated"] or 0 for f in app.db.feed_status()), default=0)
     if now - last_feed > FEEDS_STALE:

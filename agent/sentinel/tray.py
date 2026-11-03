@@ -45,6 +45,12 @@ def _show_approval_failure(result: object, action: str) -> None:
     code = getattr(result, "code", "HELPER_FAILED")
     if code != "CANCELLED":
         messagebox.showerror(APP, _approval_message(code, action))
+
+
+def _show_enable_failure() -> None:
+    messagebox.showerror(APP, "Chưa bật bảo vệ: dịch vụ bảo vệ không nhận yêu cầu. Hãy thử lại.")
+
+
 # The logo is a black-to-grey square in a thin outline; only the outline colour
 # carries state, so the icon stays the same shape in every situation.
 GREEN, AMBER, RED = (116, 116, 122), (212, 163, 42), (224, 82, 74)
@@ -181,7 +187,9 @@ class App:
                 detail += " Một thao tác cách ly bắt đầu trước khi tắt vẫn đang chạy cho xong."
             self.db.add_event("system", "warning", "Bảo vệ thời gian thực đã TẮT", detail)
         else:
-            self.lease.enable_protection()
+            if self.lease.available() and not self.lease.enable_protection():
+                _show_enable_failure()
+                return
             self.settings.realtime = True
             self.start_realtime()
         self.settings.save()

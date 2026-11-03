@@ -29,7 +29,7 @@ MAX_PLANS_PER_CALLER = 8
 MAX_JOBS_PER_CALLER = 64
 MAX_JOBS = 4096
 FINISHED_JOB_STATES = ("done", "cancelled", "failed")
-MAX_SUMMARY = 500
+MAX_SUMMARY = 4096
 NO_MATCH = "Tệp không khớp với nội dung được đề nghị tin cậy. Sẽ không có gì được tin cậy."
 DRIVE_PATH = re.compile(r"[A-Za-z]:\\.+", re.DOTALL)
 DEVICE_NAMES = frozenset(("CON", "PRN", "AUX", "NUL", *(f"{p}{n}" for p in ("COM", "LPT") for n in range(1, 10))))
@@ -277,12 +277,14 @@ class ServiceCore:
             # Whether a hash matches is an answer about a file, and the name can
             # be swapped after the access check. Only the elevated helper hears it.
             summary = NO_MATCH
+        if len(summary) > MAX_SUMMARY:
+            raise ProtocolError("PLAN_TOO_LONG", "confirmation summary exceeds the display limit")
         now = self._clock()
         with self._lock:
             self._expire(now)
             if sum(1 for p in self._plans.values() if p.requester == caller.key) >= MAX_PLANS_PER_CALLER:
                 raise ProtocolError("BUSY", "too many pending confirmations")
-            plan = _Plan(secrets.token_hex(16), 1, args["kind"], params, summary[:MAX_SUMMARY],
+            plan = _Plan(secrets.token_hex(16), 1, args["kind"], params, summary,
                          caller.key, now + PLAN_TTL_SECONDS)
             self._plans[plan.plan_id] = plan
         # The requester learns only the id; what gets approved is what the
@@ -318,7 +320,7 @@ class ServiceCore:
         if args["version"] != plan.version:
             raise ProtocolError("STALE_PLAN", "the confirmation changed; show it again")
         current = self.backend.describe_plan(plan.kind, plan.params)
-        if current is None or current[:MAX_SUMMARY] != plan.summary:
+        if current is None or current != plan.summary:
             raise ProtocolError("STALE_PLAN", "the target changed; show it again")
         with self._lock:
             # Single use: removed before acting, so a replayed approval finds nothing.
