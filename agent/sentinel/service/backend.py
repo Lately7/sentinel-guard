@@ -204,6 +204,7 @@ class ProductBackend:
         self._observed = threading.BoundedSemaphore(MAX_OBSERVED)
         self._later: list[tuple[float, str, str, int]] = []
         self._worker_down_skipped = 0
+        self._worker_down_owed = False
         self._stop = threading.Event()
         self._maintenance: threading.Thread | None = None
         self.rescans = RescanQueue(DbDownloadStore(db))
@@ -238,6 +239,11 @@ class ProductBackend:
         if closed:
             self._asked_lane.stop()
             self._observed_lane.stop()
+            for lane in (self._asked_lane, self._observed_lane):
+                with lane._lock:
+                    running = [entry[0] for entry in lane.running.values()]
+                for job in running:
+                    job.cancel.cancel()
             if self.scanner.isolation is not None:
                 self.scanner.isolation.close()
         return closed
@@ -265,6 +271,13 @@ class ProductBackend:
             try:
                 self._asked_lane.sweep()
                 self._observed_lane.sweep()
+                if (self.observers is not None and self.scanner.isolation is not None
+                        and not self.scanner.isolation.failure()):
+                    with self._lock:
+                        owed = self._worker_down_owed
+                        self._worker_down_owed = False
+                    if owed:
+                        self.observers.owe()
                 self._retry_due()
             except Exception:
                 log.exception("watch failed")
@@ -385,6 +398,7 @@ class ProductBackend:
         if self.scanner.isolation is not None and self.scanner.isolation.failure():
             with self._lock:
                 self._worker_down_skipped += 1
+                self._worker_down_owed = True
             return
         verdict = job.result.get("verdict") or {}
         reasons = set((verdict.get("scan_result") or {}).get("reason_codes") or ())

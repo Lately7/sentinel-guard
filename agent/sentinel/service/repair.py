@@ -13,9 +13,10 @@ import ctypes
 import logging
 import ntpath
 import os
+import subprocess
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from ctypes import wintypes
 from dataclasses import dataclass
 from typing import Any
@@ -32,6 +33,8 @@ WAIT_OBJECT_0 = 0
 STOP_WAIT_MS = 5000
 RELEASE_SECONDS = 5.0  # the file stays locked for a moment after its process ends
 FIRST_USER_PID = 8
+ERROR_ACCESS_DENIED = 5
+ERROR_INVALID_PARAMETER = 87
 
 
 def shown(text: str) -> str:
@@ -83,6 +86,8 @@ class Repair:
     sha256: str
     processes: tuple[Process, ...]
     autostart: tuple[RunValue, ...]
+    tasks: tuple[str, ...] = ()
+    wmi_consumers: tuple[str, ...] = ()
 
 
 def _same_file(a: str, b: str) -> bool:
@@ -151,12 +156,26 @@ def find_autostart(path: str, reg: Any = None) -> tuple[RunValue, ...]:
     return tuple(found.values())
 
 
+def _left_alone(source: Callable[[], Iterable[scope.SourceEntry]], path: str) -> tuple[str, ...]:
+    # What a repair will not remove only decides what the prompt mentions, so a
+    # listing that fails must not cost the repair itself.
+    try:
+        return tuple(entry.entry_id for entry in source() if entry.path and _same_file(entry.path, path))
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        log.warning("could not list what a repair leaves in place: %s", e)
+        return ()
+
+
 def plan(path: str, sha256: str, *, snapshot: Callable[[], Any] = windows_snapshot,
-         resolve: Callable[[ProcessKey], tuple[str, tuple[int, int]]] = windows_resolve, reg: Any = None) -> Repair:
+         resolve: Callable[[ProcessKey], tuple[str, tuple[int, int]]] = windows_resolve, reg: Any = None,
+         tasks: Callable[[], Iterable[scope.SourceEntry]] | None = None,
+         wmi: Callable[[], Iterable[scope.SourceEntry]] | None = None) -> Repair:
     if winfile.is_protected(path):
         raise RepairError("PROTECTED_PATH", path)
+    tasks = tasks or (scope.scheduled_tasks if reg is None else lambda: ())
+    wmi = wmi or (scope.wmi_consumers if reg is None else lambda: ())
     return Repair(uuid.uuid4().hex, path, sha256, find_processes(path, snapshot=snapshot, resolve=resolve),
-                  find_autostart(path, reg))
+                  find_autostart(path, reg), _left_alone(tasks, path), _left_alone(wmi, path))
 
 
 def describe(repair: Repair) -> str:
@@ -165,8 +184,18 @@ def describe(repair: Repair) -> str:
         lines.append(f"Dừng {len(repair.processes)} chương trình đang chạy từ tệp này (không hoàn tác được).")
     lines.append("Cách ly tệp.")
     if repair.autostart:
-        names = ", ".join(shown(v.name) for v in repair.autostart[:4])
-        lines.append(f"Gỡ tự khởi động: {names}. Mục này sẽ quay lại nếu bạn khôi phục tệp.")
+        if repair.tasks or repair.wmi_consumers:
+            more = f" và {len(repair.autostart) - 1} mục khác" if len(repair.autostart) > 1 else ""
+            lines.append(f"Gỡ Run: {shown(repair.autostart[0].name)[:30]}{more}; khôi phục sẽ hoàn tác.")
+        else:
+            names = ", ".join(shown(v.name) for v in repair.autostart[:4])
+            lines.append(f"Gỡ tự khởi động: {names}. Mục này sẽ quay lại nếu bạn khôi phục tệp.")
+    if repair.tasks:
+        more = f" và {len(repair.tasks) - 1} mục khác" if len(repair.tasks) > 1 else ""
+        lines.append(f"Tác vụ tìm thấy, để nguyên: {shown(repair.tasks[0])[:30]}{more}.")
+    if repair.wmi_consumers:
+        more = f" và {len(repair.wmi_consumers) - 1} mục khác" if len(repair.wmi_consumers) > 1 else ""
+        lines.append(f"WMI tìm thấy, để nguyên: {shown(repair.wmi_consumers[0])[:30]}{more}.")
     return " ".join(lines)
 
 
@@ -188,7 +217,12 @@ def stop_process(process: Process) -> bool:
         raise RepairError("REFUSED_PROCESS", str(process.pid))
     handle = _k32.OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, False, process.pid)
     if not handle:
-        return False
+        error = ctypes.get_last_error()
+        if error == ERROR_INVALID_PARAMETER:
+            return False
+        if error == ERROR_ACCESS_DENIED:
+            raise RepairError("REFUSED_PROCESS", str(process.pid))
+        raise RepairError("STOP_FAILED", str(process.pid))
     try:
         created, exited, kernel_time, user_time = (wintypes.FILETIME() for _ in range(4))
         if not _k32.GetProcessTimes(handle, ctypes.byref(created), ctypes.byref(exited),
@@ -213,10 +247,18 @@ def _root(reg: Any, value: RunValue) -> tuple[Any, str]:
     return reg.HKEY_USERS, f"{value.hive}\\{value.key}"
 
 
+class _RunKeyUnavailable(OSError):
+    pass
+
+
 def remove_value(value: RunValue, reg: Any) -> bool:
     """Only the value that was shown: anything else under that name is not ours to delete."""
     root, key = _root(reg, value)
-    with reg.OpenKey(root, key, 0, reg.KEY_READ | reg.KEY_SET_VALUE | value.view) as opened:
+    try:
+        opened_key = reg.OpenKey(root, key, 0, reg.KEY_READ | reg.KEY_SET_VALUE | value.view)
+    except FileNotFoundError as e:
+        raise _RunKeyUnavailable from e
+    with opened_key as opened:
         data, _ = reg.QueryValueEx(opened, value.name)
         if str(data) != value.data:
             return False
@@ -252,6 +294,8 @@ def execute(db: Database, repair: Repair, verdict: dict[str, Any], *, reg: Any =
     except quarantine.QuarantineError as e:
         raise RepairError(e.code, repair.path) from e
     removed = left = 0
+    left_names = [f"Để nguyên tác vụ: {shown(name)}" for name in repair.tasks]
+    left_names.extend(f"Để nguyên bộ tiếp nhận WMI: {shown(name)}" for name in repair.wmi_consumers)
     for value in repair.autostart:
         try:
             if remove_value(value, reg):
@@ -259,12 +303,15 @@ def execute(db: Database, repair: Repair, verdict: dict[str, Any], *, reg: Any =
                 removed += 1
             else:
                 left += 1
+                left_names.append(f"Chưa gỡ giá trị Run: {shown(value.name)}")
         except FileNotFoundError:
             pass  # HKCU is one key in both views, so it was seen twice and is gone now
         except OSError:
             log.warning("could not remove autostart value %s", value.name)
             left += 1
-    return {"quarantine_id": qid, "stopped": stopped, "autostart_removed": removed, "autostart_left": left}
+            left_names.append(f"Chưa gỡ giá trị Run: {shown(value.name)}")
+    return {"quarantine_id": qid, "stopped": stopped, "autostart_removed": removed, "autostart_left": left,
+            "left_in_place": left_names}
 
 
 def undo(db: Database, quarantine_id: str, *, reg: Any = None) -> int:
