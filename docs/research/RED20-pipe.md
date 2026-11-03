@@ -1,0 +1,25 @@
+# RED20 — named pipe server and caller identity
+
+## HIGH — A user can reserve the fixed pipe name before service startup
+
+- **Attacker model:** A medium-integrity local process, running before the service starts or restarts.
+- **Steps:** Create an instance of `\\.\pipe\SentinelGuard\v1` and keep its server handle open. Start Sentinel Guard. The service's first `CreateNamedPipeW` call uses `FILE_FLAG_FIRST_PIPE_INSTANCE` and fails because the name already exists. Its startup aborts. The client-side owner check prevents the squatter from answering as the service, but it cannot start protection.
+- **Exact lines:** Fixed name and first-instance flag: `agent/sentinel/service/winpipe.py:26,356-372`; constructor creates the first instance immediately and propagates the failure: `winpipe.py:358-362,370-371`; service startup constructs the server without recovery: `agent/sentinel/service/entry.py:30-34`. Client checks the pipe owner before sending: `agent/sentinel/service/client.py:46-57`.
+- **Proposed fix:** Establish an endpoint that an ordinary user cannot reserve before startup, such as a fresh unpredictable per-start pipe name published through a SYSTEM-controlled discovery object. Authenticate that endpoint before sending requests. Keep the first-instance check; accepting an instance alongside the squatter would route some clients to it.
+- **Proof:** `test_pipe_name_squatter_cannot_prevent_service_start` uses a unique test pipe and holds the first instance open. The second `PipeServer` constructor raises today. The service outage follows from `ProductService.start()` propagating that constructor error; this latter effect is inferred from the cited call path. The test never touches the installed service.
+
+## MEDIUM — Idle clients exhaust all request slots indefinitely
+
+- **Attacker model:** A medium-integrity local process. No valid request, identity, or elevated token is needed.
+- **Steps:** Open `MAX_CONNECTIONS` pipe handles and send no bytes, or send a frame header without its full body. Each accepted connection takes a semaphore slot and starts a daemon thread. That thread blocks in synchronous `ReadFile` while reading the first frame. The server continues accepting new clients but immediately disconnects them because all slots are held. A valid scan request, URL check, or status request then fails. The same user can also keep connections open after sending a valid frame; request rate limiting does not release their slots.
+- **Exact lines:** Interactive users are granted pipe data access and the default limit is 32: `agent/sentinel/service/winpipe.py:30-34`. The accept loop takes the slot and disconnects excess clients: `winpipe.py:375-391`. The thread reads before identifying the caller and releases its slot only on exit: `winpipe.py:393-422`. `PipeStream.read()` calls blocking `ReadFile`: `winpipe.py:130-139`; framing waits for every byte of the header and body: `agent/sentinel/service/protocol.py:45-71`. Authorization and rate limiting happen only after the complete frame reaches `ServiceCore.handle()`: `agent/sentinel/service/core.py:113-123`.
+- **Proposed fix:** Bound the unauthenticated frame read and total connection lifetime with cancellable I/O or a bounded asynchronous reader. Reclaim idle slots and preserve capacity for new clients. Apply limits to authenticated connections too, because a caller can otherwise keep slots alive with sparse requests.
+- **Proof:** `test_idle_clients_cannot_exhaust_all_pipe_request_slots` starts a same-user in-process server with two slots, opens two idle clients, then sends one legitimate `hello`. The new request is refused today. The production impact at 32 slots is inferred from the same loop and limit; no installed service is contacted.
+
+## Other probes
+
+- **Pipe ACL and integrity:** The DACL grants interactive users `0x0012008B`, which excludes `FILE_CREATE_PIPE_INSTANCE` (`0x4`), and rejects remote pipe clients (`winpipe.py:30-33,365-369`). The SDDL contains no explicit mandatory integrity SACL. I did not infer an effective low-integrity access result from that absence; it needs a Windows token-level check.
+- **Caller identity and sessions:** `ImpersonateNamedPipeClient` and `OpenThreadToken` supply the caller, then `RevertToSelf` runs before dispatch (`winpipe.py:327-342,406-414`). SID, integrity, elevation, and session come from token information (`winpipe.py:182-201`), not request fields. Elevated plan approval compares both SID and session with the requester (`core.py:294-303`). I found no request-controlled identity or concrete route for a medium-integrity process to claim another session.
+- **Framing and client trust:** Oversized frames are rejected before their bodies are read (`protocol.py:59-65`); `ServiceClient` checks the server pipe owner before sending a request (`client.py:46-57`). These checks do not limit the idle-client availability attack above.
+
+Tests were not run in this sandbox, as required by the round brief. Each test was re-read against the cited code.

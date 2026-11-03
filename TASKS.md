@@ -74,8 +74,11 @@ document/image extension.
 | DOCS2 | records of SVC11–SVC16 and the owner ETW decision | merged `50ee284` |
 | SVC17 | ETW for process events only, after the first real session | merged `f9838f1`; corrected in review; real session unverified |
 | (Claude) | TOKEN_USER header found in real bytes; check on the child start | `8b6f043`; REVIEWS.md ninth round |
-| SVC18 | phased ETW check in `etw.py` | in progress; REVIEWS.md tenth round |
-| SVC18V | `verify` waits for the ETW check | in progress; REVIEWS.md tenth round |
-| DOCS3 | fourth install and ETW investigation record | submitted for Claude review |
+| SVC18 | phased ETW check in `etw.py` | merged `07bacfc`; corrected in review; real session unverified |
+| SVC18V | `verify` waits for the ETW check | merged `540d56a` |
+| DOCS3 | fourth install and ETW investigation record | merged `df2b22b`; corrected in review |
+| SVC18B | nine findings of the adversarial review of SVC18 | merged `099075b`; corrected in review |
+| RS1, VER2, EDGE2, EDGE3, R17, FLK1 | restore mark, verify token, edge cases, file source research, flake | in progress |
+| RED1–RED10 | red team rounds, three at a time | in progress |
 
 Outcomes are recorded in `REVIEWS.md`.
