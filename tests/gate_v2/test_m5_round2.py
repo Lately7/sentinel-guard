@@ -130,23 +130,76 @@ def test_k15_wintrust_with_open_handle() -> None:
 def test_k3_k4_named_hit_survives_change_and_deadline(tmp_path: Path) -> None:
     path = tmp_path / "ordinary.bin"
     path.write_bytes(b"first")
-    def changed(*_):
+    now = [1_000_000_000]
+    entered: list[str] = []
+
+    def clock() -> int:
+        return now[0]
+
+    def changed(*_: object) -> tuple[int, str]:
+        entered.append("changed")
         moved = path.with_name("old.bin")
         path.rename(moved)
         path.write_bytes(b"second")
         return 2, "Threat : Named.One"
-    adapter = DefenderAdapter(applicability=lambda _: ("MpCmdRun.exe", "active"), runner=changed)
-    d = scan(request(path), adapters=[adapter], gate_generation="r2", auto_quarantine=True)
+    adapter = DefenderAdapter(applicability=lambda _: ("MpCmdRun.exe", "active"),
+                              runner=changed, clock=clock)
+    first = replace(request(path), deadline_monotonic_ns=now[0] + 60_000_000_000)
+    d = scan(first, adapters=[adapter], gate_generation="r2", auto_quarantine=True,
+             clock=clock)
+    assert entered == ["changed"]
     assert d.engine_results[0].status is StageStatus.CHANGED
-    assert d.engine_results[0].evidence and d.verdict is VerdictCode.UNKNOWN
+    assert [e.raw_name for e in d.engine_results[0].evidence] == ["Named.One"]
+    assert d.verdict is VerdictCode.UNKNOWN and not d.accepted_evidence_ids
     assert "UNACCEPTED_DETECTION" in d.reason_codes
     assert not d.cacheable and d.action_decision.action is not ActionCode.QUARANTINE
-    def late(*_):
-        time.sleep(0.03)
+
+    late_deadline = now[0] + 10_000_000
+
+    def late(*_: object) -> tuple[int, str]:
+        entered.append("late")
+        now[0] = late_deadline + 1
         return 2, "Threat : Named.Two"
-    adapter = DefenderAdapter(applicability=lambda _: ("MpCmdRun.exe", "active"), runner=late)
-    d = scan(request(path, seconds=0.01), adapters=[adapter], gate_generation="r2", auto_quarantine=False)
-    assert d.engine_results[0].evidence
+    adapter = DefenderAdapter(applicability=lambda _: ("MpCmdRun.exe", "active"),
+                              runner=late, clock=clock)
+    second = replace(request(path), deadline_monotonic_ns=late_deadline)
+    d = scan(second, adapters=[adapter], gate_generation="r2", auto_quarantine=False,
+             clock=clock)
+    assert entered == ["changed", "late"]
+    assert d.engine_results[0].status is StageStatus.TIMEOUT
+    assert [e.raw_name for e in d.engine_results[0].evidence] == ["Named.Two"]
+    assert d.verdict is VerdictCode.UNKNOWN and not d.accepted_evidence_ids
+    assert "UNACCEPTED_DETECTION" in d.reason_codes
+
+
+def test_k3_k4_applicability_past_deadline_skips_runner(tmp_path: Path) -> None:
+    path = tmp_path / "ordinary.bin"
+    path.write_bytes(b"ordinary")
+    now = [1_000_000_000]
+    deadline = now[0] + 10_000_000
+    entered: list[str] = []
+
+    def clock() -> int:
+        return now[0]
+
+    def slow_applicability(_: int | None) -> tuple[str, str]:
+        entered.append("applicability")
+        now[0] = deadline + 1
+        return "MpCmdRun.exe", "active"
+
+    def runner(*_: object) -> tuple[int, str]:
+        entered.append("runner")
+        return 2, "Threat : Named.Two"
+
+    adapter = DefenderAdapter(applicability=slow_applicability, runner=runner,
+                              clock=clock)
+    timed = replace(request(path), deadline_monotonic_ns=deadline)
+    d = scan(timed, adapters=[adapter], gate_generation="r2", auto_quarantine=False,
+             clock=clock)
+    assert entered == ["applicability"]
+    assert d.engine_results[0].status is StageStatus.TIMEOUT
+    assert not d.engine_results[0].evidence
+    assert d.verdict is VerdictCode.UNKNOWN and "ENGINE_TIMEOUT" in d.reason_codes
 
 
 def test_k5_k6_context_rule_and_name_policy(tmp_path: Path) -> None:
