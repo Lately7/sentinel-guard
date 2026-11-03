@@ -41,31 +41,47 @@ def write_frame(stream: BinaryIO, obj: dict[str, Any], *, limit: int = MAX_FRAME
     stream.flush()
 
 
-def _read_exact(stream: BinaryIO, n: int) -> bytes | None:
+def _read_exact(stream: BinaryIO, n: int) -> bytes:
     buf = bytearray()
     while len(buf) < n:
         chunk = stream.read(n - len(buf))
         if not chunk:
-            return None
+            break
         buf += chunk
     return bytes(buf)
+
+
+def _unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    obj: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError("duplicate JSON key")
+        obj[key] = value
+    return obj
+
+
+def _reject_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON number: {value}")
 
 
 def read_frame(stream: BinaryIO, *, limit: int = MAX_FRAME) -> dict[str, Any] | None:
     """Next frame, or None at a clean end of stream. Oversized frames are not read."""
     head = _read_exact(stream, 4)
-    if head is None:
+    if not head:
         return None
+    if len(head) != 4:
+        raise ProtocolError("BAD_FRAME", "stream ended inside a frame header")
     (n,) = struct.unpack("<I", head)
     if n > limit:
         # The connection is dropped rather than drained: a client that sends
         # oversized frames is not worth reading another megabyte from.
         raise ProtocolError("TOO_LARGE", "request frame over the limit")
     body = _read_exact(stream, n)
-    if body is None:
+    if len(body) != n:
         raise ProtocolError("BAD_FRAME", "stream ended inside a frame")
     try:
-        obj = json.loads(body.decode("utf-8"))
+        obj = json.loads(body.decode("utf-8"), object_pairs_hook=_unique_pairs,
+                         parse_constant=_reject_constant)
     except (UnicodeDecodeError, ValueError, RecursionError) as e:
         raise ProtocolError("BAD_FRAME", "frame is not UTF-8 JSON") from e
     if not isinstance(obj, dict):
@@ -133,8 +149,15 @@ def _job(args: dict[str, Any]) -> dict[str, Any]:
     return {"job_id": text(args, "job_id", max_len=64)}
 
 
-PLAN_KINDS = ("disable_protection", "trust_host", "restore_quarantine", "delete_quarantine", "add_exclusion",
-              "approve_repair")
+PLAN_FIELDS: dict[str, frozenset[str]] = {
+    "disable_protection": frozenset(),
+    "trust_host": frozenset({"host"}),
+    "restore_quarantine": frozenset({"quarantine_id"}),
+    "delete_quarantine": frozenset({"quarantine_id"}),
+    "add_exclusion": frozenset({"path", "sha256"}),
+    "approve_repair": frozenset({"repair_id"}),
+}
+PLAN_KINDS = tuple(PLAN_FIELDS)
 
 
 def _plan_request(args: dict[str, Any]) -> dict[str, Any]:
@@ -144,6 +167,8 @@ def _plan_request(args: dict[str, Any]) -> dict[str, Any]:
     params = args.get("params", {})
     if not isinstance(params, dict):
         raise ProtocolError("BAD_REQUEST", "'params' must be an object")
+    if set(params) - PLAN_FIELDS[kind]:
+        raise ProtocolError("BAD_REQUEST", "unknown plan parameter")
     if kind == "trust_host":
         params = {"host": text(params, "host", max_len=253)}
     elif kind in ("restore_quarantine", "delete_quarantine"):
@@ -202,8 +227,10 @@ class Request:
 
 
 def parse_request(frame: dict[str, Any]) -> Request:
-    if frame.get("v") != PROTOCOL_VERSION:
+    if type(frame.get("v")) is not int or frame["v"] != PROTOCOL_VERSION:
         raise ProtocolError("BAD_VERSION", "unsupported protocol version")
+    if set(frame) - {"v", "id", "op", "args"}:
+        raise ProtocolError("BAD_REQUEST", "unknown request field")
     rid = frame.get("id")
     if not isinstance(rid, int) or isinstance(rid, bool) or not 0 <= rid < 2**53:
         raise ProtocolError("BAD_REQUEST", "'id' must be a non-negative integer")
