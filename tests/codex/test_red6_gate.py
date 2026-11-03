@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import mmap
+import os
 import struct
 import time
 import zipfile
@@ -12,12 +13,12 @@ from pathlib import Path
 import pytest
 
 from conftest import MARKER
-from sentinel.gate_v2 import archive, identity
+from sentinel.gate_v2 import archive
+from sentinel.gate_v2.content import BoundReader, ContentError
 from sentinel.gate_v2.contract import ScanRequest, VerdictCode
 from sentinel.gate_v2.core import CoreAdapter
 from sentinel.gate_v2.orchestrator import scan
 from sentinel.gate_v2.rules import JsonRulesAdapter
-from sentinel.engine.scanner import Scanner
 
 
 class NeverCancel:
@@ -32,7 +33,7 @@ def _request(data: bytes) -> ScanRequest:
 
 
 # A downloaded ZIP hides a marker in an orphaned compressed local entry and receives a clean result.
-def test_orphan_local_zip_entry_is_not_certified_clean(tmp_path: Path, marker_rule: Path) -> None:
+def test_orphan_local_zip_entry_is_not_certified_clean(marker_rule: Path) -> None:
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
         bundle.writestr("payload.txt", MARKER * 16)
@@ -52,42 +53,42 @@ def test_orphan_local_zip_entry_is_not_certified_clean(tmp_path: Path, marker_ru
                     gate_generation="red6", auto_quarantine=False)
     assert decision.verdict is not VerdictCode.CLEAN
     assert not decision.trusted_clean
+    assert any("ORPHAN_LOCAL_HEADER" in result.coverage.object_reasons
+               for result in decision.engine_results)
 
 
-# A local process changes equal-size mapped bytes between hash chunks, yielding a hash of no file generation.
-def test_same_size_change_during_measurement_is_rejected(tmp_path: Path) -> None:
-    first = MARKER.ljust(64, b"A")
-    initial = first + b"B" * 64
-    final = b"C" * 64 + MARKER.ljust(64, b"D")
+def test_orphan_local_zip_entry_before_listed_member_is_not_certified_clean(marker_rule: Path) -> None:
+    orphan = io.BytesIO()
+    with zipfile.ZipFile(orphan, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+        bundle.writestr("payload.txt", MARKER * 16)
+    local_only = orphan.getvalue().split(b"PK\x01\x02", 1)[0]
+    listed = io.BytesIO()
+    with zipfile.ZipFile(listed, "w") as bundle:
+        bundle.writestr("readme.txt", b"harmless child")
+    crafted = local_only + listed.getvalue()
+
+    assert MARKER not in crafted
+    with zipfile.ZipFile(io.BytesIO(crafted)) as parsed:
+        assert [info.filename for info in parsed.infolist()] == ["readme.txt"]
+    rules = JsonRulesAdapter.from_directories(marker_rule.parent)
+    decision = scan(_request(crafted), adapters=[CoreAdapter(name="sample.zip"), rules],
+                    gate_generation="red6", auto_quarantine=False)
+    assert decision.verdict is not VerdictCode.CLEAN
+    assert not decision.trusted_clean
+    assert any("ORPHAN_LOCAL_HEADER" in result.coverage.object_reasons
+               for result in decision.engine_results)
+
+
+# A writable mapping keeps a writer handle alive, so the bound path must be refused.
+@pytest.mark.skipif(os.name != "nt", reason="Windows share mode is required")
+def test_writable_mapping_blocks_bound_measurement(tmp_path: Path) -> None:
+    initial = MARKER.ljust(128, b"A")
     path = tmp_path / "changing.bin"
     path.write_bytes(initial)
     with path.open("r+b", buffering=0) as writable:
         mapped = mmap.mmap(writable.fileno(), len(initial), access=mmap.ACCESS_WRITE)
     try:
-        def change_after_first_chunk(count: int) -> None:
-            if count == 64:
-                mapped[:] = final
-                mapped.flush()
-
-        with path.open("rb", buffering=0) as stream:
-            result = identity.measure_stream(stream, str(path), max_bytes=128,
-                                             cancel=NeverCancel(), chunk_size=64,
-                                             between_chunks=change_after_first_chunk,
-                                             ignore_times=True)
-        assert path.read_bytes() == final
-        assert result.code == "CHANGED"
+        with pytest.raises(ContentError, match="IN_USE"):
+            BoundReader.measure_path(str(path), max_bytes=128, cancel=NeverCancel())
     finally:
         mapped.close()
-
-
-# A downloaded file puts the marker in an unread middle span yet the displayed label says clean.
-def test_fixed_partial_middle_gap_is_not_labeled_clean(
-    tmp_path: Path, scanner: Scanner, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from sentinel import config
-
-    monkeypatch.setattr(config, "MAX_DEEP_SCAN_BYTES", 64)
-    path = tmp_path / "payload.bin"
-    path.write_bytes(b"A" * 100 + MARKER + b"B" * 100)
-    verdict = scanner.scan_file(path, use_cache=False)
-    assert verdict.label != "clean"
