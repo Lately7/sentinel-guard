@@ -61,6 +61,13 @@ and any `etw check:` lines. A click in the install window freezes it (title "Sel
 resumes it. Latest tests: pytest 1048 passed, 10 skipped, 1 xfailed twice in a row; extension
 40 passed. See `REVIEWS.md` for the eighth review round.
 
+**Update 2026-11-03, after the third install.** ETW was still off. Real bytes from the log showed
+the SID behind a 16-byte TOKEN_USER header, so no process event had ever parsed; `8b6f043` fixes
+the parser and checks on the child's Start alone. Canned payloads built from documentation hid
+this through two reviews: test new ETW layouts against captured bytes. The next step is again the
+owner reinstalling. Latest tests: pytest 1050 passed, 10 skipped, 1 xfailed. See `REVIEWS.md`
+ninth round.
+
 ## 1. Where things are
 
 * Repo: `C:\Users\lately07\Desktop\Folder Group\sentinel-guard`, branch

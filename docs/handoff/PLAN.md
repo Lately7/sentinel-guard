@@ -19,6 +19,10 @@ sự kiện DCStart (danh sách tiến trình đang chạy), không có Start n�
 và bỏ hẳn sự kiện tệp qua ETW. Hệ quả: chấm điểm ransomware (shadow) không có nguồn sự kiện tệp, 30 ngày quan
 sát chưa bắt đầu, và trạng thái ghi `waiting_for_file_events` thay vì đếm ngày trống.
 
+Lần cài thứ ba (9:57, có SVC17) vẫn 0 FAIL, nhưng ETW vẫn tắt. Byte thật trong log cho thấy trường SID có
+16 byte header TOKEN_USER đứng trước, nên trước giờ chưa sự kiện tiến trình nào được đọc đúng; `8b6f043` sửa bộ
+đọc và chỉ còn kiểm bằng sự kiện Start của tiến trình con. Xem `REVIEWS.md` vòng thứ chín.
+
 Bước tiếp theo: chính chủ dự án tự mở lại `tools\install_service.cmd` để kiểm ETW cho tiến trình; Claude
 không được mở hộp UAC. Dòng `etw` của verify cho kết quả và số sự kiện mất; nếu ETW vẫn tắt, các dòng
 `etw check:` trong log có 160 byte đầu của sự kiện DCStart của chính dịch vụ. Đừng bấm vào cửa sổ cài: cú

@@ -228,5 +228,5 @@ cần xử lý mới sáng lên (333 ms); tắt hết khi Windows tắt hiệu �
 
 ## Kiểm thử gần nhất
 
-pytest **1048 passed, 10 skipped, 1 xfailed** (hai lần chạy liền, sau SVC17) · extension **40 passed**. Helium e2e không chạy lại; trên máy đã cài dịch vụ, bộ e2e dừng nếu không có `--with-service`.
+pytest **1050 passed, 10 skipped, 1 xfailed** (sau bản sửa `8b6f043`; 1048 hai lần liền trước đó) · extension **40 passed**. Helium e2e không chạy lại; trên máy đã cài dịch vụ, bộ e2e dừng nếu không có `--with-service`.
 Baseline tại C2a: `docs/baseline.md`.

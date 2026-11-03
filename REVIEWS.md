@@ -697,3 +697,29 @@ documentation; if the check fails, the next install's log holds the service's ow
 scoring has no file event source now: its report says `waiting_for_file_events` and counts no days.
 Tests after the merge: pytest 1048 passed, 10 skipped, 1 xfailed twice in a row (worktree, then `main`);
 extension 40 passed. Helium e2e was not rerun.
+
+### Ninth round: what the third install showed
+
+The owner opened the install again at 09:57 with SVC17: 0 FAIL, 14 PASS, 3 SKIP, the worker still scanning.
+ETW stayed off with `schema_process_missing`, now SVC17's rundown gate: 43 DCStart events arrived and none was
+the service's own. At the restart check, status showed 3 lost during the check and 1,390 in all.
+
+The second install's restart had logged, under the old check, the first 160 bytes of the check child's Start.
+Decoded, they hold pid 14868, parent 31764 (the service), the SYSTEM SID, `python.exe` and a command line under
+`C:\Program Files\SentinelGuard`. The UserSID field opens with a 16-byte TOKEN_USER header, a pointer and
+attributes, before the SID itself. The parser read the SID at offset 36 and dropped every process event, so
+the Start arrived and the check failed on the layout. The documented MOF does not show that header. The canned
+payloads in the tests were built from the same documentation, so neither Codex's tests nor Claude's review of
+SVC11 and SVC17 could catch it; only real bytes did.
+
+The rundown is written when the provider is enabled, before ProcessTrace connects. Three sessions received 61,
+340 and 43 DCStart events from a machine running about 340 processes. That the rest is lost because no
+consumer was connected yet is an inference, not measured. SVC17's requirement of the service's own DCStart
+could therefore fail even with Start events working.
+
+| Review | What it caught | Disposition |
+|---|---|---|
+| Third install (`8b6f043`) | The SID sits after a 16-byte TOKEN_USER header, so no process event ever parsed. The rundown gate depended on events that are mostly lost. | The parser skips the header; a test parses the captured bytes. The check passes on a Start of its own child with pid, parent and image read back. A Start delivered but unreadable reports `schema_process_mismatch`; none reports `no_start_events`. On failure the log holds the service's own DCStart and its child's Start with the event version, and no other process's command line is kept. The captured-bytes test and two check tests fail on the previous code. |
+
+Tests: pytest 1050 passed, 10 skipped, 1 xfailed; extension tests not affected (no extension file changed).
+Live ETW is still unverified; the next install shows whether the child's Start parses on the real session.

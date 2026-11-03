@@ -73,5 +73,6 @@ document/image extension.
 | R8 | local clean after service `unknown` claim | not accepted; local scan ran real engines; REVIEWS.md |
 | DOCS2 | records of SVC11–SVC16 and the owner ETW decision | merged `50ee284` |
 | SVC17 | ETW for process events only, after the first real session | merged `f9838f1`; corrected in review; real session unverified |
+| (Claude) | TOKEN_USER header found in real bytes; check on the child start | `8b6f043`; REVIEWS.md ninth round |
 
 Outcomes are recorded in `REVIEWS.md`.
