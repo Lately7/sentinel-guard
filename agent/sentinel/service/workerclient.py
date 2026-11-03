@@ -100,7 +100,7 @@ class WorkerSession:
         self._lock = threading.Lock()
         self._proc: worker_mod.Worker | None = None
         self._starting_proc: worker_mod.Worker | None = None
-        self._replies: queue.Queue[dict[str, Any] | None] = queue.Queue()
+        self._replies: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize=3)
         self._next_id = 0
         self.starts = 0
         self.engines: list[str] = []
@@ -128,7 +128,7 @@ class WorkerSession:
                                            cwd=str(version), service_sid=sid)
         self.starts += 1
         self._starting_proc = self._proc
-        self._replies = queue.Queue()
+        self._replies = queue.Queue(maxsize=3)
         threading.Thread(target=self._pump, args=(self._proc, self._replies), daemon=True,
                          name="worker-reader").start()
         started_by = min(deadline_ns, time.monotonic_ns() + int(START_SECONDS * 1e9))
@@ -140,6 +140,10 @@ class WorkerSession:
         try:
             while True:
                 frame = read_frame(proc.stdout)
+                # Calls are serial, so excess replies must not consume service memory.
+                if frame is not None and replies.qsize() >= 2:
+                    replies.put(None)
+                    return
                 replies.put(frame)
                 if frame is None:
                     return
@@ -166,12 +170,35 @@ class WorkerSession:
     def _send(self, op: str, args: dict[str, Any], deadline_ns: int,
               cancel: CancellationToken | None, *, limit: int = MAX_FRAME) -> dict[str, Any]:
         assert self._proc is not None
+        proc = self._proc
         self._next_id += 1
         rid = self._next_id
-        try:
-            write_frame(self._proc.stdin, {"id": rid, "op": op, "args": args}, limit=limit)
-        except (OSError, ProtocolError) as e:
-            raise self._died() from e
+        done = threading.Event()
+        errors: list[BaseException] = []
+
+        def write() -> None:
+            try:
+                write_frame(proc.stdin, {"id": rid, "op": op, "args": args}, limit=limit)
+            except BaseException as e:
+                errors.append(e)
+            finally:
+                done.set()
+
+        # A worker that stops reading its pipe must not hold the session lock forever.
+        threading.Thread(target=write, daemon=True, name="worker-writer").start()
+        while not done.is_set():
+            if cancel is not None and cancel.cancelled():
+                self._kill()
+                raise WorkerFailure(StageStatus.CANCELLED, "CANCELLED")
+            remaining = (deadline_ns - time.monotonic_ns()) / 1e9
+            if remaining <= 0:
+                self._kill()
+                raise WorkerFailure(StageStatus.TIMEOUT, "WORKER_TIMEOUT")
+            done.wait(min(POLL_SECONDS, remaining))
+        if errors:
+            if isinstance(errors[0], (OSError, ProtocolError)):
+                raise self._died() from errors[0]
+            raise errors[0]
         while True:
             if cancel is not None and cancel.cancelled():
                 self._kill()  # the job kills the worker mid-parse

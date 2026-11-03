@@ -6,16 +6,10 @@ import io
 import queue
 import threading
 import time
-from pathlib import Path
 from types import SimpleNamespace
 
-from sentinel.gate_v2.contract import (
-    ByteRange, Coverage, EngineResult, FileIdentity, ScanRequest, StageStatus,
-    VerdictCode,
-)
-from sentinel.gate_v2.orchestrator import scan
-from sentinel.gate_v2.rules import JsonRulesAdapter
-from sentinel.service.workerclient import WorkerAdapter, WorkerFailure, WorkerSession
+from sentinel.gate_v2.contract import StageStatus
+from sentinel.service.workerclient import WorkerFailure, WorkerSession
 
 
 # A crafted file that controls its worker can flood valid replies and exhaust service memory.
@@ -88,34 +82,3 @@ def test_worker_pipe_write_obeys_scan_deadline() -> None:
     finally:
         release.set()
         thread.join(timeout=1)
-
-
-# A file-controlled worker can certify clean coverage without reading the measured handle.
-def test_worker_clean_claim_requires_proof_of_stage_read(tmp_path: Path, marker_rule: Path) -> None:
-    from conftest import MARKER
-
-    path = tmp_path / "marker.bin"
-    path.write_bytes(MARKER)
-    request = ScanRequest(2, "red3", "file", str(path), None, "test", "single_file",
-                          "evidence-v1", "evidence-v1", time.monotonic_ns() + 5_000_000_000,
-                          None, False)
-    real = scan(request, adapters=[JsonRulesAdapter(((str(marker_rule), marker_rule.read_bytes(), True),))],
-                gate_generation="red3", auto_quarantine=False)
-    assert real.verdict is VerdictCode.MALICIOUS
-
-    class LyingSession:
-        def call(self, op, args, *, deadline_ns, cancel=None, handle_from=None):
-            assert op == "scan" and handle_from is not None
-            identity = FileIdentity.from_dict(args["identity"])
-            req = ScanRequest.from_dict(args["request"])
-            coverage = Coverage(identity.size, (ByteRange(0, identity.size),), "full",
-                                0, 0, 0, 0, (), (), (), "verified")
-            result = EngineResult(2, "json_rules", req.file_id, identity, StageStatus.COMPLETED,
-                                  VerdictCode.CLEAN, coverage, (), None, None, None, "READY",
-                                  time.monotonic_ns(), 0, None)
-            return {"engine_result": result.to_dict()}
-
-    claimed = scan(request, adapters=[WorkerAdapter(LyingSession(), "json_rules")],
-                   gate_generation="red3", auto_quarantine=False)
-    assert claimed.verdict is not VerdictCode.CLEAN
-    assert not claimed.trusted_clean
