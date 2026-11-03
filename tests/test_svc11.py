@@ -11,12 +11,14 @@ import pytest
 from sentinel.service import backend, etw, procwatch, verify
 
 
-def process_payload(pid=123, version=4, name=b"python.exe", command="python -I", subauth=(32, 544)):
-    # Canned Process_TypeGroup1 x64 V3/V4 bytes built from the documented layout, not captured.
-    fixed = struct.pack("<QIIIIQ", 0, pid, 0, 0, 0, 0)
+def process_payload(pid=123, version=4, name=b"python.exe", command="python -I", subauth=(32, 544),
+                    parent=0):
+    # Canned Process_TypeGroup1 x64 V3/V4 bytes in the layout a real event showed, with the
+    # 16-byte TOKEN_USER header before the SID; see test_svc17 for the captured bytes.
+    fixed = struct.pack("<QIIIIQ", 0, pid, parent, 0, 0, 0)
     if version == 4:
         fixed += struct.pack("<I", 0)
-    sid = bytes((1, len(subauth))) + b"\0\0\0\0\0\5"
+    sid = struct.pack("<QQ", 0xFFFFB584FFB0A800, 0) + bytes((1, len(subauth))) + b"\0\0\0\0\0\5"
     sid += b"".join(struct.pack("<I", value) for value in subauth)
     return fixed + sid + name + b"\0" + command.encode("utf-16-le") + b"\0\0"
 
@@ -128,7 +130,7 @@ def test_verify_reports_optional_etw_as_skip_or_pass():
     assert verify._etw({"observation": {"etw": "schema_file_missing"}}) == (None, "ETW tắt: schema_file_missing, mất 0")
 
 
-def test_live_check_requires_own_rundown_and_child_start(monkeypatch):
+def test_live_check_requires_the_child_start_with_its_parent(monkeypatch):
     class Child:
         pid = 123
 
@@ -138,21 +140,23 @@ def test_live_check_requires_own_rundown_and_child_start(monkeypatch):
         def __exit__(self, *args):
             return None
 
+    def popen_for(observer, parent):
+        def popen(*args, **kwargs):
+            observer._parsed(etw.ParsedEvent(
+                "process_start", 123, 0, image_name=etw.ntpath.basename(sys.executable),
+                parent_pid=parent))
+            return Child()
+        return popen
+
     observer = etw.EtwObserver(lambda path: None)
     observer.state = "checking"
-    def popen(*args, **kwargs):
-        observer._parsed(etw.ParsedEvent(
-            "process_start", 123, 0, image_name=etw.ntpath.basename(sys.executable)))
-        return Child()
-    monkeypatch.setattr(etw.subprocess, "Popen", popen)
-    observer._parsed(etw.ParsedEvent(
-        "process_rundown", os.getpid(), 0,
-        image_name=etw.ntpath.basename(sys.executable)))
+    monkeypatch.setattr(etw.subprocess, "Popen", popen_for(observer, os.getpid()))
     assert observer._check_schema(None) == ""
-    missing = etw.EtwObserver(lambda path: None)
-    missing.state = "checking"
+    stranger = etw.EtwObserver(lambda path: None)
+    stranger.state = "checking"
+    monkeypatch.setattr(etw.subprocess, "Popen", popen_for(stranger, os.getpid() + 1))
     monkeypatch.setattr(etw.time, "monotonic", iter((0.0, 6.0)).__next__)
-    assert missing._check_schema(None) == "schema_process_missing"
+    assert stranger._check_schema(None) == "no_start_events"
 
 
 def test_orphan_is_recovered_before_new_session(monkeypatch):

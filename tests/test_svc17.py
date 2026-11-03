@@ -1,4 +1,8 @@
-"""Regression tests for the process-only ETW session; payloads are synthetic."""
+"""Regression tests for the process-only ETW session.
+
+The canned payloads follow the layout of the one captured event below: a Start of the
+service's own check child, logged by the owner's install on 2026-11-03.
+"""
 
 import ctypes
 import logging
@@ -9,20 +13,52 @@ import uuid
 
 from sentinel.service import backend, etw, verify
 
+# The first 160 bytes of a real Process Start (opcode 1): pid 14868, parent 31764 (the
+# service), SYSTEM, python.exe, and the start of its command line. Captured, not built.
+CAPTURED_START = bytes.fromhex(
+    "808024c388e7ffff143a0000147c0000000000000301000000a05bcf070000000000000000a8b0ff84b5ffff00000000"
+    "00000000010100000000000512000000707974686f6e2e65786500220043003a005c00500072006f006700720061006d"
+    "002000460069006c00650073005c00530065006e00740069006e0065006c00470075006100720064005c007600650072"
+    "00730069006f006e0073005c0030002e")
 
-def process_payload(pid: int, *, version: int = 4, name: bytes = b"python.exe") -> bytes:
-    # Process_TypeGroup1 x64 V3/V4 layout from Microsoft's MOF, not captured bytes.
-    fixed = struct.pack("<QIIIIQ", 0, pid, 0, 0, 0, 0)
+
+def process_payload(pid: int, *, version: int = 4, name: bytes = b"python.exe", parent: int = 0) -> bytes:
+    fixed = struct.pack("<QIIIIQ", 0, pid, parent, 0, 0, 0)
     if version == 4:
         fixed += struct.pack("<I", 0)
+    token_user = struct.pack("<QQ", 0xFFFFB584FFB0A800, 0)
     sid = bytes((1, 1)) + b"\0\0\0\0\0\5" + struct.pack("<I", 18)
-    return fixed + sid + name + b"\0" + "python -I".encode("utf-16-le") + b"\0\0"
+    return fixed + token_user + sid + name + b"\0" + "python -I".encode("utf-16-le") + b"\0\0"
 
 
-def raw_process(opcode: int, pid: int, *, version: int = 4,
-                provider: uuid.UUID = etw.PROCESS_CLASS) -> etw.RawEvent:
+def raw_process(opcode: int, pid: int, *, version: int = 4, parent: int = 0,
+                provider: uuid.UUID = etw.PROCESS_CLASS, payload: bytes | None = None) -> etw.RawEvent:
     return etw.RawEvent(provider, opcode, version, 999, 1, 42,
-                        process_payload(pid, version=version))
+                        payload if payload is not None else process_payload(pid, version=version, parent=parent))
+
+
+class Child:
+    pid = 12345
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+
+def fast_clock(monkeypatch) -> None:
+    tick = iter(range(100))
+    monkeypatch.setattr(etw.time, "monotonic", lambda: float(next(tick)))
+    monkeypatch.setattr(etw.time, "sleep", lambda _seconds: None)
+
+
+def test_the_captured_start_parses_with_its_pid_parent_and_image() -> None:
+    event = etw.parse_event(raw_process(1, 0, payload=CAPTURED_START))
+    assert event is not None
+    assert (event.kind, event.pid, event.parent_pid, event.image_name) == (
+        "process_start", 14868, 31764, "python.exe")
+    assert event.command_line.startswith('"C:\\Program Files\\SentinelGuard\\versions\\0')
 
 
 def test_rundown_parses_as_process_rundown_without_becoming_live_start() -> None:
@@ -33,63 +69,57 @@ def test_rundown_parses_as_process_rundown_without_becoming_live_start() -> None
             "process_rundown", os.getpid(), "python.exe")
 
 
-def test_check_requires_own_rundown_then_child_start(monkeypatch) -> None:
-    class Child:
-        pid = 12345
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return None
-
+def test_the_check_passes_on_its_child_start_alone(monkeypatch) -> None:
     spawned = []
-    emit_start = [True]
+    observer = etw.EtwObserver(lambda _path: None)
+    observer.state = "checking"
 
     def popen(argv, **kwargs):
         spawned.append((argv, kwargs))
-        if emit_start[0]:
-            observer._parsed(etw.parse_event(raw_process(1, Child.pid)))
+        observer._parsed(etw.parse_event(raw_process(1, Child.pid, parent=os.getpid())))
         return Child()
 
     monkeypatch.setattr(etw.subprocess, "Popen", popen)
-    observer = etw.EtwObserver(lambda _path: None)
-    observer.state = "checking"
-    observer._parsed(etw.parse_event(raw_process(3, os.getpid())))
+    fast_clock(monkeypatch)
     assert observer._check_schema(None) == ""
     assert len(spawned) == 1
     assert spawned[0][0][0] == sys.executable
     assert spawned[0][1]["shell"] is False
 
-    observer._checking.clear()
-    emit_start[0] = False
-    tick = iter(range(100))
-    monkeypatch.setattr(etw.time, "monotonic", lambda: float(next(tick)))
-    monkeypatch.setattr(etw.time, "sleep", lambda _seconds: None)
-    assert observer._check_schema(None) == "no_start_events"
+
+def test_no_start_and_an_unreadable_start_are_told_apart(monkeypatch) -> None:
+    quiet = etw.EtwObserver(lambda _path: None)
+    quiet.state = "checking"
+    monkeypatch.setattr(etw.subprocess, "Popen", lambda *_args, **_kwargs: Child())
+    fast_clock(monkeypatch)
+    assert quiet._check_schema(None) == "no_start_events"
+
+    garbled = etw.EtwObserver(lambda _path: None)
+    garbled.state = "checking"
+    unreadable = raw_process(1, Child.pid, parent=os.getpid(),
+                             payload=process_payload(Child.pid, parent=os.getpid())[:40])
+
+    def popen(*_args, **_kwargs):
+        garbled._check_raw_event(unreadable, etw.parse_event(unreadable))
+        return Child()
+
+    monkeypatch.setattr(etw.subprocess, "Popen", popen)
+    fast_clock(monkeypatch)
+    assert garbled._check_schema(None) == "schema_process_mismatch"
 
 
-def test_own_rundown_survives_a_rundown_longer_than_the_check_buffer(monkeypatch) -> None:
-    # A desktop runs 300+ processes; the own entry arrives early in the burst.
-    class Child:
-        pid = 12345
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return None
-
+def test_a_rundown_of_hundreds_does_not_push_out_the_child_start(monkeypatch) -> None:
     observer = etw.EtwObserver(lambda _path: None)
     observer.state = "checking"
-    monkeypatch.setattr(etw.subprocess, "Popen", lambda *_args, **_kwargs: (
-        observer._parsed(etw.parse_event(raw_process(1, Child.pid))), Child())[1])
-    observer._parsed(etw.parse_event(raw_process(3, os.getpid())))
-    for pid in range(20_000, 20_400):
-        observer._parsed(etw.parse_event(raw_process(3, pid)))
-    tick = iter(range(100))
-    monkeypatch.setattr(etw.time, "monotonic", lambda: float(next(tick)))
-    monkeypatch.setattr(etw.time, "sleep", lambda _seconds: None)
+
+    def popen(*_args, **_kwargs):
+        observer._parsed(etw.parse_event(raw_process(1, Child.pid, parent=os.getpid())))
+        for pid in range(20_000, 20_400):
+            observer._parsed(etw.parse_event(raw_process(3, pid)))
+        return Child()
+
+    monkeypatch.setattr(etw.subprocess, "Popen", popen)
+    fast_clock(monkeypatch)
     assert observer._check_schema(None) == ""
 
 
@@ -119,22 +149,26 @@ def test_native_session_enables_only_process_provider() -> None:
             props.FlushTimer, props.LogFileMode) == (64, 16, 64, 1, 0x02000100)
 
 
-def test_failed_check_logs_only_own_dcs_start_bytes(caplog) -> None:
+def test_failed_check_logs_only_own_dcstart_and_child_start_bytes(caplog) -> None:
     observer = etw.EtwObserver(lambda _path: None)
     observer.state = "checking"
+    observer._check_child = Child.pid
     own = raw_process(3, os.getpid())
     other = raw_process(3, os.getpid() + 1)
-    child = raw_process(1, os.getpid())
-    for raw in (own, other, child, own):
+    child = raw_process(1, Child.pid, parent=os.getpid())
+    stranger = raw_process(1, Child.pid + 1)
+    for raw in (own, other, stranger, child, own):
         observer._check_raw_event(raw, etw.parse_event(raw))
     with caplog.at_level(logging.WARNING):
-        observer._log_check_failure("no_start_events")
+        observer._log_check_failure("schema_process_mismatch")
     lines = [record.message for record in caplog.records if record.message.startswith("etw check:")]
-    assert lines[0].startswith("etw check: no_start_events counts ")
+    assert lines[0].startswith("etw check: schema_process_mismatch counts ")
     assert len(lines) == 3
-    assert all("process/3 " in line for line in lines[1:])
-    assert own.payload[:160].hex() in lines[1]
-    assert other.payload[:160].hex() not in " ".join(lines)
+    assert "process/3 v4 " in lines[1] and own.payload[:160].hex() in lines[1]
+    assert "process/1 v4 " in lines[2] and child.payload[:160].hex() in lines[2]
+    for unrelated in (other, stranger):
+        assert unrelated.payload[:160].hex() not in " ".join(lines)
+    assert not observer._raw_starts
 
 
 def test_check_loss_is_separate_and_status_explains_file_source() -> None:

@@ -90,11 +90,14 @@ class ParsedEvent:
     creation_time: int = 0
     image_name: str = ""
     command_line: str = ""
+    parent_pid: int = 0
 
 
 def _process_strings(data: bytes, version: int) -> tuple[str, str]:
-    # Process_TypeGroup1 V3/V4, x64: V4 adds Flags before the variable SID.
-    offset = 32 if version == 3 else 36
+    # Process_TypeGroup1 V3/V4, x64: V4 adds Flags. UserSID is a TOKEN_USER, a pointer and
+    # attributes (16 bytes on x64), then the SID itself. The MOF does not show that header;
+    # a real Start event from the owner's machine has it, and the SID read at 36 failed.
+    offset = (32 if version == 3 else 36) + 16
     if len(data) < offset + 8 or data[offset] != 1:
         return "", ""
     sid_end = offset + 8 + 4 * data[offset + 1]
@@ -144,7 +147,7 @@ def parse_event(event: RawEvent) -> ParsedEvent | None:
                 and len(data) >= 16):
             # Process_TypeGroup1: UniqueProcessKey, ProcessId, ... The class has no
             # creation time; the start event's own timestamp is that time.
-            pid = struct.unpack_from("<I", data, 8)[0]
+            pid, parent_pid = struct.unpack_from("<II", data, 8)
             image_name, command_line = _process_strings(data, event.version)
             if not image_name and len(data) != 16:
                 return None
@@ -152,7 +155,8 @@ def parse_event(event: RawEvent) -> ParsedEvent | None:
                     "process_rundown" if event.opcode == OP_PROCESS_DCSTART else "process_stop")
             return ParsedEvent(kind,
                                pid, event.tid, creation_time=event.timestamp,
-                               image_name=image_name, command_line=command_line)
+                               image_name=image_name, command_line=command_line,
+                               parent_pid=parent_pid)
     except (UnicodeError, struct.error, ValueError, OverflowError, TypeError, AttributeError):
         return None
     return None
@@ -451,9 +455,10 @@ class EtwObserver:
         self.collector: Collector | None = None
         self._checking: deque[ParsedEvent] = deque(maxlen=256)
         self._check_counts: Counter[tuple[str, int]] = Counter()
-        self._check_raw: deque[RawEvent] = deque(maxlen=2)
+        self._check_raw: deque[RawEvent] = deque(maxlen=1)  # the service's own DCStart
+        self._raw_starts: deque[RawEvent] = deque(maxlen=64)
+        self._check_child = 0
         self._check_loss: int | None = None
-        self._own_rundown = False
         self._lock = threading.Lock()
         self._lifecycle = threading.Lock()
         self._stopping = threading.Event()
@@ -520,36 +525,33 @@ class EtwObserver:
                 self.state = "on"
                 self._checking.clear()
                 self._check_raw.clear()
+                self._raw_starts.clear()
                 collector.on_raw = None
 
     def _check_schema(self, collector: Collector) -> str:
+        # The service's own DCStart is not required. The rundown is written when the
+        # provider is enabled, before ProcessTrace connects, and on the owner's machine
+        # 43 of about 340 arrived without the service's own. A Start of our own child,
+        # with its pid, parent and image read back, proves the layout and live delivery.
         image = ntpath.basename(sys.executable).casefold()
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline and not self._stopping.is_set():
-            with self._lock:
-                rundown = self._own_rundown
-            if rundown:
-                break
-            time.sleep(0.1)
-        else:
-            return "schema_process_missing"
-        if self._stopping.is_set():
-            return "schema_process_missing"
-        # Spawn only after rundown, so the live start cannot precede the check.
-        with self._lock:
-            self._checking.clear()
         with subprocess.Popen([sys.executable, "-I", "-B", "-c", "import time; time.sleep(3)"],
                               shell=False, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                               stderr=subprocess.DEVNULL) as child:
+            with self._lock:
+                self._check_child = child.pid
             deadline = time.monotonic() + 5.0
             while time.monotonic() < deadline and not self._stopping.is_set():
                 with self._lock:
-                    started = any(event.kind == "process_start" and event.pid == child.pid
+                    started = any(event.pid == child.pid and event.parent_pid == os.getpid()
                                   and event.image_name.casefold() == image for event in self._checking)
                 if started:
                     return ""
                 time.sleep(0.1)
-        return "no_start_events"
+        with self._lock:
+            delivered = any(struct.unpack_from("<I", raw.payload, 8)[0] == child.pid
+                            for raw in self._raw_starts)
+        # Delivered but not matched means the layout is wrong, not the session.
+        return "schema_process_mismatch" if delivered else "no_start_events"
 
     @staticmethod
     def _loss_total(counters: Counters) -> int:
@@ -561,13 +563,9 @@ class EtwObserver:
         with self._lock:
             state = self.state
             if state == "checking":
-                # The rundown lists every running process at once and would push the
-                # service's own entry out of the bounded deque before the check polls.
-                if event.kind == "process_rundown":
-                    self._own_rundown = self._own_rundown or (
-                        event.pid == os.getpid()
-                        and event.image_name.casefold() == ntpath.basename(sys.executable).casefold())
-                elif event.kind == "process_start":
+                # Only starts: the rundown lists every running process at once and
+                # would push the child's start out of the bounded deque.
+                if event.kind == "process_start":
                     self._checking.append(event)
                 return
         if state != "on":
@@ -627,21 +625,30 @@ class EtwObserver:
             if self.state != "checking":
                 return
             self._check_counts[(raw.provider.hex, raw.opcode)] += 1
-            if (raw.provider in (PROCESS_PROVIDER, PROCESS_CLASS)
-                    and raw.opcode == OP_PROCESS_DCSTART and len(raw.payload) >= 12
-                    and struct.unpack_from("<I", raw.payload, 8)[0] == os.getpid()
-                    and len(self._check_raw) < 2):
+            if raw.provider not in (PROCESS_PROVIDER, PROCESS_CLASS) or len(raw.payload) < 12:
+                return
+            # Every start is kept, since the child's pid may be known only after its
+            # event arrives; only the service's own and its child's are ever logged.
+            if raw.opcode == OP_PROCESS_START:
+                self._raw_starts.append(raw)
+            elif (raw.opcode == OP_PROCESS_DCSTART and not self._check_raw
+                  and struct.unpack_from("<I", raw.payload, 8)[0] == os.getpid()):
                 self._check_raw.append(raw)
 
     def _log_check_failure(self, reason: str) -> None:
         with self._lock:
             counts = sorted(self._check_counts.items())
-            samples = tuple(self._check_raw)
+            child = self._check_child
+            samples = tuple(self._check_raw) + tuple(
+                raw for raw in self._raw_starts
+                if child and struct.unpack_from("<I", raw.payload, 8)[0] == child)[:2]
+            # Other processes' command lines are not kept past the check.
+            self._raw_starts.clear()
         log = logging.getLogger(__name__)
         log.warning("etw check: %s counts %s", reason,
                     ", ".join(f"{provider}/{opcode}={count}" for (provider, opcode), count in counts))
         for raw in samples:
-            log.warning("etw check: process/%d %s", raw.opcode, raw.payload[:160].hex())
+            log.warning("etw check: process/%d v%d %s", raw.opcode, raw.version, raw.payload[:160].hex())
 
 
 def _same_file(event_path: str, known_path: str) -> bool:
