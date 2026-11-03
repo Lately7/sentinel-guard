@@ -42,10 +42,12 @@ if os.name == "nt":
     TOKEN_QUERY, TOKEN_DUPLICATE, TOKEN_ASSIGN_PRIMARY, TOKEN_ADJUST_DEFAULT = 0x8, 0x2, 0x1, 0x80
     DISABLE_MAX_PRIVILEGE = 0x1
     TokenIntegrityLevel = 25
+    TokenUser, TokenGroups, TokenPrivileges, TokenDefaultDacl, TokenSessionId = 1, 2, 3, 6, 12
     SE_GROUP_INTEGRITY = 0x20
     CREATE_SUSPENDED = 0x4
     # Not CREATE_NO_WINDOW: its hidden console needs a conhost this token cannot attach to.
     DETACHED_PROCESS = 0x8
+    CREATE_NO_WINDOW = 0x08000000
     CREATE_UNICODE_ENVIRONMENT = 0x400
     EXTENDED_STARTUPINFO_PRESENT = 0x00080000
     CREATE_BREAKAWAY_FROM_JOB = 0x01000000
@@ -63,6 +65,25 @@ if os.name == "nt":
 
     class SID_AND_ATTRIBUTES(ctypes.Structure):
         _fields_ = [("Sid", ctypes.c_void_p), ("Attributes", wintypes.DWORD)]
+
+    class LUID(ctypes.Structure):
+        _fields_ = [("LowPart", wintypes.DWORD), ("HighPart", wintypes.LONG)]
+
+    class LUID_AND_ATTRIBUTES(ctypes.Structure):
+        _fields_ = [("Luid", LUID), ("Attributes", wintypes.DWORD)]
+
+    class ACL_SIZE_INFORMATION(ctypes.Structure):
+        _fields_ = [("AceCount", wintypes.DWORD), ("AclBytesInUse", wintypes.DWORD),
+                    ("AclBytesFree", wintypes.DWORD)]
+
+    class ACE_HEADER(ctypes.Structure):
+        _fields_ = [("AceType", ctypes.c_ubyte), ("AceFlags", ctypes.c_ubyte), ("AceSize", wintypes.WORD)]
+
+    class TOKEN_GROUPS_HEAD(ctypes.Structure):
+        _fields_ = [("GroupCount", wintypes.DWORD), ("Groups", SID_AND_ATTRIBUTES * 1)]
+
+    class TOKEN_PRIVILEGES_HEAD(ctypes.Structure):
+        _fields_ = [("PrivilegeCount", wintypes.DWORD), ("Privileges", LUID_AND_ATTRIBUTES * 1)]
 
     class SECURITY_ATTRIBUTES(ctypes.Structure):
         _fields_ = [("nLength", wintypes.DWORD), ("lpSecurityDescriptor", ctypes.c_void_p),
@@ -126,6 +147,21 @@ if os.name == "nt":
                                            ctypes.POINTER(wintypes.HANDLE)]
     _adv.ConvertStringSidToSidW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p)]
     _adv.SetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    _adv.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+                                         ctypes.POINTER(wintypes.DWORD)]
+    _adv.GetAclInformation.argtypes = [ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.c_int]
+    _adv.GetAce.argtypes = [ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p)]
+    _adv.InitializeAcl.argtypes = [ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD]
+    _adv.AddAce.argtypes = [ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+    _adv.AddAccessAllowedAce.argtypes = [ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p]
+    _adv.GetLengthSid.argtypes = [ctypes.c_void_p]
+    _adv.GetLengthSid.restype = wintypes.DWORD
+    _adv.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+    _adv.LookupAccountSidW.argtypes = [wintypes.LPCWSTR, ctypes.c_void_p, wintypes.LPWSTR,
+                                       ctypes.POINTER(wintypes.DWORD), wintypes.LPWSTR,
+                                       ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD)]
+    _adv.LookupPrivilegeNameW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(LUID), wintypes.LPWSTR,
+                                          ctypes.POINTER(wintypes.DWORD)]
     _adv.CreateProcessAsUserW.argtypes = [wintypes.HANDLE, wintypes.LPCWSTR, wintypes.LPWSTR, ctypes.c_void_p,
                                           ctypes.c_void_p, wintypes.BOOL, wintypes.DWORD, ctypes.c_void_p,
                                           wintypes.LPCWSTR, ctypes.c_void_p, ctypes.POINTER(PROCESS_INFORMATION)]
@@ -141,6 +177,9 @@ if os.name == "nt":
     _u32.SetProcessWindowStation.argtypes = [wintypes.HANDLE]
     _u32.GetUserObjectInformationW.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
                                                ctypes.c_void_p]
+    _u32.GetThreadDesktop.argtypes = [wintypes.DWORD]
+    _u32.GetThreadDesktop.restype = wintypes.HANDLE
+    _k32.GetCurrentThreadId.restype = wintypes.DWORD
 
 
 class WorkerError(OSError):
@@ -152,7 +191,133 @@ def _fail(what: str) -> WorkerError:
     return WorkerError(code, f"{what} failed (Windows error {code})")
 
 
-def _restricted_low_token(service_sid: str | None = None) -> int:
+def _token_data(token: int, kind: int) -> ctypes.Array[ctypes.c_char]:
+    size = wintypes.DWORD()
+    _adv.GetTokenInformation(token, kind, None, 0, ctypes.byref(size))
+    if not size.value or size.value > 1 << 20:
+        raise _fail("GetTokenInformation")
+    data = ctypes.create_string_buffer(size.value)
+    if not _adv.GetTokenInformation(token, kind, data, size, ctypes.byref(size)):
+        raise _fail("GetTokenInformation")
+    return data
+
+
+def _sid_name(sid: int) -> str:
+    name_len, domain_len, use = wintypes.DWORD(), wintypes.DWORD(), wintypes.DWORD()
+    _adv.LookupAccountSidW(None, sid, None, ctypes.byref(name_len), None, ctypes.byref(domain_len),
+                           ctypes.byref(use))
+    if name_len.value:
+        name = ctypes.create_unicode_buffer(name_len.value)
+        domain = ctypes.create_unicode_buffer(max(1, domain_len.value))
+        if _adv.LookupAccountSidW(None, sid, name, ctypes.byref(name_len), domain,
+                                  ctypes.byref(domain_len), ctypes.byref(use)):
+            return f"{domain.value}\\{name.value}" if domain.value else name.value
+    value = ctypes.c_void_p()
+    if not _adv.ConvertSidToStringSidW(sid, ctypes.byref(value)):
+        raise _fail("ConvertSidToStringSid")
+    try:
+        return ctypes.wstring_at(value)
+    finally:
+        _k32.LocalFree(value)
+
+
+def _privilege_name(luid: LUID) -> str:
+    length = wintypes.DWORD(256)
+    name = ctypes.create_unicode_buffer(length.value)
+    if not _adv.LookupPrivilegeNameW(None, ctypes.byref(luid), name, ctypes.byref(length)):
+        raise _fail("LookupPrivilegeName")
+    return name.value
+
+
+def _object_name(handle: int) -> str:
+    name = ctypes.create_unicode_buffer(256)
+    if not _u32.GetUserObjectInformationW(handle, UOI_NAME, name, ctypes.sizeof(name), None):
+        raise _fail("GetUserObjectInformation")
+    return name.value
+
+
+def _own_privileges() -> str:
+    """What SCM left in the service's token, each with + when enabled."""
+    own = wintypes.HANDLE()
+    if not _adv.OpenProcessToken(_k32.GetCurrentProcess(), TOKEN_QUERY, ctypes.byref(own)):
+        raise _fail("OpenProcessToken")
+    try:
+        data = _token_data(own.value, TokenPrivileges)
+        count = ctypes.cast(data, ctypes.POINTER(wintypes.DWORD)).contents.value
+        base = ctypes.addressof(data) + TOKEN_PRIVILEGES_HEAD.Privileges.offset
+        items = ctypes.cast(base, ctypes.POINTER(LUID_AND_ATTRIBUTES))
+        return ",".join(_privilege_name(items[i].Luid) + ("+" if items[i].Attributes & 0x2 else "")
+                        for i in range(count))
+    finally:
+        _k32.CloseHandle(own)
+
+
+def _diagnostic_context(service_sid: str) -> dict[str, str]:
+    token = _restricted_low_token(service_sid)
+    try:
+        user_data = _token_data(token, TokenUser)
+        user = ctypes.cast(user_data, ctypes.POINTER(SID_AND_ATTRIBUTES)).contents
+        group_data = _token_data(token, TokenGroups)
+        count = ctypes.cast(group_data, ctypes.POINTER(wintypes.DWORD)).contents.value
+        group_base = ctypes.addressof(group_data) + TOKEN_GROUPS_HEAD.Groups.offset
+        groups = ctypes.cast(group_base, ctypes.POINTER(SID_AND_ATTRIBUTES))
+        privilege_data = _token_data(token, TokenPrivileges)
+        privilege_count = ctypes.cast(privilege_data, ctypes.POINTER(wintypes.DWORD)).contents.value
+        privilege_base = ctypes.addressof(privilege_data) + TOKEN_PRIVILEGES_HEAD.Privileges.offset
+        privileges = ctypes.cast(privilege_base, ctypes.POINTER(LUID_AND_ATTRIBUTES))
+        session_data = _token_data(token, TokenSessionId)
+        session = ctypes.cast(session_data, ctypes.POINTER(wintypes.DWORD)).contents.value
+        return {"variant": "context", "user": _sid_name(user.Sid),
+                "groups": ",".join(_sid_name(groups[i].Sid) for i in range(count)),
+                "privileges": ",".join(_privilege_name(privileges[i].Luid) for i in range(privilege_count)),
+                "service_privileges": _own_privileges(),
+                "session": str(session), "station": _object_name(_u32.GetProcessWindowStation()),
+                "desktop": _object_name(_u32.GetThreadDesktop(_k32.GetCurrentThreadId())),
+                "executable": sys.executable}
+    finally:
+        _k32.CloseHandle(token)
+
+
+def _grant_default_dacl(token: int, names: Sequence[str]) -> None:
+    data = _token_data(token, TokenDefaultDacl)
+    original = ctypes.cast(data, ctypes.POINTER(ctypes.c_void_p))[0]
+    if not original:
+        raise WorkerError(0, "token default DACL is null")
+    info = ACL_SIZE_INFORMATION()
+    if not _adv.GetAclInformation(original, ctypes.byref(info), ctypes.sizeof(info), 2):
+        raise _fail("GetAclInformation")
+    sids: list[ctypes.c_void_p] = []
+    try:
+        for name in names:
+            sid = ctypes.c_void_p()
+            if not _adv.ConvertStringSidToSidW(name, ctypes.byref(sid)):
+                raise _fail("ConvertStringSidToSid(DACL)")
+            sids.append(sid)
+        size = info.AclBytesInUse + sum(8 + _adv.GetLengthSid(s) for s in sids)
+        acl = ctypes.create_string_buffer(size)
+        if not _adv.InitializeAcl(acl, size, 2):
+            raise _fail("InitializeAcl")
+        for index in range(info.AceCount):
+            ace = ctypes.c_void_p()
+            if not _adv.GetAce(original, index, ctypes.byref(ace)):
+                raise _fail("GetAce")
+            length = ctypes.cast(ace, ctypes.POINTER(ACE_HEADER)).contents.AceSize
+            if not _adv.AddAce(acl, 2, 0xffffffff, ace, length):
+                raise _fail("AddAce")
+        for sid in sids:
+            if not _adv.AddAccessAllowedAce(acl, 2, GENERIC_ALL, sid):
+                raise _fail("AddAccessAllowedAce")
+        pointer = ctypes.c_void_p(ctypes.addressof(acl))
+        if not _adv.SetTokenInformation(token, TokenDefaultDacl, ctypes.byref(pointer),
+                                        ctypes.sizeof(pointer)):
+            raise _fail("SetTokenInformation(DACL)")
+    finally:
+        for sid in sids:
+            _k32.LocalFree(sid)
+
+
+def _restricted_low_token(service_sid: str | None = None, *, restricting: bool = True,
+                          low_integrity: bool = True, grant_dacl: bool = False) -> int:
     """Restricted, low-integrity primary token derived from our own."""
     own = wintypes.HANDLE()
     access = TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_DEFAULT
@@ -169,7 +334,7 @@ def _restricted_low_token(service_sid: str | None = None) -> int:
             restricted = wintypes.HANDLE()
             sids: list[ctypes.c_void_p] = []
             try:
-                for name in (*RESTRICTING_SIDS, service_sid) if service_sid else ():
+                for name in (*RESTRICTING_SIDS, service_sid) if service_sid and restricting else ():
                     sid = ctypes.c_void_p()
                     if not _adv.ConvertStringSidToSidW(name, ctypes.byref(sid)):
                         raise _fail("ConvertStringSidToSid(restricting)")
@@ -186,6 +351,14 @@ def _restricted_low_token(service_sid: str | None = None) -> int:
             _k32.LocalFree(admins)
     finally:
         _k32.CloseHandle(own)
+    if grant_dacl and service_sid:
+        try:
+            _grant_default_dacl(restricted.value, (*RESTRICTING_SIDS, service_sid))
+        except BaseException:
+            _k32.CloseHandle(restricted)
+            raise
+    if not low_integrity:
+        return restricted.value
     low = ctypes.c_void_p()
     if not _adv.ConvertStringSidToSidW("S-1-16-4096", ctypes.byref(low)):
         _k32.CloseHandle(restricted)
@@ -252,14 +425,15 @@ def _private_desktop() -> str:
         return _desktop
 
 
-def _job(memory_limit: int) -> int:
+def _job(memory_limit: int, *, limits: bool = True) -> int:
     job = _k32.CreateJobObjectW(None, None)
     if not job:
         raise _fail("CreateJobObject")
     info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
-    info.BasicLimitInformation.LimitFlags = (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_PROCESS_MEMORY
-                                             | JOB_OBJECT_LIMIT_ACTIVE_PROCESS
-                                             | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION)
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if limits:
+        info.BasicLimitInformation.LimitFlags |= (JOB_OBJECT_LIMIT_PROCESS_MEMORY | JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+                                                  | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION)
     # One process: a parser bug cannot spawn helpers.
     info.BasicLimitInformation.ActiveProcessLimit = 1
     info.ProcessMemoryLimit = memory_limit
@@ -361,7 +535,10 @@ def bootstrap(module: str) -> list[str]:
 
 def launch(args: Sequence[str], *, memory_limit: int = 512 * 1024 * 1024,
            python: str | None = None, cwd: str | None = None,
-           service_sid: str | None = None) -> Worker:
+           service_sid: str | None = None, private_desktop: bool = True,
+           restricting: bool = True, low_integrity: bool = True,
+           no_window: bool = False, grant_dacl: bool = False,
+           job_limits: bool = True) -> Worker:
     """Start `python -I -B <args...>` as a restricted, low-integrity, jobbed worker."""
     if os.name != "nt":
         raise WorkerError(0, "restricted workers need Windows")
@@ -381,8 +558,9 @@ def launch(args: Sequence[str], *, memory_limit: int = 512 * 1024 * 1024,
         _k32.SetHandleInformation(child_in_w, HANDLE_FLAG_INHERIT, 0)
         _k32.SetHandleInformation(child_out_r, HANDLE_FLAG_INHERIT, 0)
         _k32.SetHandleInformation(child_err_r, HANDLE_FLAG_INHERIT, 0)
-        token = _restricted_low_token(service_sid)
-        job = _job(memory_limit)
+        token = _restricted_low_token(service_sid, restricting=restricting,
+                                      low_integrity=low_integrity, grant_dacl=grant_dacl)
+        job = _job(memory_limit, limits=job_limits)
         size = ctypes.c_size_t()
         _k32.InitializeProcThreadAttributeList(None, 1, 0, ctypes.byref(size))
         attrs = ctypes.create_string_buffer(size.value)
@@ -397,7 +575,7 @@ def launch(args: Sequence[str], *, memory_limit: int = 512 * 1024 * 1024,
         si = STARTUPINFOEXW()
         si.StartupInfo.cb = ctypes.sizeof(STARTUPINFOEXW)
         si.StartupInfo.dwFlags = STARTF_USESTDHANDLES
-        if service_sid:
+        if service_sid and private_desktop:
             si.StartupInfo.lpDesktop = _private_desktop()
         si.StartupInfo.hStdInput = child_in_r
         si.StartupInfo.hStdOutput = child_out_w
@@ -405,7 +583,8 @@ def launch(args: Sequence[str], *, memory_limit: int = 512 * 1024 * 1024,
         si.lpAttributeList = ctypes.cast(attrs, ctypes.c_void_p)
         pi = PROCESS_INFORMATION()
         env = _environment()
-        flags = CREATE_SUSPENDED | DETACHED_PROCESS | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT
+        flags = CREATE_SUSPENDED | (CREATE_NO_WINDOW if no_window else DETACHED_PROCESS)
+        flags |= CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT
         if not _adv.CreateProcessAsUserW(token, exe, cmdline, None, None, True, flags, env,
                                          cwd or os.path.dirname(exe), ctypes.byref(si), ctypes.byref(pi)):
             raise _fail("CreateProcessAsUser")
@@ -430,3 +609,48 @@ def launch(args: Sequence[str], *, memory_limit: int = 512 * 1024 * 1024,
         for h in (token, job, child_in_r, child_out_w, child_err_w, child_in_w, child_out_r, child_err_r):
             if h:
                 _k32.CloseHandle(h)
+
+
+def diagnose(python: str, cwd: str, service_sid: str) -> list[dict[str, str]]:
+    """Compare bounded interpreter starts without running product code or opening a scan target."""
+    if os.name != "nt":
+        raise WorkerError(0, "restricted workers need Windows")
+    try:
+        results = [_diagnostic_context(service_sid)]
+    except OSError as error:
+        results = [{"variant": "context", "call": "token or desktop inspection",
+                    "windows_error": str(error.errno if isinstance(error.errno, int) else 0)}]
+    variants: tuple[tuple[str, dict[str, bool]], ...] = (
+        ("real", {}),
+        ("service_desktop", {"private_desktop": False}),
+        ("no_restricting_sids", {"restricting": False}),
+        ("parent_integrity", {"low_integrity": False}),
+        ("create_no_window", {"no_window": True}),
+        ("grant_restricting_dacl", {"grant_dacl": True}),
+        ("job_kill_only", {"job_limits": False}),
+    )
+    for variant, options in variants:
+        for step, code in (("pass", "pass"), ("ctypes", "import ctypes")):
+            process: Worker | None = None
+            try:
+                process = launch(["-c", code], python=python, cwd=cwd, service_sid=service_sid, **options)
+                exit_code = process.wait(5)
+                if exit_code is None:
+                    result = {"variant": variant, "step": step, "exit_code": "timeout"}
+                else:
+                    result = {"variant": variant, "step": step, "exit_code": f"{exit_code:#x}"}
+            except OSError as error:
+                message = error.strerror if isinstance(error.strerror, str) else ""
+                result = {"variant": variant, "step": step,
+                          "call": message.split(" failed", 1)[0] if " failed" in message else "launch",
+                          "windows_error": str(error.errno if isinstance(error.errno, int) else 0)}
+            finally:
+                if process is not None:
+                    process.kill()
+            result["stderr"] = process.stderr_tail()[-2048:] if process is not None else ""
+            results.append(result)
+            if result.get("exit_code") != "0x0":
+                break
+    passed = sum(r.get("exit_code") == "0x0" and r.get("step") == "ctypes" for r in results)
+    results.append({"variant": "summary", "ctypes_passed": str(passed), "variants": str(len(variants))})
+    return results
