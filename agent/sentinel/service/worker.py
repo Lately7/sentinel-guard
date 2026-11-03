@@ -4,7 +4,7 @@ Untrusted file formats (ZIP, PE, YARA-X) are parsed in a child process that
 runs with a restricted copy of the caller's own token (all privileges but
 SeChangeNotify removed, Administrators disabled), at **low integrity**, inside
 a Job Object (memory cap, one process, killed when the job handle closes).
-It inherits only its two pipe handles and gets a minimal environment.
+It inherits only its three pipe handles and gets a minimal environment.
 
 A restricted copy of the caller's primary token needs no extra privilege for
 CreateProcessAsUserW (R13b P5), so this runs and is tested unelevated. As the
@@ -21,7 +21,7 @@ import os
 import sys
 import threading
 from ctypes import wintypes
-from typing import Sequence
+from typing import BinaryIO, Sequence
 
 # What the restricted pass of the access check may use. Python has to load system
 # DLLs and reach the object namespace, which these three can. None of them is on the
@@ -284,9 +284,26 @@ def _environment() -> ctypes.Array[ctypes.c_wchar]:
 class Worker:
     """A running restricted worker; `stdin`/`stdout` are binary pipe files."""
 
-    def __init__(self, process: int, thread: int, job: int, pid: int, stdin, stdout) -> None:
+    def __init__(self, process: int, thread: int, job: int, pid: int,
+                 stdin: BinaryIO, stdout: BinaryIO, stderr: BinaryIO) -> None:
         self._process, self._thread, self._job = process, thread, job
-        self.pid, self.stdin, self.stdout = pid, stdin, stdout
+        self.pid, self.stdin, self.stdout, self.stderr = pid, stdin, stdout, stderr
+        self._stderr_lock = threading.Lock()
+        self._stderr_tail = b""
+        self._stderr_reader = threading.Thread(target=self._drain_stderr, daemon=True, name="worker-stderr")
+        self._stderr_reader.start()
+
+    def _drain_stderr(self) -> None:
+        try:
+            while chunk := self.stderr.read(4096):
+                with self._stderr_lock:
+                    self._stderr_tail = (self._stderr_tail + chunk)[-2048:]
+        except (OSError, ValueError):
+            pass
+
+    def stderr_tail(self) -> str:
+        with self._stderr_lock:
+            return self._stderr_tail.decode("utf-8", "replace")
 
     def wait(self, timeout: float) -> int | None:
         if _k32.WaitForSingleObject(self._process, int(timeout * 1000)) != WAIT_OBJECT_0:
@@ -297,16 +314,18 @@ class Worker:
 
     def kill(self) -> None:
         """Closing the job kills the worker (KILL_ON_JOB_CLOSE)."""
-        for f in (self.stdin, self.stdout):
-            try:
-                f.close()
-            except OSError:
-                pass
         for h in (self._job, self._thread):
             if h:
                 _k32.CloseHandle(h)
         self._job = self._thread = 0
-        self.wait(5)
+        if self._process:
+            self.wait(5)
+        self._stderr_reader.join(timeout=1)
+        for f in (self.stdin, self.stdout, self.stderr):
+            try:
+                f.close()
+            except OSError:
+                pass
         if self._process:
             _k32.CloseHandle(self._process)
             self._process = 0
@@ -349,14 +368,17 @@ def launch(args: Sequence[str], *, memory_limit: int = 512 * 1024 * 1024,
 
     exe = python or interpreter()
     cmdline = ctypes.create_unicode_buffer(subprocess.list2cmdline([exe, "-I", "-B", *args]))
-    child_in_r, child_in_w = _pipe()
-    child_out_r, child_out_w = _pipe()
-    # Our ends must not be inherited by the child.
-    _k32.SetHandleInformation(child_in_w, HANDLE_FLAG_INHERIT, 0)
-    _k32.SetHandleInformation(child_out_r, HANDLE_FLAG_INHERIT, 0)
+    child_in_r = child_in_w = child_out_r = child_out_w = child_err_r = child_err_w = 0
     token = job = 0
     attrs = None
     try:
+        child_in_r, child_in_w = _pipe()
+        child_out_r, child_out_w = _pipe()
+        child_err_r, child_err_w = _pipe()
+        # Our ends must not be inherited by the child.
+        _k32.SetHandleInformation(child_in_w, HANDLE_FLAG_INHERIT, 0)
+        _k32.SetHandleInformation(child_out_r, HANDLE_FLAG_INHERIT, 0)
+        _k32.SetHandleInformation(child_err_r, HANDLE_FLAG_INHERIT, 0)
         token = _restricted_low_token(service_sid)
         job = _job(memory_limit)
         size = ctypes.c_size_t()
@@ -364,9 +386,9 @@ def launch(args: Sequence[str], *, memory_limit: int = 512 * 1024 * 1024,
         attrs = ctypes.create_string_buffer(size.value)
         if not _k32.InitializeProcThreadAttributeList(attrs, 1, 0, ctypes.byref(size)):
             raise _fail("InitializeProcThreadAttributeList")
-        # Only these two handles are inherited, whatever else is inheritable
+        # Only these three handles are inherited, whatever else is inheritable
         # in this process (the service may hold many).
-        handles = (wintypes.HANDLE * 2)(child_in_r, child_out_w)
+        handles = (wintypes.HANDLE * 3)(child_in_r, child_out_w, child_err_w)
         if not _k32.UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles,
                                               ctypes.sizeof(handles), None, None):
             raise _fail("UpdateProcThreadAttribute")
@@ -377,7 +399,7 @@ def launch(args: Sequence[str], *, memory_limit: int = 512 * 1024 * 1024,
             si.StartupInfo.lpDesktop = _private_desktop()
         si.StartupInfo.hStdInput = child_in_r
         si.StartupInfo.hStdOutput = child_out_w
-        si.StartupInfo.hStdError = child_out_w
+        si.StartupInfo.hStdError = child_err_w
         si.lpAttributeList = ctypes.cast(attrs, ctypes.c_void_p)
         pi = PROCESS_INFORMATION()
         env = _environment()
@@ -395,13 +417,14 @@ def launch(args: Sequence[str], *, memory_limit: int = 512 * 1024 * 1024,
         _k32.ResumeThread(pi.hThread)
         stdin = os.fdopen(msvcrt.open_osfhandle(child_in_w, 0), "wb", buffering=0)
         stdout = os.fdopen(msvcrt.open_osfhandle(child_out_r, os.O_RDONLY), "rb", buffering=0)
-        child_in_w = child_out_r = 0
-        worker = Worker(pi.hProcess, pi.hThread, job, pi.dwProcessId, stdin, stdout)
+        stderr = os.fdopen(msvcrt.open_osfhandle(child_err_r, os.O_RDONLY), "rb", buffering=0)
+        child_in_w = child_out_r = child_err_r = 0
+        worker = Worker(pi.hProcess, pi.hThread, job, pi.dwProcessId, stdin, stdout, stderr)
         job = 0
         return worker
     finally:
         if attrs is not None:
             _k32.DeleteProcThreadAttributeList(attrs)
-        for h in (token, job, child_in_r, child_out_w, child_in_w, child_out_r):
+        for h in (token, job, child_in_r, child_out_w, child_err_w, child_in_w, child_out_r, child_err_r):
             if h:
                 _k32.CloseHandle(h)
