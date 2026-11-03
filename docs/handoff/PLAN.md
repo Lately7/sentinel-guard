@@ -307,6 +307,7 @@ phiên thật; tệp mồi chờ câu hỏi 11, còn tự dừng tiến trình c
 | 12 | **Mới:** tạo khóa abuse.ch miễn phí; khóa VirusTotal nếu muốn | có abuse.ch: thêm hash và URL mới; VirusTotal chưa nối | 10 |
 | 13 | **Mới:** kiểm thu trên dịch vụ dùng một lần, hay trực tiếp trên bản cài bằng `sentinel service verify` | `verify`; đơn giản hơn nhiều | 3 |
 | 14 | **Mới:** danh sách tin cậy cũ không tự sang dịch vụ khi cài, phải tin cậy lại qua UAC | giữ vậy: danh sách cũ do tiến trình quyền thấp ghi nên không nên kế thừa | 3 |
+| 15 | **Mới (red team RED2):** `tools\install_service.cmd` chạy với quyền admin nhưng dùng `.venv\Scripts\python.exe` và mã trong thư mục checkout, nơi tài khoản thường ghi được; một tiến trình thường có thể cài mã vào đó để được chạy với quyền admin lúc cài. Tách làm hai bước: chụp snapshot không cần quyền admin và in mã băm, rồi bước admin chạy từ bản sao được bảo vệ và kiểm mã băm? | tách hai bước; đổi cách cài một chút (thêm một lần xác nhận mã băm) | 3 |
 | 9 | **Mới:** tên Defender loại PUA (`PUA:`, `Adware:`…) không còn tự cách ly, dù hành vi cũ có (K6, theo invariant 6) | chấp nhận | 1 |
 
 Bước 2 có thể làm với đề xuất mặc định; chỉ cần chủ dự án báo nếu muốn khác.
