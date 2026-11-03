@@ -36,6 +36,7 @@ log = logging.getLogger(__name__)
 
 POLL_SECONDS = 0.05
 START_SECONDS = 30.0
+START_RETRY_SECONDS = 60.0
 EXIT_WAIT_SECONDS = 1.0
 
 if os.name == "nt":
@@ -72,6 +73,8 @@ class WorkerSession:
         # A Windows code, never file content, so `status` may show it. service.log is
         # for administrators, and a scan only sees a typed failure.
         self.last_failure = ""
+        self._failed_start_at = float("-inf")
+        self._logged_start_failure = ""
 
     # -- lifecycle
 
@@ -180,15 +183,23 @@ class WorkerSession:
             if self._proc is not None and self._proc.wait(0) is not None:
                 self._kill()
             if self._proc is None:
+                if time.monotonic() - self._failed_start_at < START_RETRY_SECONDS:
+                    raise WorkerFailure(StageStatus.UNAVAILABLE, "WORKER_UNAVAILABLE")
                 try:
                     self._start(deadline_ns)
                 except (OSError, WorkerFailure) as e:
                     self._kill()
                     if isinstance(e, OSError):
-                        self.last_failure = str(e)
-                    log.warning("worker did not start: %s (%s)", self.last_failure, getattr(e, "code", ""))
+                        self.last_failure = str(e) or type(e).__name__
+                    elif e.code != "WORKER_DIED" or not self.last_failure:
+                        self.last_failure = e.code
+                    self._failed_start_at = time.monotonic()
+                    if self.last_failure != self._logged_start_failure:
+                        log.warning("worker did not start: %s", self.last_failure)
+                        self._logged_start_failure = self.last_failure
                     raise WorkerFailure(StageStatus.UNAVAILABLE, "WORKER_UNAVAILABLE") from e
                 self.last_failure = ""
+                self._logged_start_failure = ""
             if handle_from is not None:
                 try:
                     args = {**args, "handle": self._duplicate(handle_from)}

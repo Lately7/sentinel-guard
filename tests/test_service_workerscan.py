@@ -95,6 +95,7 @@ def test_a_worker_that_cannot_be_launched_says_why(monkeypatch, caplog):
 def test_a_worker_that_dies_at_start_leaves_its_exit_code_until_one_starts(monkeypatch):
     real = workerclient.worker_mod.bootstrap
     monkeypatch.setattr(workerclient.worker_mod, "bootstrap", lambda module: ["-c", "import sys; sys.exit(3)"])
+    monkeypatch.setattr(workerclient, "START_RETRY_SECONDS", 0.0)
     s = WorkerSession()
     try:
         with pytest.raises(WorkerFailure):
