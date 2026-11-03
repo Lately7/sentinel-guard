@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import json
 import logging
 import ntpath
 import os
@@ -33,6 +34,8 @@ from .paths import active_version, installed_paths
 from .protocol import MAX_FRAME, MAX_RULES_FRAME, ProtocolError, read_frame, write_frame
 
 log = logging.getLogger(__name__)
+_diagnosis_lock = threading.Lock()
+_diagnosis_started = False
 
 POLL_SECONDS = 0.05
 START_SECONDS = 30.0
@@ -51,6 +54,36 @@ class WorkerFailure(Exception):
     def __init__(self, status: StageStatus, code: str) -> None:
         self.status, self.code = status, code
         super().__init__(code)
+
+
+def _diagnose_once() -> None:
+    global _diagnosis_started
+    try:
+        version = active_version()
+        if version is None:
+            return
+        with _diagnosis_lock:
+            if _diagnosis_started:
+                return
+            _diagnosis_started = True
+
+        def run() -> None:
+            try:
+                from .installer import WindowsScm
+
+                sid = WindowsScm().service_sid("SentinelGuard")
+                results = worker_mod.diagnose(str(version / "python.exe"), str(version), sid)
+                for result in results:
+                    log.warning("worker diagnosis: %s", json.dumps(result, ensure_ascii=True,
+                                                                   separators=(",", ":")))
+            except Exception as error:
+                code = error.errno if isinstance(error, OSError) and isinstance(error.errno, int) else 0
+                log.warning("worker diagnosis: error=%s windows_error=%d", type(error).__name__, code)
+
+        threading.Thread(target=run, daemon=True, name="worker-diagnosis").start()
+    except Exception as error:
+        code = error.errno if isinstance(error, OSError) and isinstance(error.errno, int) else 0
+        log.warning("worker diagnosis: error=%s windows_error=%d", type(error).__name__, code)
 
 
 class WorkerSession:
@@ -202,6 +235,7 @@ class WorkerSession:
             if detail != self._logged_start_failure:
                 log.warning("worker did not start: %s", detail, exc_info=not isinstance(e, (OSError, WorkerFailure)))
                 self._logged_start_failure = detail
+            _diagnose_once()
             self._starting_proc = None
             raise WorkerFailure(StageStatus.UNAVAILABLE, "WORKER_UNAVAILABLE") from e
         self.last_failure = ""
