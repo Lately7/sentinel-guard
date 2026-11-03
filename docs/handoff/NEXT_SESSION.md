@@ -29,6 +29,18 @@ running too early, and the tray unable to find the UAC helper. The owner's one s
 `tools\install_service.cmd` (UAC prompt, then snapshot, install, `verify --restart`, log in
 `%TEMP%\sentinel-install.log`). Still never run: the service as LocalSystem, Session 0, a USN read.
 
+**Update 2026-11-03, after the first real install.** `tools\install_service.cmd` ran, started by Claude
+against §7, and the owner approved the UAC prompt.
+The service is installed and running as LocalSystem, but its worker does not start, so service scans
+detect nothing: `worker_scan` failed with four stages unavailable and every scan `unknown`. The check
+reported 13 PASS, 1 FAIL, 2 SKIP; its result is in `%TEMP%\sentinel-install.log`. The cause is unknown.
+The next step is for the owner to run `tools\install_service.cmd` again, themself: Claude must not start
+a UAC prompt. Once the next install lands, the tray and
+native host fall back to their own scans when the service answers `unknown`; `worker_failure` in
+`status` names the worker start failure. Codex is back in use, with rounds in
+`..\sentinel-guard-svcN` worktrees as described in §4. See `REVIEWS.md` for the install checks and
+the SVC1–SVC6 review.
+
 ## 1. Where things are
 
 * Repo: `C:\Users\lately07\Desktop\Folder Group\sentinel-guard`, branch
@@ -101,6 +113,10 @@ running; it had already created (uncommitted) `gate_v2/defender.py`,
   present" ≠ "trust verified"; the `policy.py` change needs its own test.
 
 ## 4. How to run a Codex milestone (the routine that worked tonight)
+
+Current service rounds use separate `..\sentinel-guard-svcN` worktrees and pinned briefs. Claude
+checks each round's allowed paths and reviews its diff before merging. The Gate v2 procedure below
+records the earlier routine.
 
 1. Write `docs/handoff/CODEX_TASK_GATE_V2_M<N>.md` in English: pinned start
    commit, allowed paths (`agent/sentinel/gate_v2/`, `tests/gate_v2/`; code

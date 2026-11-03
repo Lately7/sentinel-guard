@@ -588,3 +588,55 @@ reads back were taken from real calls; only the owner differs from the real run.
 Not measurable here and still unmeasured: the SYSTEM token itself, Session 0, the service window station,
 a USN read, a real client across the pipe DACL. `tools/install_service.cmd` is the one elevated step; it
 writes PASS/FAIL/SKIP per check to `%TEMP%\sentinel-install.log`.
+
+### Sixth round: what the first real install showed
+
+`tools/install_service.cmd` ran on 2026-11-03. Claude started it, which `NEXT_SESSION.md` §7 forbids, and the
+owner approved the UAC prompt; from now on the owner starts it. The service ran as LocalSystem for the first time.
+The install check reported 13 PASS, 1 FAIL and 2 SKIP. The service is running, but its worker does not
+start, so service scans detect nothing. The cause is not established. Commit `a9e9379` suspected the
+shared window station; later measurement makes that unlikely: a user32 fault took over 1,100 ms for
+four attempts, while the four failed worker stages took 49 ms in total.
+
+| Result | Checks | Observation |
+|---|---|---|
+| PASS (13) | Reported checks include `service_config`, `sid_type`, `privileges`, `failure_actions`, `users_cannot_stop`, `runtime_hashes`, `state_acl`, `isolated_imports`, `pipe_owner`, `refuses_unknown_op`, `observers`, `clean_stop_and_start` | Verified on the installed service |
+| FAIL (1) | `worker_scan` | All four worker stages unavailable; every scan `unknown` |
+| SKIP (2) | `medium_token_cannot_approve`, `remote_client_refused` | Not measured in this install |
+
+After hours of running, status showed 73,658 records, 86,988 unresolved, 0 failed polls and a largest
+gap of 10,667 s. The cause of the gap is not established.
+
+| Round | Faults fixed in the merged round |
+|---|---|
+| SVC1 (`ec06f6c`) | Native host falls back on a service `unknown`; failed worker starts back off and report their failure; skipped observations are counted; changed rules trigger rescans; incomplete coverage is not retried as transient; tray keeps local evidence the service lacks and shows worker failure. |
+| SVC2 (`590f7e1`) | Offline feed attempts stop rebuilding the same snapshot; a candidate rule set is tried under the worker's limit before replacement. |
+| SVC3 and SVC3B (`d2305b0`) | Refused observations are retried, journal scans wait for a quiet file, failed file-id lookups are tracked, and journal reads drain bounded batches. Claude's review restored process-hint de-duplication and added the deleted-file error code. |
+| SVC4 (`6797f6c`) | Service logs rotate; installed-shape tests exercise the restricted worker and its runtime. |
+| SVC5 (`ea43575`) | Killing a busy worker closes its job first; stderr has its own drained pipe; start failures retain a diagnostic in `status` and the log. |
+| SVC6 (`94b5ad9`) | Stop cancels observed scans; scans skipped while the worker is down trigger catch-up when it returns; denied process access is reported as refusal; repair reports persistence it left. |
+| SVC7 (`695935a`) | A probe brings the worker back on a quiet machine; rescans follow rules and hash lists, not every feed publish; events are trimmed to 20,000 rows. |
+| SVC8 (`8721368`) | Cloud placeholders are never read or hydrated and report as not checked; restore says whether the download mark survived. |
+| SVC9 (`edb0f00`) | Records are filtered by name before the file lookup; `largest_gap` counts awake time and `slept_seconds` the rest; `journal_lag_bytes` shows a coming wrap. |
+| SVC10 (`b7daecb`) | `tools/fp_sample.py` runs every engine and says which really ran. No rate has been measured with it. |
+
+| Review outcome | Finding | Disposition |
+|---|---|---|
+| Refused from SVC2 brief | A 64–72 MiB read as head plus tail is two buffers. No rule sees across their seam, so treating it as complete could report a false clean. | Kept partial; pinned by a test. |
+| Caught in SVC3B review | A deleted file's id returned error 87 on NTFS (measured). Without that case, each deletion counted as a failed lookup and would force hourly reconciliation indefinitely. The round also dropped process-hint de-duplication. | Both corrected before merge. |
+| Caught by test at SVC2 merge | An offline pass must still publish a new popular list. | Corrected at merge. |
+| Refuted by review | Defender names on real MpCmdRun output cannot reach automatic quarantine. | No fix for that claim. |
+| Measured delete race | A delete still pending returned error 5. | Retried once. |
+| Caught by tests in SVC8 review | The round read the download mark after opening handles that hold DELETE, so the read failed with a sharing violation and every quarantine lost the mark. | Read moved back before the handles. |
+| Caught in SVC8 review | The main scan path in `content.py` still opened without `FILE_FLAG_OPEN_NO_RECALL`, and the Path subclass took a second segment as its own argument. | Both fixed, the first with a test through the real gate. |
+| Caught in DOCS1 review | The round wrote that the owner ran the install, and guessed what R1 to R5 were. | Corrected. |
+| Found through a flaky test | `OperationalError` is a `DatabaseError`, so "database is locked" read as damage and `_rebuild()` ran on a file another process was using. Turning on WAL ignores the busy timeout, so two processes creating the file at once could do this. Windows refused the rename, which is what showed; had it gone through, a healthy database would have been moved aside. Present since before these rounds. | A busy open waits and then raises; only real damage rebuilds (`2e71f5e`). Three full runs clean after it. |
+
+Left: one download can be scanned three times when the service answers `unknown`, once by the service, once
+locally and once more if that finds something. The service's restore reply does not carry the download mark's
+outcome yet. Two old failures of the concurrency and deadline tests under load: the first was the database fault
+above; `test_k3_k4_named_hit_survives_change_and_deadline` failed once in a full run, did not recur, and was not
+explained. A reconciliation
+after a lost journal is limited to the smart scope. Short-lived processes between samples are not seen.
+Restored files take the destination's ACL and the service as owner. Repairs leave scheduled tasks and
+WMI consumers in place and report that they were left.
