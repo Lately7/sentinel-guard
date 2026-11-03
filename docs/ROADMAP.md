@@ -3,7 +3,7 @@
 Một trang duy nhất để theo dõi tiến độ. Chi tiết kỹ thuật vẫn nằm trong
 `docs/handoff/PROJECT_CONTEXT.md`; khi hai nơi khác nhau thì code là đúng.
 
-**Cập nhật:** 2026-11-02 đêm, xem `docs/handoff/PLAN.md` §0a · **Nhánh:** `main` (đổi tên từ `gate-baseline`), đẩy lên `github.com/Lately7/sentinel-guard` · **Kế hoạch toàn bộ:** `docs/handoff/PLAN.md` · **Bàn giao:** `docs/handoff/NEXT_SESSION.md`
+**Cập nhật:** 2026-11-03, xem `docs/handoff/PLAN.md` §0a · **Nhánh:** `main` (đổi tên từ `gate-baseline`), đẩy lên `github.com/Lately7/sentinel-guard` · **Kế hoạch toàn bộ:** `docs/handoff/PLAN.md` · **Bàn giao:** `docs/handoff/NEXT_SESSION.md`
 
 ## Ai làm gì
 
@@ -46,11 +46,17 @@ Nghiên cứu xong: `docs/research/R13-admin-realtime-remediation.md`. Thiết k
 * Thời gian thực: USN journal để đối chiếu lại sau khi tràn hàng đợi, ETW để
   quét chương trình lúc khởi chạy — vẫn **không chặn được trước khi chạy**
   (cần driver ký số).
+
 * Tệp tải về: phát hiện ở mọi trình duyệt qua thư mục + Mark of the Web, quét
   lại khi chữ ký cập nhật hoặc khi chạy lần đầu.
 * **Quét và sửa**: kế hoạch sửa có nhật ký hoàn tác; tự động chỉ cách ly tệp
   có bằng chứng chắc chắn; diệt tiến trình, gỡ khởi động cùng Windows, dịch
   vụ, WMI… cần xác nhận; không bao giờ đụng tệp hệ thống Windows hay Defender.
+
+Ngày 2026-11-03, chủ dự án chọn tiếp tục ở user-mode với dịch vụ LocalSystem,
+không dùng driver, và dùng ETW bên cạnh bộ chụp tiến trình. Chương trình thấy tệp
+hoặc tiến trình sau khi nó xuất hiện; chặn ở mức kernel trước khi chạy nằm ngoài
+phạm vi hiện tại.
 
 Thảo luận thiết kế với Codex (`docs/research/R13b-design-discussion.md`)
 đã chốt thêm: dịch vụ LocalSystem mỏng viết bằng `ctypes` (không thêm thư
@@ -80,8 +86,10 @@ Lên ≈7 làm được trong dự án này, sau mốc 7, theo thứ tự:
 
 1. Danh tiếng hash/URL (MalwareBazaar, URLhaus, ThreatFox; tra VirusTotal chỉ
    cho tệp mới tải về).
-2. Chống ransomware ở user-mode bằng ETW + tệp mồi: tạm dừng tiến trình và
-   hỏi người dùng (cần dịch vụ admin). Bước đầu: Codex nghiên cứu (R14).
+2. Chống ransomware ở user-mode bằng ETW + tệp mồi: ETW và chấm điểm shadow đã
+   nối vào dịch vụ nhưng chưa kiểm trên phiên thật. Chưa bắt đầu 30 ngày quan sát;
+   chỉ bắt đầu khi ETW bật. Tệp mồi chờ chủ dự án trả lời câu hỏi 11; chưa tạm
+   dừng tiến trình.
 3. Dùng Defender làm một engine khi nó đang chạy; chủ dự án tự bật Controlled
    Folder Access nếu muốn (Claude không đổi cài đặt Defender).
 4. Đo báo nhầm thật, rồi mới chuyển `legacy-v0` → `evidence-v1`.
@@ -220,5 +228,5 @@ cần xử lý mới sáng lên (333 ms); tắt hết khi Windows tắt hiệu �
 
 ## Kiểm thử gần nhất
 
-pytest **958 passed, 10 skipped, 1 xfailed** (ba lần chạy liền; không có clamd; xfail còn lại = RT-001; chỗ bỏ qua chủ yếu cần quyền nâng hoặc symlink) · extension **40 passed** · Helium 156 e2e đạt, `sw_errors: []`
+pytest **1039 passed, 10 skipped, 1 xfailed** (hai lần chạy liền) · extension **40 passed**. Helium e2e không chạy lại; trên máy đã cài dịch vụ, bộ e2e dừng nếu không có `--with-service`.
 Baseline tại C2a: `docs/baseline.md`.
