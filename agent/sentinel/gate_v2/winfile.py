@@ -24,6 +24,8 @@ FILE_SHARE_READ, FILE_SHARE_DELETE = 0x1, 0x4
 CREATE_NEW, OPEN_EXISTING = 1, 3
 FILE_ATTRIBUTE_NORMAL = 0x80
 FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+FILE_FLAG_OPEN_NO_RECALL = 0x00100000
+RECALL_ATTRIBUTES = identity.RECALL_ATTRIBUTES
 INVALID_HANDLE = wintypes.HANDLE(-1).value
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 FILE_ATTRIBUTE_TAG_INFO = 9
@@ -261,6 +263,13 @@ def _reparse_tag(handle: int, path: str) -> int:
     return tag if attributes & FILE_ATTRIBUTE_REPARSE_POINT else 0
 
 
+def _file_attributes(handle: int, path: str) -> int:
+    info = (ctypes.c_uint32 * 2)()
+    if not _k32.GetFileInformationByHandleEx(handle, FILE_ATTRIBUTE_TAG_INFO, info, ctypes.sizeof(info)):
+        raise _fail(path)
+    return info[0]
+
+
 def _open(path: str, access: int, share: int, disposition: int, attributes: int, mode: int, how: str) -> Target:
     if os.name != "nt":
         raise TargetError("WINDOWS_REQUIRED", path)
@@ -291,10 +300,14 @@ def open_target(path: str) -> Target:
 
     FILE_SHARE_DELETE stays on because sharing belongs to the file, not to the
     name: without it a second hard link could not be opened for deletion.
+    NO_RECALL also covers a placeholder that appears between a path check and
+    this open; the handle attributes are checked before any content copy.
     """
     target = _open(path, GENERIC_READ | DELETE | FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_DELETE,
-                   OPEN_EXISTING, 0, os.O_RDONLY | os.O_BINARY, "rb")
+                   OPEN_EXISTING, FILE_FLAG_OPEN_NO_RECALL, os.O_RDONLY | os.O_BINARY, "rb")
     try:
+        if _file_attributes(target.handle, path) & RECALL_ATTRIBUTES:
+            raise TargetError("CLOUD_PLACEHOLDER", path)
         if _reparse_tag(target.handle, path) & NAME_SURROGATE:
             raise TargetError("REPARSE_POINT", path)
         if not stat.S_ISREG(os.fstat(target.stream.fileno()).st_mode):

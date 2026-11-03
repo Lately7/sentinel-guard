@@ -63,6 +63,15 @@ class QuarantineError(Exception):
         super().__init__(message)
 
 
+class RestoredPath(Path):
+    def __init__(self, path: Path, *, zone_identifier_preserved: bool | None = None) -> None:
+        super().__init__(path)
+        self.zone_identifier_preserved = zone_identifier_preserved
+
+    def with_segments(self, *segments: Any) -> Path:
+        return Path(*segments)  # a path derived from this one is not the restored file
+
+
 def _xor_chunk(data: bytes) -> bytes:
     n = len(data)
     if not n:
@@ -104,14 +113,19 @@ def _copy_xor(src: winfile.Target, dest: Path) -> str:
     return sha
 
 
-def _zone_identifier(path: str) -> str | None:
+def _zone_identifier(path: str) -> tuple[str | None, bool]:
     # A restored download must stay marked as one, or restoring would switch off
     # SmartScreen for it.
     try:
         with open(path + ":Zone.Identifier", "rb") as stream:
-            return stream.read(MAX_ZONE_BYTES).decode("utf-8", errors="replace")
+            data = stream.read(MAX_ZONE_BYTES + 1)
+            if len(data) > MAX_ZONE_BYTES:
+                return None, True
+            return data.decode("utf-8", errors="replace"), False
+    except FileNotFoundError:
+        return None, False
     except OSError:
-        return None
+        return None, True
 
 
 def _open_names(path: str, expected: FileIdentity | None) -> list[winfile.Target]:
@@ -147,7 +161,8 @@ def quarantine(db: Database, path: str, verdict: dict[str, Any], *, expected: Fi
     if ":" in ntpath.splitdrive(path)[1]:
         raise QuarantineError(f"{path} is a stream, not a file", "NOT_REGULAR")
     src = Path(path)
-    zone = _zone_identifier(path)
+    # Before the handles: they hold DELETE, which this read does not share.
+    zone, zone_read_error = _zone_identifier(path)
     try:
         names = _open_names(path, expected)
     except TargetError as e:
@@ -161,14 +176,14 @@ def quarantine(db: Database, path: str, verdict: dict[str, Any], *, expected: Fi
             n.close()
         raise QuarantineError(f"{src} is being quarantined already", "ALREADY")
     try:
-        return _quarantine(db, src, names, verdict, expected, zone)
+        return _quarantine(db, src, names, verdict, expected, zone, zone_read_error)
     finally:
         with _claims_lock:
             _claims.discard(key)
 
 
 def _quarantine(db: Database, src: Path, names: list[winfile.Target], verdict: dict[str, Any],
-                expected: FileIdentity | None, zone: str | None) -> str:
+                expected: FileIdentity | None, zone: str | None, zone_read_error: bool = False) -> str:
     qid = uuid.uuid4().hex
     dest = config.quarantine_dir() / f"{qid}.qbin"
     recorded = False
@@ -185,7 +200,7 @@ def _quarantine(db: Database, src: Path, names: list[winfile.Target], verdict: d
         with db.transaction():
             db.open_action(qid, kept_path(str(src)), sha)
             db.add_quarantine(qid, kept_path(str(src)), sha, first.size,
-                              {**verdict, "zone_identifier": zone} if zone else verdict)
+                              {**verdict, "zone_identifier": zone, "zone_identifier_read_error": zone_read_error})
         recorded = True
         db.flush()  # the record of where this came from is what makes the blob worth anything
         try:
@@ -289,12 +304,12 @@ def _create_target(original: Path) -> tuple[Path, winfile.Target]:
     raise QuarantineError(f"no free name to restore {original}")
 
 
-def restore(db: Database, qid: str, *, trust: bool = True) -> Path:
+def restore(db: Database, qid: str, *, trust: bool = True) -> RestoredPath:
     with _action_lock:
         return _restore(db, qid, trust)
 
 
-def _restore(db: Database, qid: str, trust: bool) -> Path:
+def _restore(db: Database, qid: str, trust: bool) -> RestoredPath:
     item = db.quarantine_item(qid)
     if not item:
         raise QuarantineError(f"no quarantine item {qid}")
@@ -324,20 +339,24 @@ def _restore(db: Database, qid: str, trust: bool) -> Path:
             if isinstance(e, QuarantineError):
                 raise
             raise QuarantineError(f"restore could not be finished: {e}") from e
-        _put_back_zone(created, target, item)
+        zone_preserved = _put_back_zone(created, target, item)
     finally:
         created.close()
     blob.unlink(missing_ok=True)  # an orphaned blob after this point is harmless
-    return target
+    return RestoredPath(target, zone_identifier_preserved=zone_preserved)
 
 
-def _put_back_zone(created: winfile.Target, target: Path, item: dict[str, Any]) -> None:
+def _put_back_zone(created: winfile.Target, target: Path, item: dict[str, Any]) -> bool | None:
     try:
-        zone = json.loads(item["verdict"]).get("zone_identifier")
+        verdict = json.loads(item["verdict"])
+        zone = verdict.get("zone_identifier")
         if isinstance(zone, str):
             created.write_stream(":Zone.Identifier", zone.encode("utf-8"))
+            return True
+        return False if verdict.get("zone_identifier_read_error") else None
     except (TargetError, ValueError, AttributeError):
         log.warning("could not put the download mark back on %s", ntpath.basename(str(target)))
+        return False
 
 
 def delete(db: Database, qid: str) -> None:
