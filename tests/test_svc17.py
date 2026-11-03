@@ -10,6 +10,7 @@ import os
 import struct
 import sys
 import uuid
+from dataclasses import replace
 
 from sentinel.service import backend, etw, verify
 
@@ -47,6 +48,14 @@ class Child:
         return None
 
 
+def deliver(observer, event: etw.RawEvent, phase: str = "W") -> None:
+    # The aggregator runs on_raw, which keeps the callback-time phase, before on_event.
+    event = replace(event, phase=phase)
+    parsed = etw.parse_event(event)
+    observer._check_raw_event(event, parsed)
+    observer._parsed(parsed)
+
+
 def fast_clock(monkeypatch) -> None:
     now = [0.0]
     monkeypatch.setattr(etw.time, "monotonic", lambda: now[0])
@@ -76,7 +85,7 @@ def test_the_check_passes_on_its_child_start_alone(monkeypatch) -> None:
 
     def popen(argv, **kwargs):
         spawned.append((argv, kwargs))
-        observer._parsed(etw.parse_event(raw_process(1, Child.pid, parent=os.getpid())))
+        deliver(observer, raw_process(1, Child.pid, parent=os.getpid()))
         return Child()
 
     monkeypatch.setattr(etw.subprocess, "Popen", popen)
@@ -113,7 +122,7 @@ def test_a_rundown_of_hundreds_does_not_push_out_the_child_start(monkeypatch) ->
     observer.state = "checking"
 
     def popen(*_args, **_kwargs):
-        observer._parsed(etw.parse_event(raw_process(1, Child.pid, parent=os.getpid())))
+        deliver(observer, raw_process(1, Child.pid, parent=os.getpid()))
         for pid in range(20_000, 20_400):
             observer._parsed(etw.parse_event(raw_process(3, pid)))
         return Child()

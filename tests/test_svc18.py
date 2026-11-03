@@ -4,6 +4,7 @@ import ctypes
 import logging
 import os
 import queue
+from dataclasses import replace
 
 from sentinel.service import etw
 from test_svc17 import process_payload
@@ -226,7 +227,9 @@ def test_check_runs_both_children_and_flushes_at_five_and_six(monkeypatch) -> No
         spawned.append((now[0], argv, kwargs))
         pid = 100 + len(spawned)
         if len(spawned) == 2:
-            observer._parsed(etw.parse_event(raw(1, pid, parent=os.getpid())))
+            event = replace(raw(1, pid, parent=os.getpid()), phase="B")
+            observer._check_raw_event(event, etw.parse_event(event))
+            observer._parsed(etw.parse_event(event))
         return Child(pid)
 
     class Collector:
@@ -235,6 +238,12 @@ def test_check_runs_both_children_and_flushes_at_five_and_six(monkeypatch) -> No
 
         def __init__(self):
             self.flushes = []
+            self.queue = queue.Queue()
+            self.priority_queue = queue.Queue()
+
+        def set_phase(self, phase):
+            self.phase = phase
+            return True
 
         def flush(self):
             self.flushes.append(now[0])
@@ -286,10 +295,20 @@ def test_flush_only_match_enables_periodic_assist(monkeypatch) -> None:
         phase = "W"
         flush_every = 0.0
 
+        def __init__(self):
+            self.queue = queue.Queue()
+            self.priority_queue = queue.Queue()
+
         def flush(self):
             if now[0] >= 5 and spawned:
-                observer._parsed(etw.parse_event(raw(1, spawned[0], parent=os.getpid())))
+                event = replace(raw(1, spawned[0], parent=os.getpid()), phase="F")
+                observer._check_raw_event(event, etw.parse_event(event))
+                observer._parsed(etw.parse_event(event))
             return 0
+
+        def set_phase(self, phase):
+            self.phase = phase
+            return True
 
         def measured(self):
             return {}

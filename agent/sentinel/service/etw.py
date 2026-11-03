@@ -55,6 +55,7 @@ OP_FILE_NAME = (0, 32, 35, 36)  # name, create, delete, rundown
 OP_READ, OP_WRITE = 67, 68
 OP_PROCESS_START, OP_PROCESS_END = 1, 2
 OP_PROCESS_DCSTART = 3
+STOP_LINE_WAIT = 1.0
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,7 @@ class RawEvent:
     received_at: float = 0.0
     truncated: bool = False
     cpu: int = -1
+    phase: str | None = None
 
 
 @dataclass(frozen=True)
@@ -275,6 +277,8 @@ class Collector:
         self._retry_delay = FILE_RETRY_SECONDS
         self._stop_lock = threading.Lock()
         self._stopped = False
+        self._stop_done = threading.Event()
+        self._stop_deadline = 0.0
         self.phase: str | None = None
         self._measure_lock = threading.Lock()
         self._tallies: dict[str, Counter[str]] = {}
@@ -313,16 +317,17 @@ class Collector:
             self.counters.queue_drops += 1
             self.counters.callback_cpu_s += time.thread_time() - started
             return
-        if self.phase is not None:
+        phase = self.phase
+        if phase is not None:
             try:
-                self._measure(event, now)
+                self._measure(event, now, phase)
             except Exception:
                 self.tally_errors += 1
         try:
             lane = self.priority_queue if self.priority and self.priority(event) else self.queue
             lane.put_nowait(RawEvent(event.provider, event.opcode, event.version,
                                       event.pid, event.tid, event.timestamp, event.payload,
-                                      time.monotonic(), event.truncated, event.cpu))
+                                      time.monotonic(), event.truncated, event.cpu, phase))
             self.counters.queued += 1
             self.counters.queue_high_water = max(self.counters.queue_high_water,
                 self.queue.qsize() + self.priority_queue.qsize())
@@ -347,10 +352,19 @@ class Collector:
         method = getattr(self.backend, "enable", None)
         return method() if method is not None else StartResult("STARTED")
 
-    def _measure(self, event: RawEvent, now: float) -> None:
-        phase = self.phase
-        if phase is None:
-            return
+    def set_phase(self, phase: str) -> bool:
+        with self._measure_lock:
+            if self.phase == "S":
+                return False
+            self.phase = phase
+            return True
+
+    def stop_phase(self) -> None:
+        with self._measure_lock:
+            if self.phase is not None:
+                self.phase = "S"
+
+    def _measure(self, event: RawEvent, now: float, phase: str) -> None:
         provider = event.provider
         if provider in (PROCESS_CLASS, PROCESS_PROVIDER):
             kind = f"p{event.opcode}"
@@ -440,28 +454,33 @@ class Collector:
             try:
                 try:
                     raw = self.priority_queue.get_nowait()
+                    lane = self.priority_queue
                 except queue.Empty:
                     raw = self.queue.get(timeout=0.2)
+                    lane = self.queue
             except queue.Empty:
                 continue
-            if raw.received_at:
-                self.counters.max_delivery_ms = max(self.counters.max_delivery_ms,
-                    (time.monotonic() - raw.received_at) * 1000)
-            parsed = parse_event(raw)
-            if self.on_raw is not None:
-                try:
-                    self.on_raw(raw, parsed)
-                except Exception:
-                    self.counters.handler_failures += 1
-            if parsed is None:
-                self.counters.parse_failures += 1
-            else:
-                self.counters.parsed += 1
-                self.correlator.observe(parsed)
-                try:
-                    self.on_event(parsed)
-                except Exception:
-                    self.counters.handler_failures += 1
+            try:
+                if raw.received_at:
+                    self.counters.max_delivery_ms = max(self.counters.max_delivery_ms,
+                        (time.monotonic() - raw.received_at) * 1000)
+                parsed = parse_event(raw)
+                if self.on_raw is not None:
+                    try:
+                        self.on_raw(raw, parsed)
+                    except Exception:
+                        self.counters.handler_failures += 1
+                if parsed is None:
+                    self.counters.parse_failures += 1
+                else:
+                    self.counters.parsed += 1
+                    self.correlator.observe(parsed)
+                    try:
+                        self.on_event(parsed)
+                    except Exception:
+                        self.counters.handler_failures += 1
+            finally:
+                lane.task_done()
 
     def _file_rate_guard(self) -> None:
         now = time.monotonic()
@@ -524,15 +543,25 @@ class Collector:
         """True only for the call that stopped the session."""
         with self._stop_lock:
             if self._stopped:
-                return False
-            self._stopped = True
-            self._stop.set()
-        deadline = time.monotonic() + 6.0
-        self.backend.stop()
-        for thread in (self._consumer, self._aggregator):
-            if thread:
-                thread.join(timeout=max(0.0, deadline - time.monotonic()))
-        return True
+                deadline = self._stop_deadline
+                first = False
+            else:
+                self._stop_deadline = time.monotonic() + 6.0
+                deadline = self._stop_deadline
+                first = True
+                self._stopped = True
+                self._stop.set()
+        if not first:
+            self._stop_done.wait(max(0.0, deadline - time.monotonic()))
+            return False
+        try:
+            self.backend.stop()
+            for thread in (self._consumer, self._aggregator):
+                if thread:
+                    thread.join(timeout=max(0.0, deadline - time.monotonic()))
+            return True
+        finally:
+            self._stop_done.set()
 
 
 FORWARDED = frozenset(("name", "read", "write", "process_start", "process_stop"))
@@ -578,6 +607,7 @@ class EtwObserver:
         self._check_raw: deque[RawEvent] = deque(maxlen=1)  # the service's own DCStart
         self._raw_starts: deque[RawEvent] = deque(maxlen=256)
         self._raw_start_pids: set[int] = set()
+        self._raw_start_mismatch_pids: set[int] = set()
         self._check_children: dict[int, float] = {}
         self._check_event_phases: dict[int, str] = {}
         self._pass_phase: str | None = None
@@ -586,6 +616,10 @@ class EtwObserver:
         self._sleep_count = 0
         self._sleep_late = 0
         self._sleep_worst_ms = 0.0
+        self._sleep_overrun_ms = 0.0
+        self.spawn_errors: dict[str, int] = {}
+        self._late_children: list[str] = []
+        self._stop_line_done = threading.Event()
         self._check_loss: int | None = None
         self._lock = threading.Lock()
         self._lifecycle = threading.Lock()
@@ -628,7 +662,7 @@ class EtwObserver:
             collector = Collector(self.backend_factory(guid), self._parsed,
                                   priority=lambda raw: raw.provider in (PROCESS_PROVIDER, PROCESS_CLASS),
                                   on_raw=self._check_raw_event)
-            collector.phase = "P"
+            collector.set_phase("P")
             self.collector = collector
             result = collector.start()
         if result.status != "STARTED":
@@ -651,7 +685,7 @@ class EtwObserver:
             if self._stopping.is_set():
                 self._stop_check(collector)
                 return
-            collector.phase = "W"
+            collector.set_phase("W")
             self.check_phase = "W"
             enabled = collector.enable()
             if enabled.status != "STARTED":
@@ -661,7 +695,7 @@ class EtwObserver:
                 self._stop_check(collector)
                 return
         else:
-            collector.phase = "W"
+            collector.set_phase("W")
             self.check_phase = "W"
         try:
             reason = self.check(collector)
@@ -676,18 +710,21 @@ class EtwObserver:
             self._stop_check(collector)
             return
         with self._lifecycle:
-            if self._stopping.is_set():
-                collector.stop()
-                return
-            collector.file_events = "off"
-            collector.phase = None
             with self._lock:
-                self.state = "on"
-                self._checking.clear()
-                self._check_raw.clear()
-                self._raw_starts.clear()
-                self._raw_start_pids.clear()
-                collector.on_raw = None
+                stopped = self._stopping.is_set()
+                if not stopped:
+                    collector.file_events = "off"
+                    collector.phase = None
+                    self.state = "on"
+                    self._checking.clear()
+                    self._check_raw.clear()
+                    self._raw_starts.clear()
+                    self._raw_start_pids.clear()
+                    self._raw_start_mismatch_pids.clear()
+                    collector.on_raw = None
+            if stopped:
+                self._stop_check(collector)
+                return
 
     def _check_schema(self, collector: Collector | None) -> str:
         image = ntpath.basename(sys.executable).casefold()
@@ -696,33 +733,58 @@ class EtwObserver:
         flushed: set[int] = set()
         phase = "W"
         matched: str | None = None
+        attempted_b = False
+        phase_logged = False
+
+        def scan() -> tuple[str | None, list[str]]:
+            observed: list[str] = []
+            late: list[str] = []
+            with self._lock:
+                for label, pid in spawned.items():
+                    if any(event.pid == pid and event.parent_pid == os.getpid()
+                           and event.image_name.casefold() == image for event in self._checking):
+                        seen = self._check_event_phases.get(pid)
+                        if seen in ("W", "B", "F"):
+                            observed.append(seen)
+                        elif seen == "E":
+                            late.append(label)
+            return min(observed, key={"W": 0, "B": 1, "F": 2}.get) if observed else None, late
+
         with contextlib.ExitStack() as stack:
             while not self._stopping.is_set():
                 now = time.monotonic()
-                with self._lock:
-                    for event in self._checking:
-                        if (event.pid in spawned.values() and event.parent_pid == os.getpid()
-                                and event.image_name.casefold() == image):
-                            seen_phase = self._check_event_phases.get(event.pid, phase)
-                            if matched is None:
-                                matched = seen_phase
+                matched, _late = scan()
                 elapsed = now - began
                 if elapsed >= 7.0:
                     break
                 if "A" not in spawned:
                     self._spawn_check_child(stack, spawned, "A")
-                if elapsed >= 3.0 and "B" not in spawned:
+                if elapsed >= 3.0 and not attempted_b:
+                    attempted_b = True
                     self._phase_end(collector, phase)
+                    phase_logged = True
+                    if self._stopping.is_set():
+                        break
                     phase = "B"
-                    if collector is not None:
-                        collector.phase = phase
+                    if collector is not None and not collector.set_phase(phase):
+                        break
+                    phase_logged = False
                     self.check_phase = phase
-                    self._spawn_check_child(stack, spawned, "B")
+                    if self._stopping.is_set():
+                        break
+                    try:
+                        self._spawn_check_child(stack, spawned, "B")
+                    except (OSError, subprocess.SubprocessError, ValueError) as error:
+                        self.spawn_errors["B"] = error.errno if isinstance(error, OSError) and error.errno is not None else -1
                 if elapsed >= 5.0 and phase != "F":
                     self._phase_end(collector, phase)
+                    phase_logged = True
+                    if self._stopping.is_set():
+                        break
                     phase = "F"
-                    if collector is not None:
-                        collector.phase = phase
+                    if collector is not None and not collector.set_phase(phase):
+                        break
+                    phase_logged = False
                     self.check_phase = phase
                 for second in (5, 6):
                     if elapsed >= second and second not in flushed:
@@ -730,7 +792,16 @@ class EtwObserver:
                         if collector is not None:
                             collector.flush()
                 self._check_sleep(min(began + 7, now + 0.05))
-        self._phase_end(collector, phase)
+            if collector is not None and not self._stopping.is_set():
+                collector.set_phase("E")
+                drain_until = time.monotonic() + 0.3
+                while (not self._stopping.is_set() and time.monotonic() < drain_until
+                       and (collector.queue.unfinished_tasks or collector.priority_queue.unfinished_tasks)):
+                    self._stopping.wait(0.01)
+            matched, late = scan()
+        if not phase_logged:
+            self._phase_end(collector, phase)
+        self._late_children = late
         self._pass_phase = matched
         if matched in ("W", "B", "F"):
             if matched == "F":
@@ -739,8 +810,8 @@ class EtwObserver:
                     collector.flush_every = 1.0
             return ""
         with self._lock:
-            delivered = any(pid in self._raw_start_pids for pid in spawned.values())
-        return "schema_process_mismatch" if delivered else "no_start_events"
+            mismatch = any(pid in self._raw_start_mismatch_pids for pid in spawned.values())
+        return "schema_process_mismatch" if mismatch else "no_start_events"
 
     def _spawn_check_child(self, stack: contextlib.ExitStack, spawned: dict[str, int], label: str) -> None:
         spawn_at = time.perf_counter()
@@ -755,11 +826,16 @@ class EtwObserver:
     def _check_sleep(self, target: float) -> None:
         remaining = target - time.monotonic()
         if remaining > 0:
+            started = time.perf_counter()
             time.sleep(remaining)
+            # How long past the request the thread woke: a GIL or scheduler stall, not our own work.
+            overslept_ms = (time.perf_counter() - started - remaining) * 1000
+            self._sleep_worst_ms = max(self._sleep_worst_ms, overslept_ms)
+        else:
+            self._sleep_overrun_ms = max(self._sleep_overrun_ms, -remaining * 1000)
         late_ms = max(0.0, (time.monotonic() - target) * 1000)
         self._sleep_count += 1
         self._sleep_late += late_ms > 50
-        self._sleep_worst_ms = max(self._sleep_worst_ms, late_ms)
 
     @staticmethod
     def _loss_total(counters: Counters) -> int:
@@ -775,8 +851,6 @@ class EtwObserver:
                 # would push the child's start out of the bounded deque.
                 if event.kind == "process_start" and event.parent_pid == os.getpid():
                     self._checking.append(event)
-                    if self.collector is not None:
-                        self._check_event_phases.setdefault(event.pid, self.collector.phase or "W")
                 return
         if state != "on":
             return
@@ -815,19 +889,20 @@ class EtwObserver:
 
     def stop(self) -> None:
         self._stopping.set()
-        checking = self.state == "checking"
         self.state = "off"
         with self._lifecycle:
             if self.collector is not None:
+                checking = self.collector.phase is not None
                 if checking:
-                    self.collector.phase = "S"
-                if self.collector.stop() and checking:
-                    try:
-                        self._log_check("stop", tallies=self.collector.measured().get("S", {}),
-                                        final_stats=getattr(self.collector.backend, "final_stats", None),
-                                        lifecycle=self.collector.lifecycle())
-                    except Exception:
-                        pass
+                    self.collector.stop_phase()
+                stopped = self.collector.stop()
+                if stopped and checking:
+                    self._log_stop_line(self.collector)
+                elif not stopped and checking:
+                    # collector.stop() returned only once the winner's stop was done (or its
+                    # 6 s ran out); the line follows at once, and the service stop has 10 s.
+                    self._stop_line_done.wait(STOP_LINE_WAIT)
+            self.state = "off"
 
     @staticmethod
     def _resolve_process(pid: int) -> str:
@@ -851,8 +926,19 @@ class EtwObserver:
             if raw.provider not in (PROCESS_PROVIDER, PROCESS_CLASS) or len(raw.payload) < 12:
                 return
             if raw.opcode == OP_PROCESS_START:
-                self._raw_start_pids.add(struct.unpack_from("<I", raw.payload, 8)[0])
+                pid = struct.unpack_from("<I", raw.payload, 8)[0]
+                self._raw_start_pids.add(pid)
                 self._raw_starts.append(raw)
+                image = ntpath.basename(sys.executable).casefold()
+                parsed_matches = (parsed is not None and parsed.kind == "process_start" and parsed.pid == pid
+                                  and parsed.parent_pid == os.getpid() and parsed.image_name.casefold() == image)
+                if not parsed_matches:
+                    self._raw_start_mismatch_pids.add(pid)
+                if parsed_matches and raw.phase in ("W", "B", "F", "E"):
+                    previous = self._check_event_phases.get(pid)
+                    order = {"W": 0, "B": 1, "F": 2, "E": 3}
+                    if previous is None or order[raw.phase] < order[previous]:
+                        self._check_event_phases[pid] = raw.phase
             elif (raw.opcode == OP_PROCESS_DCSTART and not self._check_raw
                   and struct.unpack_from("<I", raw.payload, 8)[0] == os.getpid()):
                 self._check_raw.append(raw)
@@ -866,6 +952,7 @@ class EtwObserver:
                     if struct.unpack_from("<I", raw.payload, 8)[0] in self._check_children)[:2]
                 self._raw_starts.clear()
                 self._raw_start_pids.clear()
+                self._raw_start_mismatch_pids.clear()
             log = logging.getLogger(__name__)
             log.warning("etw check: %s counts %s", reason,
                         ", ".join(f"{provider}/{opcode}={count}" for (provider, opcode), count in counts))
@@ -898,9 +985,15 @@ class EtwObserver:
                             cpu={key: value for key, value in tally.items() if "@" in key},
                             stats=collector.session_stats(),
                             sleeps=self._sleep_count, late=self._sleep_late,
-                            worst_ms=round(self._sleep_worst_ms))
+                            worst_ms=round(self._sleep_worst_ms),
+                            overrun_ms=round(self._sleep_overrun_ms))
         except Exception:
             pass
+        finally:
+            self._sleep_count = 0
+            self._sleep_late = 0
+            self._sleep_worst_ms = 0.0
+            self._sleep_overrun_ms = 0.0
 
     def _log_result(self, collector: Collector, reason: str) -> None:
         try:
@@ -913,6 +1006,8 @@ class EtwObserver:
             c = collector.counters
             self._log_check("result", result="interrupted" if self._stopping.is_set() else
                             reason or "pass", pass_phase=self._pass_phase, children=children,
+                            late=self._late_children, spawn_errors=self.spawn_errors,
+                            phase_e=collector.measured().get("E", {}),
                             flush=list(collector._flush_results), lifecycle=collector.lifecycle(),
                             queue_drops=c.queue_drops, truncated=c.truncated,
                             events_lost=c.events_lost, realtime_buffers_lost=c.realtime_buffers_lost,
@@ -925,15 +1020,20 @@ class EtwObserver:
             pass
 
     def _stop_check(self, collector: Collector) -> None:
-        collector.phase = "S"
+        collector.stop_phase()
         if not collector.stop():
-            return  # EtwObserver.stop got there first and logged it
+            return
+        self._log_stop_line(collector)
+
+    def _log_stop_line(self, collector: Collector) -> None:
         try:
             self._log_check("stop", tallies=collector.measured().get("S", {}),
                             final_stats=getattr(collector.backend, "final_stats", None),
                             lifecycle=collector.lifecycle())
         except Exception:
             pass
+        finally:
+            self._stop_line_done.set()
 
 
 def _same_file(event_path: str, known_path: str) -> bool:
