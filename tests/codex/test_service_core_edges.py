@@ -13,6 +13,7 @@ import pytest
 
 from sentinel.gate_v2.identity import measure
 from sentinel.service.authz import Caller
+from sentinel.service.client import ServiceClient, ServiceUnavailable
 from sentinel.service.core import PLAN_TTL_SECONDS, ServiceCore, local_path
 from sentinel.service.protocol import MAX_FRAME, MAX_PATH, ProtocolError, parse_request, read_frame
 
@@ -106,14 +107,41 @@ def test_empty_truncated_invalid_and_array_frames_are_bad(body: bytes, length: i
 
 
 def test_partial_length_prefix_is_not_clean_eof() -> None:
-    # expected to fail: a cut prefix currently returns None, hiding a broken frame as clean EOF.
+    # A cut prefix must not hide a broken frame as clean EOF.
     with pytest.raises(ProtocolError) as caught:
         read_frame(io.BytesIO(b"\x05\x00"))
     assert caught.value.code == "BAD_FRAME"
 
 
+def test_client_wraps_malformed_reply_as_service_unavailable() -> None:
+    class BrokenReply:
+        def __init__(self) -> None:
+            self.incoming = io.BytesIO(b"\x05\x00")
+            self.closed = False
+
+        def read(self, n: int) -> bytes:
+            return self.incoming.read(n)
+
+        def write(self, data: bytes) -> int:
+            return len(data)
+
+        def flush(self) -> None:
+            pass
+
+        def close(self) -> None:
+            self.closed = True
+
+    stream = BrokenReply()
+    client = ServiceClient()
+    client._conn = stream
+    with pytest.raises(ServiceUnavailable) as caught:
+        client.request("hello")
+    assert caught.value.code == "SERVICE_UNAVAILABLE"
+    assert stream.closed and client._conn is None
+
+
 def test_duplicate_json_keys_are_rejected() -> None:
-    # expected to fail: the JSON decoder currently takes the last duplicate operation silently.
+    # A duplicate operation must not silently replace the earlier value.
     body = b'{"v":1,"id":1,"op":"hello","op":"enable_protection"}'
     with pytest.raises(ProtocolError) as caught:
         read_frame(_frame(body))
@@ -122,7 +150,7 @@ def test_duplicate_json_keys_are_rejected() -> None:
 
 @pytest.mark.parametrize("number", [b"NaN", b"Infinity", b"-Infinity"])
 def test_nonfinite_json_numbers_are_rejected(number: bytes) -> None:
-    # expected to fail: Python accepts non-JSON number tokens in request frames.
+    # Non-JSON number tokens must not enter request frames.
     with pytest.raises(ProtocolError) as caught:
         read_frame(_frame(b'{"v":1,"id":1,"op":"hello","extra":' + number + b"}"))
     assert caught.value.code == "BAD_FRAME"
@@ -130,7 +158,10 @@ def test_nonfinite_json_numbers_are_rejected(number: bytes) -> None:
 
 def test_deeply_nested_json_is_a_typed_frame_error() -> None:
     # Excessive nesting must become a framing error rather than escaping recursion failure.
-    body = b'{"extra":' + b"[" * 1500 + b"0" + b"]" * 1500 + b"}"
+    prefix, suffix = b'{"extra":', b"}"
+    depth = (MAX_FRAME - len(prefix) - len(suffix) - 1) // 2
+    body = prefix + b"[" * depth + b"0" + b"]" * depth + suffix
+    assert len(body) <= MAX_FRAME
     with pytest.raises(ProtocolError) as caught:
         read_frame(_frame(body))
     assert caught.value.code == "BAD_FRAME"
@@ -154,14 +185,14 @@ def test_extreme_integer_json_is_a_typed_frame_error() -> None:
 
 @pytest.mark.parametrize("version", [True, 1.0])
 def test_version_must_be_an_integer_not_an_equal_value(version: object) -> None:
-    # expected to fail: bool and float compare equal to 1 and currently pass version validation.
+    # Bool and float compare equal to 1 but are not protocol versions.
     with pytest.raises(ProtocolError) as caught:
         parse_request({"v": version, "id": 1, "op": "hello"})
     assert caught.value.code == "BAD_VERSION"
 
 
 def test_unknown_top_level_field_is_refused() -> None:
-    # expected to fail: the parser currently ignores an unrecognized frame field.
+    # Unrecognized frame fields must not be ignored.
     with pytest.raises(ProtocolError) as caught:
         parse_request({"v": 1, "id": 1, "op": "hello", "surprise": True})
     assert caught.value.code == "BAD_REQUEST"
@@ -228,7 +259,7 @@ def test_valid_plan_kinds_reject_malformed_params(kind: str, params: dict[str, A
 
 
 def test_extra_nested_plan_parameter_is_refused() -> None:
-    # expected to fail: plan validation currently drops an unknown nested parameter silently.
+    # Unknown plan parameters must not be dropped silently.
     with pytest.raises(ProtocolError) as caught:
         parse_request(_request("request_plan", kind="trust_host", params={"host": "example.test", "extra": True}))
     assert caught.value.code == "BAD_REQUEST"
