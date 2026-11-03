@@ -7,7 +7,7 @@ import itertools
 from typing import Any
 
 from . import winpipe
-from .protocol import PROTOCOL_VERSION, read_frame, write_frame
+from .protocol import PROTOCOL_VERSION, ProtocolError, read_frame, write_frame
 
 
 class ServiceError(Exception):
@@ -61,7 +61,11 @@ class ServiceClient:
         rid = next(self._ids)
         try:
             write_frame(self._conn, {"v": PROTOCOL_VERSION, "id": rid, "op": op, "args": args})
-            reply = read_frame(self._conn)
+            try:
+                reply = read_frame(self._conn)
+            except ProtocolError as e:
+                self.close()
+                raise ServiceUnavailable("SERVICE_UNAVAILABLE", str(e)) from e
         except winpipe.PipeError as e:
             self.close()
             raise ServiceUnavailable("SERVICE_UNAVAILABLE", str(e)) from e
