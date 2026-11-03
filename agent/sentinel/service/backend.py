@@ -344,11 +344,16 @@ class ProductBackend:
     # -- reads
 
     def status(self) -> dict[str, Any]:
+        observation = self.observers.report() if self.observers is not None else {"prevention": "none"}
+        etw_observer = getattr(self.observers, "etw", None)
+        observation.update(etw_observer.status() if etw_observer is not None else
+                           {"etw": "off", "etw_events_parsed": 0, "etw_events_lost": 0,
+                            "etw_join_gaps": 0, "etw_gap": False})
         return {"version": __version__, "realtime": self.barrier.current() is not None,
                 "quarantined": len(self.db.quarantine_items()), "blocklist_version": self.db.get_meta("blocklist_version", "0"),
                 "allow_version": self.db.allow_version(),
                 # Said out loud: seeing a file after it appeared is not stopping it.
-                "observation": self.observers.report() if self.observers is not None else {"prevention": "none"},
+                "observation": observation,
                 "stalled": self._asked_lane.stalled + self._observed_lane.stalled,
                 "worker_down_skipped": self._worker_down_skipped,
                 "worker_failure": self.scanner.isolation.failure() if self.scanner.isolation is not None else ""}
@@ -683,6 +688,24 @@ def _host(host: str) -> str | None:
 
 
 def _machine_observers(backend: ProductBackend) -> Observers:
+    from . import etw
+    import threading
+
+    class MachineObservers(Observers):
+        etw: etw.EtwObserver
+        _etw_thread: threading.Thread | None = None
+
+        def start(self) -> None:
+            super().start()
+            self._etw_thread = threading.Thread(target=self.etw.start, name="observe-etw", daemon=True)
+            self._etw_thread.start()
+
+        def stop(self) -> None:
+            self.etw.stop()
+            if self._etw_thread is not None:
+                self._etw_thread.join(timeout=0.2)
+            super().stop()
+
     volumes = []
     for root in scope.fixed_drives():
         try:
@@ -697,9 +720,18 @@ def _machine_observers(backend: ProductBackend) -> Observers:
                 return False  # still owed
         return True
 
-    return Observers(backend.observe, volumes, DbCursorStore(backend.db),
-                     processes=ProcessWatcher(windows_snapshot, windows_resolve), rescans=backend.rescans,
-                     reconcile=reconcile, data_root=str(config.data_dir()))
+    observer = MachineObservers(backend.observe, volumes, DbCursorStore(backend.db),
+                                processes=ProcessWatcher(windows_snapshot, windows_resolve), rescans=backend.rescans,
+                                reconcile=reconcile, data_root=str(config.data_dir()))
+
+    def offer_process(path: str) -> None:
+        if observer.wanted(path):
+            observer._offer(path, "process")
+
+    observer.etw = etw.EtwObserver(offer_process,
+                                  read_guid=lambda: backend.db.get_meta("etw:session_guid", ""),
+                                  write_guid=lambda value: backend.db.set_meta("etw:session_guid", value))
+    return observer
 
 
 def build(state_db: Path | None = None) -> ProductBackend:
