@@ -19,6 +19,11 @@ khay và native host tự quét khi dịch vụ trả `unknown`; trường `work
 khởi động worker. Codex đã được dùng lại; các vòng chạy trong worktree `..\sentinel-guard-svcN`,
 theo `NEXT_SESSION.md` mục 4.
 
+Bản dịch vụ đang cài là bản cũ, chưa có các vòng SVC1–SVC10 và bản sửa CSDL; chúng chỉ có tác dụng sau lần cài
+tới. Nếu lần cài tới `worker_scan` vẫn FAIL, đọc `worker_failure` và đoạn `[service log]` cuối log: thoát
+`0xC00000xx` là tiến trình con chết sớm, `CreateWindowStation` hoặc `CreateDesktop failed` là lỗi ở phía dịch vụ,
+`CreateProcessAsUser failed` là lỗi khi tạo tiến trình.
+
 Đã xong và đẩy lên `main`: M5, M6, A3 (code), M7, M8, A4, A5, A6, RT-002, R15-2, R15-8, RT-003, RT-007,
 RT-024. Hai nhánh Codex (`codex/scope-a5`, `codex/reputation-etw`) đã review và gộp; nhiều chỗ viết lại,
 xem `REVIEWS.md`. ETW, canary, chấm điểm burst có code và test nhưng **chưa nối** và ETW tự từ chối chạy

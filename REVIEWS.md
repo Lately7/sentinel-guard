@@ -615,6 +615,10 @@ gap of 10,667 s. The cause of the gap is not established.
 | SVC4 (`6797f6c`) | Service logs rotate; installed-shape tests exercise the restricted worker and its runtime. |
 | SVC5 (`ea43575`) | Killing a busy worker closes its job first; stderr has its own drained pipe; start failures retain a diagnostic in `status` and the log. |
 | SVC6 (`94b5ad9`) | Stop cancels observed scans; scans skipped while the worker is down trigger catch-up when it returns; denied process access is reported as refusal; repair reports persistence it left. |
+| SVC7 (`695935a`) | A probe brings the worker back on a quiet machine; rescans follow rules and hash lists, not every feed publish; events are trimmed to 20,000 rows. |
+| SVC8 (`8721368`) | Cloud placeholders are never read or hydrated and report as not checked; restore says whether the download mark survived. |
+| SVC9 (`edb0f00`) | Records are filtered by name before the file lookup; `largest_gap` counts awake time and `slept_seconds` the rest; `journal_lag_bytes` shows a coming wrap. |
+| SVC10 (`b7daecb`) | `tools/fp_sample.py` runs every engine and says which really ran. No rate has been measured with it. |
 
 | Review outcome | Finding | Disposition |
 |---|---|---|
@@ -623,9 +627,16 @@ gap of 10,667 s. The cause of the gap is not established.
 | Caught by test at SVC2 merge | An offline pass must still publish a new popular list. | Corrected at merge. |
 | Refuted by review | Defender names on real MpCmdRun output cannot reach automatic quarantine. | No fix for that claim. |
 | Measured delete race | A delete still pending returned error 5. | Retried once. |
+| Caught by tests in SVC8 review | The round read the download mark after opening handles that hold DELETE, so the read failed with a sharing violation and every quarantine lost the mark. | Read moved back before the handles. |
+| Caught in SVC8 review | The main scan path in `content.py` still opened without `FILE_FLAG_OPEN_NO_RECALL`, and the Path subclass took a second segment as its own argument. | Both fixed, the first with a test through the real gate. |
+| Caught in DOCS1 review | The round wrote that the owner ran the install, and guessed what R1 to R5 were. | Corrected. |
+| Found through a flaky test | `OperationalError` is a `DatabaseError`, so "database is locked" read as damage and `_rebuild()` ran on a file another process was using. Turning on WAL ignores the busy timeout, so two processes creating the file at once could do this. Windows refused the rename, which is what showed; had it gone through, a healthy database would have been moved aside. Present since before these rounds. | A busy open waits and then raises; only real damage rebuilds (`2e71f5e`). Three full runs clean after it. |
 
 Left: one download can be scanned three times when the service answers `unknown`, once by the service, once
-locally and once more if that finds something. A reconciliation
+locally and once more if that finds something. The service's restore reply does not carry the download mark's
+outcome yet. Two old failures of the concurrency and deadline tests under load: the first was the database fault
+above; `test_k3_k4_named_hit_survives_change_and_deadline` failed once in a full run, did not recur, and was not
+explained. A reconciliation
 after a lost journal is limited to the smart scope. Short-lived processes between samples are not seen.
 Restored files take the destination's ACL and the service as owner. Repairs leave scheduled tasks and
 WMI consumers in place and report that they were left.

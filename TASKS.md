@@ -56,5 +56,10 @@ document/image extension.
 | SVC4 | service log and installed-shape tests | merged `6797f6c`; reviewed in REVIEWS.md |
 | SVC5 | worker failure diagnostics and termination | merged `ea43575`; reviewed in REVIEWS.md |
 | SVC6 | bounded stop, catch-up and repair reporting | merged `94b5ad9`; reviewed in REVIEWS.md |
+| SVC7 | worker probe, rescan key, event pruning | merged `695935a`; reviewed in REVIEWS.md |
+| SVC8 | cloud placeholders and the download mark | merged `8721368`; changed in review |
+| SVC9 | journal lookup cost, sleep and lag reporting | merged `edb0f00`; reviewed in REVIEWS.md |
+| SVC10 | false-positive sampler with every engine | merged `b7daecb`; tool only, no rate measured |
+| DOCS1 | records of these rounds | corrected in review, merged with this entry |
 
 Outcomes are recorded in `REVIEWS.md`.
