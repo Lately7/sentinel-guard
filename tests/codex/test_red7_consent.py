@@ -12,7 +12,7 @@ def _call(core: ServiceCore, caller: Caller, op: str, **args: object) -> dict:
     return core.handle(caller, {"v": 1, "id": 1, "op": op, "args": args})
 
 
-# A medium-integrity requester can hide repair actions after the prompt's silent 500-character cut.
+# Long Run value names must not make the helper approve a partial description.
 def test_long_repair_plan_is_not_silently_cut(tmp_path, sentinel_home):
     assert sentinel_home.parent == tmp_path
     values = tuple(RunValue("HKCU", r"Software\Microsoft\Windows\CurrentVersion\Run", 0,
@@ -32,13 +32,13 @@ def test_long_repair_plan_is_not_silently_cut(tmp_path, sentinel_home):
     user = Caller("S-1-5-21-1001", 1, "medium", False)
     helper = Caller(user.sid, 1, "high", True)
     requested = _call(core, user, "request_plan", kind="approve_repair", params={"repair_id": "repair-1"})
-    if requested["ok"]:
-        shown = _call(core, helper, "get_plan", plan_id=requested["result"]["plan_id"])
-        assert shown["ok"]
-        assert shown["result"]["summary"] == full
+    assert requested["ok"]
+    shown = _call(core, helper, "get_plan", plan_id=requested["result"]["plan_id"])
+    assert shown["ok"]
+    assert shown["result"]["summary"] == full
 
 
-# A medium-integrity process can leave the service off while the overview says protection is on.
+# The local watcher can still run after an approved machine-wide service off action.
 def test_overview_reports_service_protection_off(tmp_path, sentinel_home):
     assert sentinel_home.parent == tmp_path
     now = 1000.0
@@ -52,16 +52,18 @@ def test_overview_reports_service_protection_off(tmp_path, sentinel_home):
     assert state.level != "ok"
 
 
-# A service failure leaves machine protection off while the tray starts local protection.
-def test_tray_does_not_claim_enabled_after_service_rejects(tmp_path, sentinel_home):
+# A rejected service enable must not leave a saved and displayed false-on state.
+def test_tray_does_not_claim_enabled_after_service_rejects(tmp_path, sentinel_home, monkeypatch):
     assert sentinel_home.parent == tmp_path
-    from sentinel.tray import App
+    from sentinel import tray
+
+    monkeypatch.setattr(tray, "_show_enable_failure", lambda: None)
 
     started = []
     settings = SimpleNamespace(realtime=False, save=lambda: None)
     app = SimpleNamespace(realtime=None, lease=SimpleNamespace(available=lambda: True,
                                                                enable_protection=lambda: False),
                           settings=settings, start_realtime=lambda: started.append(True), icon=None)
-    App.toggle_realtime(app)
+    tray.App.toggle_realtime(app)
     assert started == []
     assert settings.realtime is False

@@ -2,6 +2,16 @@
 
 The tests below are in-process regression tests. They were read against the production code, not run in this sandbox.
 
+## FIX9 resolution
+
+The descriptions below record the original findings. Claude's triage reclassified the repair prompt and tray findings as low severity; the overview remains medium. FIX9 changes were reviewed against the code and nearby tests, but pytest was not run in this sandbox.
+
+- `test_long_repair_plan_is_not_silently_cut`: fixed. `ServiceCore` now stores and compares the full description, with a 4096-character refusal instead of a silent cut. The test requires the plan request to succeed at its long but valid length. The omitted material was Run value names and a restore note, so this is low-severity hardening.
+- `test_overview_reports_service_protection_off`: fixed. An explicit service `realtime: false` produces an attention state explaining that automatic quarantine is off. A missing field retains the existing behavior for older services and portable mode.
+- `test_tray_does_not_claim_enabled_after_service_rejects`: fixed. An answering service's rejection leaves the setting off and shows a Vietnamese error. The test stubs the error dialog. The no-service path retains portable protection.
+
+Nearby tests read: `tests/test_service_ipc.py::test_elevated_helper_approves_exactly_what_the_service_shows_once` and `tests/test_svc1.py::test_overview_worker_failure_is_attention`.
+
 ## Medium: repair prompt silently omits actions
 
 - **Attacker model:** An ordinary-user process can create a file and long Run value names that become part of a proposed repair.
