@@ -412,7 +412,9 @@ def test_service_disagreeing_means_nothing_is_quarantined_here(leased, db, scann
     good.write_bytes(b"now harmless")
     out = protection.act_on(db, verdict, config.Settings(), "scan")
     assert out["quarantined"] is False and good.exists()
-    assert "xác nhận" in out["error"]
+    # The service saw other bytes, so this process keeps the decision, and its
+    # own check refuses them: what was detected is no longer what is there.
+    assert out["code"] == "CHANGED"
 
 
 def test_a_hit_from_an_engine_the_service_lacks_is_not_lost(leased, db, scanner, tmp_path, monkeypatch):

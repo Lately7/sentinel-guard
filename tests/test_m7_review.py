@@ -517,25 +517,28 @@ def watcher(db, submit, **options) -> Observers:
     return Observers(submit, [Fake()], store, **options)
 
 
-def test_a_rewrite_right_after_an_offer_is_offered_again(db):
+def test_a_rewrite_inside_the_window_is_scanned_after_it_not_before(db):
     offered: list[str] = []
     now = [0.0]
     seen = watcher(db, lambda path, reason, fresh=False: offered.append(path) or True, clock=lambda: now[0])
     seen._offer("C:\\a.exe", "journal")
     now[0] = 2.0
     seen._offer("C:\\a.exe", "journal")
-    seen.tick_journal()
-    assert offered == ["C:\\a.exe"], "still inside the window"
     now[0] = 11.0
     seen.tick_journal()
-    assert offered == ["C:\\a.exe", "C:\\a.exe"]
+    assert offered == [], "the second write moved the quiet time on"
+    now[0] = 12.0
+    seen.tick_journal()
+    assert offered == ["C:\\a.exe"]
 
 
 def test_a_full_queue_is_made_up_for(db):
     calls: list[int] = []
+    now = [0.0]
     seen = watcher(db, lambda path, reason, fresh=False: False, reconcile=lambda: calls.append(1) or True,
-                   clock=lambda: 0.0)
+                   clock=lambda: now[0])
     seen._offer("C:\\a.exe", "journal")
+    now[0] = 10.0
     seen.tick_journal()
     assert calls == [1]
 
