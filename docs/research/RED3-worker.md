@@ -2,6 +2,8 @@
 
 These are source-backed, in-process reproductions. Per the round rules, pytest was **not run**; Claude must execute the tests. The fake workers model a parser-compromised or nonresponsive low-integrity worker. No parser exploit is claimed.
 
+FIX5 triage dropped `test_worker_clean_claim_requires_proof_of_stage_read`: the worker is the analyzer, and the parent contract does not promise proof that a compromised worker read or evaluated the file.
+
 ## High — unbounded valid reply flood escapes the job memory cap
 
 - **Attacker:** a downloaded file that gains control of the scan worker through a parser flaw (inferred prerequisite).
