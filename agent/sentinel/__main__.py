@@ -148,11 +148,17 @@ def cmd_quarantine(args: argparse.Namespace) -> int:
     elif any(q["id"] == args.id for q in held):
         # Held by the service: only its confirmation can release it.
         kind = "restore_quarantine" if args.action == "restore" else "delete_quarantine"
-        if not lease.approve(kind, {"quarantine_id": args.id}):
+        approval = lease.approve(kind, {"quarantine_id": args.id})
+        if not approval:
             print("Chưa thực hiện: cần xác nhận của quản trị viên.", file=sys.stderr)
             return 1
+        if kind == "restore_quarantine" and getattr(approval, "zone_identifier_preserved", None) is False:
+            print("Đã khôi phục, nhưng không giữ được dấu tải từ Internet: Windows sẽ không cảnh báo khi mở tệp này.")
     elif args.action == "restore":
-        print(quarantine.restore(db, args.id))
+        restored = quarantine.restore(db, args.id)
+        print(restored)
+        if restored.zone_identifier_preserved is False:
+            print("Đã khôi phục, nhưng không giữ được dấu tải từ Internet: Windows sẽ không cảnh báo khi mở tệp này.")
     elif args.action == "delete":
         quarantine.delete(db, args.id)
     return 0

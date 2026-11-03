@@ -7,6 +7,7 @@ import ctypes
 import os
 import re
 from ctypes import wintypes
+from dataclasses import dataclass
 from pathlib import Path
 
 from .client import ServiceClient, ServiceError, ServiceUnavailable
@@ -21,6 +22,24 @@ WAIT_TIMEOUT = 0x102
 HELPER_EXITS = {"DECLINED": 1, "EXPIRED": 2, "REQUESTER_MISMATCH": 3,
                 "SERVICE_UNAVAILABLE": 4, "HELPER_FAILED": 5}
 EXIT_REASONS = {value: key for key, value in HELPER_EXITS.items()}
+RESTORE_EXITS = {False: 6, True: 7, None: 8}
+RESTORE_RESULTS = {value: key for key, value in RESTORE_EXITS.items()}
+
+
+@dataclass(frozen=True)
+class RestoreConsent:
+    zone_identifier_preserved: bool | None
+
+    def __bool__(self) -> bool:
+        return True
+
+
+def _helper_result(exit_code: int) -> bool | RestoreConsent:
+    if exit_code in RESTORE_RESULTS:
+        return RestoreConsent(RESTORE_RESULTS[exit_code])
+    if exit_code:
+        raise ConsentError(EXIT_REASONS.get(exit_code, "HELPER_FAILED"))
+    return True
 
 
 class ConsentError(Exception):
@@ -36,7 +55,7 @@ def validate_plan_id(plan_id: str) -> str:
 
 
 def confirm(plan_id: str, *, client: ServiceClient | None = None,
-            message_box: object | None = None) -> bool:
+            message_box: object | None = None) -> bool | RestoreConsent:
     plan_id = validate_plan_id(plan_id)
     own = client is None
     service = client or ServiceClient()
@@ -56,7 +75,10 @@ def confirm(plan_id: str, *, client: ServiceClient | None = None,
         answer = show(None, plan["summary"], TITLE, 0x4 | 0x100 | 0x30)
         if answer != 6:
             return False
-        service.request("approve_plan", plan_id=plan_id, version=plan["version"])
+        reply = service.request("approve_plan", plan_id=plan_id, version=plan["version"])
+        if plan.get("kind") == "restore_quarantine":
+            preserved = reply.get("zone_identifier_preserved")
+            return RestoreConsent(preserved if preserved is True or preserved is False else None)
         return True
     finally:
         if own:
@@ -87,7 +109,7 @@ def protected_helper() -> tuple[Path, Path]:
     return exe, version
 
 
-def launch_consent(plan_id: str, *, timeout_ms: int = 300_000) -> bool:
+def launch_consent(plan_id: str, *, timeout_ms: int = 300_000) -> bool | RestoreConsent:
     plan_id = validate_plan_id(plan_id)
     if os.name != "nt":
         raise ConsentError("WINDOWS_REQUIRED")
@@ -123,9 +145,7 @@ def launch_consent(plan_id: str, *, timeout_ms: int = 300_000) -> bool:
         exit_code = wintypes.DWORD()
         if not k32.GetExitCodeProcess(info.hProcess, ctypes.byref(exit_code)):
             raise OSError(ctypes.get_last_error(), "GetExitCodeProcess")
-        if exit_code.value:
-            raise ConsentError(EXIT_REASONS.get(exit_code.value, "HELPER_FAILED"))
-        return True
+        return _helper_result(exit_code.value)
     finally:
         if info.hProcess:
             k32.CloseHandle(info.hProcess)
@@ -138,7 +158,10 @@ def main() -> int:
         parser = argparse.ArgumentParser()
         parser.add_argument("--plan-id", required=True)
         args = parser.parse_args()
-        return 0 if confirm(args.plan_id) else HELPER_EXITS["DECLINED"]
+        result = confirm(args.plan_id)
+        if isinstance(result, RestoreConsent):
+            return RESTORE_EXITS[result.zone_identifier_preserved]
+        return 0 if result else HELPER_EXITS["DECLINED"]
     except ServiceUnavailable:
         return HELPER_EXITS["SERVICE_UNAVAILABLE"]
     except ServiceError as exc:

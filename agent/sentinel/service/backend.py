@@ -641,7 +641,8 @@ class ProductBackend:
                 raise ProtocolError("ACTION_FAILED", e.code) from e
             back = repair.undo(self.db, params["quarantine_id"])
             self.db.add_event("system", "warning", "Đã khôi phục tệp", shown_path(str(target)), {"admin_only": True})
-            return {"restored": str(target), "autostart_restored": back}
+            return {"restored": str(target), "autostart_restored": back,
+                    "zone_identifier_preserved": target.zone_identifier_preserved}
         if kind == "delete_quarantine":
             quarantine.delete(self.db, params["quarantine_id"])
             return {"deleted": True}
