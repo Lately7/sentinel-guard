@@ -7,8 +7,12 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import config
+
+if TYPE_CHECKING:
+    from .service.installer import WindowsScm
 
 
 def _walk(paths: list[str], errors: list[str] | None = None):
@@ -176,11 +180,112 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     return 0
 
 
+def _service_state(scm: WindowsScm) -> int:
+    """Query only SERVICE_QUERY_STATUS, which the service grants to interactive users."""
+    import ctypes
+    from ctypes import wintypes
+
+    from .service import installer
+
+    manager = scm._manager(installer.SC_MANAGER_CONNECT)
+    try:
+        service = scm.adv.OpenServiceW(manager, "SentinelGuard", 0x4)
+        if not service:
+            raise OSError(ctypes.get_last_error(), "OpenServiceW")
+        try:
+            status = ctypes.create_string_buffer(64)
+            needed = wintypes.DWORD()
+            scm._check(scm.adv.QueryServiceStatusEx(service, 0, status, len(status),
+                                                     ctypes.byref(needed)), "QueryServiceStatusEx")
+            return int(ctypes.cast(status, ctypes.POINTER(wintypes.DWORD))[1])
+        finally:
+            scm.close(service)
+    finally:
+        scm.close(manager)
+
+
+def _status_value(value: object) -> str:
+    if value is None:
+        return "Chưa được báo cáo"
+    if isinstance(value, bool):
+        return "Bật" if value else "Tắt"
+    if isinstance(value, (str, int, float)):
+        return str(value)
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    return "Chưa được báo cáo"
+
+
+def _print_service_status(reply: dict[str, object], installed: Path | None) -> bool:
+    failure = reply.get("worker_failure")
+    works = isinstance(failure, str) and not failure
+    realtime = reply.get("realtime")
+    if isinstance(failure, str) and failure:
+        print(f"Chức năng quét không hoạt động: {failure}")
+    elif not works:
+        print("Chưa xác nhận được chức năng quét: lỗi worker chưa được báo cáo.")
+    elif realtime is False:
+        print("Bảo vệ thời gian thực đang tắt; chức năng quét hoạt động.")
+    elif realtime is True:
+        print("Bảo vệ đang hoạt động: chức năng quét hoạt động.")
+    else:
+        print("Chức năng quét hoạt động; bảo vệ thời gian thực chưa được báo cáo.")
+
+    print(f"Phiên bản: {_status_value(reply.get('version'))}")
+    print(f"Bản cài đặt: {installed.name if installed is not None else 'Chưa được báo cáo'}")
+    print(f"Bảo vệ thời gian thực: {_status_value(realtime)}")
+    print(f"Chức năng quét: {'Hoạt động' if works else 'Không hoạt động' if isinstance(failure, str) and failure else 'Chưa được báo cáo'}")
+    print(f"Số mục cách ly: {_status_value(reply.get('quarantined'))}")
+    observation = reply.get("observation")
+    seen = observation if isinstance(observation, dict) else {}
+    fields = (("records", "Bản ghi"), ("refused_paths", "Số đường dẫn bị từ chối"),
+              ("lookup_failed", "Tra cứu thất bại"), ("journal_lag_bytes", "Độ trễ nhật ký (byte)"),
+              ("largest_gap", "Khoảng gián đoạn lớn nhất"), ("slept_seconds", "Thời gian ngủ (giây)"))
+    for key, label in fields:
+        print(f"{label}: {_status_value(seen.get(key))}")
+    if "etw" in seen:
+        print(f"ETW: {_status_value(seen['etw'])}")
+    return works
+
+
+def _cmd_service_status(*, as_json: bool) -> int:
+    from .service import installer
+    from .service.client import ServiceClient, ServiceError
+
+    try:
+        scm = installer.WindowsScm()
+        binary = scm.binary("SentinelGuard")
+        if binary is None:
+            print("Dịch vụ Sentinel Guard chưa được cài đặt.")
+            return 2
+        installed = installer.registered_version()
+        state = _service_state(scm)
+    except OSError:
+        print("Không đọc được trạng thái dịch vụ Sentinel Guard.")
+        return 2
+    if state == 1:
+        print("Dịch vụ Sentinel Guard đã dừng.")
+        return 2
+    try:
+        with ServiceClient() as service:
+            reply = service.request("status")
+    except (ServiceError, OSError):
+        print("Không kết nối được với dịch vụ Sentinel Guard.")
+        return 2
+    if as_json:
+        print(json.dumps(reply, ensure_ascii=False))
+        failure = reply.get("worker_failure")
+        return 0 if isinstance(failure, str) and not failure else 1
+    return 0 if _print_service_status(reply, installed) else 1
+
+
 def cmd_service(args: argparse.Namespace) -> int:
     from . import __version__
     from .service import installer
 
     try:
+        if args.action == "status":
+            return _cmd_service_status(as_json=args.json)
         if args.action == "snapshot":
             digest = installer.snapshot_runtime(Path(args.source))
             print(f"Bản sao để xem xét: {args.source}\nSHA-256 tổng: {digest}")
@@ -337,12 +442,13 @@ def main(argv: list[str] | None = None) -> int:
     i.set_defaults(fn=cmd_install)
     sub.add_parser("uninstall").set_defaults(fn=cmd_uninstall)
 
-    v = sub.add_parser("service", help="dịch vụ Windows: snapshot | install | verify | uninstall (ba lệnh sau cần quyền admin)")
-    v.add_argument("action", choices=["snapshot", "install", "verify", "uninstall"])
+    v = sub.add_parser("service", help="dịch vụ Windows: status | snapshot | install | verify | uninstall")
+    v.add_argument("action", choices=["status", "snapshot", "install", "verify", "uninstall"])
     v.add_argument("--source", help="thư mục bản sao runtime đã xem xét")
     v.add_argument("--version-id")
     v.add_argument("--dry-run", action="store_true", help="in kế hoạch, không thay đổi gì")
     v.add_argument("--restart", action="store_true", help="verify: dừng rồi khởi động lại dịch vụ để kiểm tra rào dừng")
+    v.add_argument("--json", action="store_true", help="status: in phản hồi JSON của dịch vụ")
     v.set_defaults(fn=cmd_service)
 
     r = sub.add_parser("report", help="xuất báo cáo HTML + JSON")
