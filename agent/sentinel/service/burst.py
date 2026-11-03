@@ -106,7 +106,14 @@ class Incident:
         self.state = State.OBSERVE
         return True
 
-    def observe(self, op: Operation, *, loss: bool = False) -> Decision:
+    def forget_process(self, pid: int) -> None:
+        # A later instance of the same PID must not inherit an earlier burst.
+        for key in tuple(self._history):
+            if key[0] == pid:
+                self._history_count -= len(self._history.pop(key))
+                self._alerted.discard(key)
+
+    def observe(self, op: Operation, *, loss: bool = False, shadow: bool = False) -> Decision:
         if (not isinstance(op, Operation) or not isinstance(op.at, (int, float))
                 or not isfinite(op.at) or not isinstance(op.path, str)
                 or not isinstance(op.directory, str) or not isinstance(op.kind, str)
@@ -122,7 +129,8 @@ class Incident:
         if len(op.path) > MAX_PATH or len(op.directory) > MAX_PATH:
             self.counters.truncated += 1
             return self.open_gap(op.at, "path_truncated")
-        if not op.attributed or op.pid <= 4 or op.creation_time <= 0:
+        if not op.attributed or op.pid <= 4 or (op.creation_time <= 0 and
+                                                not (shadow and op.creation_time == 0)):
             self.counters.unmatched_pids += 1
             return self.open_gap(op.at, "unattributed_process")
         if not op.path or not op.directory:
@@ -153,7 +161,8 @@ class Incident:
             if event.kind == "read":
                 reads.setdefault(event.path, event.at)
         changed = {e.path: e for e in history if e.owner_document and e.kind in
-                   ("write", "replace", "rename", "delete") and e.confirmed}
+                   ("write", "replace", "rename", "delete") and (e.confirmed or shadow)}
+        confirmed_changed = {path for path, event in changed.items() if event.confirmed}
         read_changed = {p: e for p, e in changed.items() if p in reads and reads[p] <= e.at}
         directories = {e.directory for e in read_changed.values()}
         canaries = {e.path for e in history if e.canary and e.confirmed and e.kind in
@@ -162,7 +171,7 @@ class Incident:
             return Decision(self.state, False, "already_alerted", len(changed), len(directories))
         if canaries:
             self.state = State.CANDIDATE
-            if len(canaries) >= 2 or any(p not in canaries for p in changed):
+            if len(canaries) >= 2 or any(p not in canaries for p in confirmed_changed):
                 self.state = State.VERIFIED
                 if len(self._alerted) >= MAX_CANDIDATES:
                     self.counters.dropped += 1
@@ -176,7 +185,8 @@ class Incident:
                 return self.open_gap(op.at, "candidate_capacity")
             self._alerted.add(key)
             self.counters.alerts += 1
-            return Decision(self.state, True, "document_burst", len(read_changed), len(directories))
+            reason = "provisional_document_burst" if shadow else "document_burst"
+            return Decision(self.state, True, reason, len(read_changed), len(directories))
         return Decision(self.state, False, "insufficient_evidence", len(read_changed), len(directories))
 
     def close(self) -> None:
