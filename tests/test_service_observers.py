@@ -175,7 +175,37 @@ def test_deleted_files_and_metadata_only_changes_are_not_work():
 def test_a_file_with_no_path_any_more_is_counted():
     device = FakeDevice(read=batch(record_v2()))
     result = read_batch("C:\\", device, Store(cursor()), lambda record: None)
-    assert result.unresolved == 1 and not result.gaps and not result.records
+    assert result.unresolved == 1 and result.lookup_failed == 0
+    assert not result.failed_records and not result.gaps and not result.records
+
+
+def test_failed_lookup_is_recoverable_after_cursor_advances() -> None:
+    device = FakeDevice(read=batch(record_v2(), next_usn=500))
+    store = Store(cursor())
+
+    def failed(record: UsnRecord) -> str | None:
+        raise OSError("lookup denied")
+
+    result = read_batch("C:\\", device, store, failed)
+    assert result.unresolved == 1 and result.lookup_failed == 1
+    assert len(result.failed_records) == 1 and store.cursor.next_usn == 500
+
+
+@windows
+@pytest.mark.parametrize(("error", "vanished"), [(2, True), (87, True), (1168, True), (5, False)])
+def test_windows_file_id_lookup_distinguishes_vanished_from_failure(
+        monkeypatch: pytest.MonkeyPatch, error: int, vanished: bool) -> None:
+    monkeypatch.setattr(usn, "_k32", type("Kernel", (), {"OpenFileById": lambda *args: usn.INVALID_HANDLE})())
+    monkeypatch.setattr(usn.ctypes, "get_last_error", lambda: error)
+    volume = WindowsVolume.__new__(WindowsVolume)
+    volume.handle = 1
+    record = parse_record(record_v2())
+    assert record is not None
+    if vanished:
+        assert volume.resolve(record) is None
+    else:
+        with pytest.raises(OSError):
+            volume.resolve(record)
 
 
 def test_a_cursor_that_cannot_be_saved_is_reported():
@@ -390,7 +420,12 @@ def observers(device: FakeDevice, *, backend: Backend | None = None, db, **optio
 
 def test_only_files_that_can_run_are_offered_and_only_once(db):
     device = FakeDevice(read=batch(record_v2(name="run.exe"), record_v2(name="notes.txt"), record_v2(name="run.exe")))
-    seen, backend = observers(device, db=db)
+    now = [0.0]
+    seen, backend = observers(device, db=db, clock=lambda: now[0])
+    seen.tick_journal()
+    assert backend.offered == []
+    device.read = batch(next_usn=500)
+    now[0] = 10.0
     seen.tick_journal()
     assert backend.offered == [("C:\\Users\\u\\run.exe", "journal", False)]
 
@@ -445,9 +480,36 @@ def test_new_trouble_after_a_reconciliation_waits_for_the_next_slot(db):
 
 def test_a_burst_past_the_queue_is_counted(db):
     device = FakeDevice(read=batch(record_v2(name="a.exe"), record_v2(name="b.exe")))
-    seen, _ = observers(device, db=db, backend=Backend(room=False))
+    now = [0.0]
+    seen, backend = observers(device, db=db, backend=Backend(room=False), clock=lambda: now[0],
+                              reconcile=lambda: False)
+    seen.tick_journal()
+    assert seen.counts["queue_full"] == 0
+    device.read = batch(next_usn=500)
+    now[0] = 10.0
     seen.tick_journal()
     assert seen.counts["queue_full"] == 2
+    assert {path for path, _, _ in backend.offered} == {"C:\\Users\\u\\a.exe", "C:\\Users\\u\\b.exe"}
+    assert seen.report()["refused_paths"] == 2
+
+
+def test_journal_tick_saves_each_cursor_while_draining_batches() -> None:
+    starts: list[int] = []
+
+    class AdvancingDevice(FakeDevice):
+        def control(self, code: int, data: bytes, output_size: int) -> bytes:
+            if code == FSCTL_QUERY_USN_JOURNAL:
+                return journal(next_usn=400)
+            assert code == FSCTL_READ_USN_JOURNAL
+            start = struct.unpack_from("<q", data)[0]
+            starts.append(start)
+            return batch(record_v2(name=f"file{start}.exe"), next_usn=start + 100)
+
+    store = Store(cursor())
+    seen = Observers(Backend(), [AdvancingDevice()], store)
+    seen.tick_journal()
+    assert starts == [100, 200, 300]
+    assert store.cursor.next_usn == 400 and seen.counts["records"] == 3
 
 
 def test_first_run_of_a_download_ignores_the_cache(db):
