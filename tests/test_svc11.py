@@ -145,9 +145,11 @@ def test_live_check_requires_the_child_start_with_its_parent(monkeypatch):
 
     def popen_for(observer, parent):
         def popen(*args, **kwargs):
-            observer._parsed(etw.ParsedEvent(
-                "process_start", 123, 0, image_name=etw.ntpath.basename(sys.executable),
-                parent_pid=parent))
+            # The aggregator runs on_raw, which keeps the callback-time phase, before on_event.
+            event = etw.RawEvent(etw.PROCESS_CLASS, 1, 4, 0, 0, 1,
+                                 process_payload(pid=123, parent=parent), phase="W")
+            observer._check_raw_event(event, etw.parse_event(event))
+            observer._parsed(etw.parse_event(event))
             return Child()
         return popen
 
@@ -158,7 +160,8 @@ def test_live_check_requires_the_child_start_with_its_parent(monkeypatch):
     stranger = etw.EtwObserver(lambda path: None)
     stranger.state = "checking"
     monkeypatch.setattr(etw.subprocess, "Popen", popen_for(stranger, os.getpid() + 1))
-    assert stranger._check_schema(None) == "no_start_events"
+    # The child's pid under another parent: delivered but read wrong, so the layout is at fault.
+    assert stranger._check_schema(None) == "schema_process_mismatch"
 
 
 def test_orphan_is_recovered_before_new_session(monkeypatch):
