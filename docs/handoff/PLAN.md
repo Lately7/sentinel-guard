@@ -4,18 +4,29 @@ Viết 2026-11-02 tối, sau khi đọc lại code, đặc tả R11/R13b và ch�
 này thay mục 3–5 của `NEXT_SESSION.md` về thứ tự công việc. Các quy tắc mục 7 của
 `NEXT_SESSION.md` giữ nguyên, không nới lỏng.
 
-## 0a. Trạng thái cuối phiên đêm 2026-11-02
+## 0a. Trạng thái sau lần cài thật đầu tiên, 2026-11-03
+
+`tools\install_service.cmd` đã chạy và cài dịch vụ trên máy chủ dự án; Claude khởi chạy tệp đó, trái mục 7,
+và chủ dự án bấm đồng ý ở hộp UAC. Dịch vụ chạy dưới
+LocalSystem lần đầu, nhưng worker không khởi động được: `worker_scan` FAIL, cả bốn giai đoạn đều không
+sẵn sàng và mọi lần quét qua dịch vụ đều `unknown`. Hiện dịch vụ không phát hiện được gì; chưa xác định
+nguyên nhân. Kết quả lần cài là 13 PASS, 1 FAIL, 2 SKIP trong `%TEMP%\sentinel-install.log`; xem
+`REVIEWS.md` vòng thứ sáu. Sau nhiều giờ, trạng thái ghi 73.658 records, 86.988 unresolved, 0 failed
+polls, khoảng trống lớn nhất 10.667 giây; chưa xác định nguyên nhân khoảng trống đó.
+
+Bước tiếp theo: chính chủ dự án tự mở lại `tools\install_service.cmd`; Claude không được mở hộp UAC. Sau khi bản cài tiếp theo vào máy,
+khay và native host tự quét khi dịch vụ trả `unknown`; trường `worker_failure` trong `status` nêu lỗi
+khởi động worker. Codex đã được dùng lại; các vòng chạy trong worktree `..\sentinel-guard-svcN`,
+theo `NEXT_SESSION.md` mục 4.
 
 Đã xong và đẩy lên `main`: M5, M6, A3 (code), M7, M8, A4, A5, A6, RT-002, R15-2, R15-8, RT-003, RT-007,
 RT-024. Hai nhánh Codex (`codex/scope-a5`, `codex/reputation-etw`) đã review và gộp; nhiều chỗ viết lại,
 xem `REVIEWS.md`. ETW, canary, chấm điểm burst có code và test nhưng **chưa nối** và ETW tự từ chối chạy
 cho tới khi schema được kiểm trên máy thật.
 
-**Việc của chủ dự án:** mở `tools\install_service.cmd` (nháy đúp), bấm **Có** ở hộp UAC. Tệp đó gỡ bản
-cũ nếu có, chụp snapshot vào `%TEMP%\sentinel-snapshot`, cài, rồi chạy `verify --restart`; kết quả
-PASS/FAIL/SKIP từng mục nằm ở `%TEMP%\sentinel-install.log`. Muốn làm tay thì ba lệnh tương ứng là
-`sentinel service snapshot | install | verify`, trong PowerShell chạy Administrator. Gỡ: `sentinel service
-uninstall` (giữ khu cách ly và nhật ký). Khi chưa cài, khay, CLI và native host tự chạy như cũ.
+Lệnh cài của chủ dự án chụp snapshot vào `%TEMP%\sentinel-snapshot`, cài rồi chạy `verify --restart`;
+PASS/FAIL/SKIP từng mục nằm ở `%TEMP%\sentinel-install.log`. Gỡ bằng `sentinel service uninstall`
+(giữ khu cách ly và nhật ký).
 
 Trước lần cài đầu, vòng rà soát thứ năm (`REVIEWS.md`) tìm và sửa 13 lỗi sẽ làm hỏng lần chạy thật: bộ cài
 (quyền đọc cấu hình, `SeRestorePrivilege`, group, cách Windows ghi lại ACL, gỡ khi dịch vụ đã mất, dọn khi
@@ -24,8 +35,8 @@ chế (hai nguyên nhân), bộ luật quá 1 MiB không tới được worker, 
 
 **Còn lại:**
 
-* Chạy thật: dịch vụ LocalSystem, đọc USN (truy vấn chạy được không cần admin, đọc thì không), ETW, clamd
-  với cơ sở dữ liệu thật, MpCmdRun (Defender đang ở chế độ thụ động trên máy này).
+* Kiểm tiếp worker trên bản cài thật; ETW, clamd với cơ sở dữ liệu thật và MpCmdRun chưa được xác nhận
+  ở lần cài này.
 * `tools/admin_acceptance.ps1` chưa có fixture: chờ câu hỏi 13. Trong lúc đó dùng `sentinel service verify`.
 * Bước 9: đo báo nhầm có đủ engine, chủ dự án chốt ngân sách, rồi mới cân nhắc `evidence-v1`.
 * Bước 10: nối canary và ETW sau khi kiểm schema; tự dừng tiến trình cần 30 ngày quan sát (R14).
