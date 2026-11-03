@@ -48,9 +48,9 @@ class Child:
 
 
 def fast_clock(monkeypatch) -> None:
-    tick = iter(range(100))
-    monkeypatch.setattr(etw.time, "monotonic", lambda: float(next(tick)))
-    monkeypatch.setattr(etw.time, "sleep", lambda _seconds: None)
+    now = [0.0]
+    monkeypatch.setattr(etw.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(etw.time, "sleep", lambda seconds: now.__setitem__(0, now[0] + seconds))
 
 
 def test_the_captured_start_parses_with_its_pid_parent_and_image() -> None:
@@ -82,7 +82,7 @@ def test_the_check_passes_on_its_child_start_alone(monkeypatch) -> None:
     monkeypatch.setattr(etw.subprocess, "Popen", popen)
     fast_clock(monkeypatch)
     assert observer._check_schema(None) == ""
-    assert len(spawned) == 1
+    assert len(spawned) == 2
     assert spawned[0][0][0] == sys.executable
     assert spawned[0][1]["shell"] is False
 
@@ -143,6 +143,8 @@ def test_native_session_enables_only_process_provider() -> None:
     api = Api()
     native._api = api
     assert native.start(lambda _event: None).status == "STARTED"
+    assert api.enabled == []
+    assert native.enable().status == "STARTED"
     assert api.enabled == [(etw.PROCESS_PROVIDER, 1, 0, etw.PROCESS_KEYWORDS)]
     props = etw.EVENT_TRACE_PROPERTIES.from_buffer(etw._properties())
     assert (props.BufferSize, props.MinimumBuffers, props.MaximumBuffers,
@@ -152,7 +154,7 @@ def test_native_session_enables_only_process_provider() -> None:
 def test_failed_check_logs_only_own_dcstart_and_child_start_bytes(caplog) -> None:
     observer = etw.EtwObserver(lambda _path: None)
     observer.state = "checking"
-    observer._check_child = Child.pid
+    observer._check_children[Child.pid] = 0.0
     own = raw_process(3, os.getpid())
     other = raw_process(3, os.getpid() + 1)
     child = raw_process(1, Child.pid, parent=os.getpid())

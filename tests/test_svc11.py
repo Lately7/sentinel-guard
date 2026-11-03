@@ -131,6 +131,9 @@ def test_verify_reports_optional_etw_as_skip_or_pass():
 
 
 def test_live_check_requires_the_child_start_with_its_parent(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(etw.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(etw.time, "sleep", lambda seconds: now.__setitem__(0, now[0] + seconds))
     class Child:
         pid = 123
 
@@ -155,7 +158,6 @@ def test_live_check_requires_the_child_start_with_its_parent(monkeypatch):
     stranger = etw.EtwObserver(lambda path: None)
     stranger.state = "checking"
     monkeypatch.setattr(etw.subprocess, "Popen", popen_for(stranger, os.getpid() + 1))
-    monkeypatch.setattr(etw.time, "monotonic", iter((0.0, 6.0)).__next__)
     assert stranger._check_schema(None) == "no_start_events"
 
 
@@ -235,7 +237,7 @@ def test_status_contains_etw_state_and_loss():
     assert backend.ProductBackend.status(fake)["observation"]["etw_gap"] is True
 
 
-def test_stop_shares_one_five_second_join_budget(monkeypatch):
+def test_stop_shares_one_six_second_join_budget(monkeypatch):
     class Thread:
         def __init__(self):
             self.waited = None
@@ -251,8 +253,8 @@ def test_stop_shares_one_five_second_join_budget(monkeypatch):
     collector._consumer, collector._aggregator = Thread(), Thread()
     monkeypatch.setattr(etw.time, "monotonic", iter((0.0, 2.0, 4.0)).__next__)
     collector.stop()
-    assert collector._consumer.waited == 3.0
-    assert collector._aggregator.waited == 1.0
+    assert collector._consumer.waited == 4.0
+    assert collector._aggregator.waited == 2.0
 
 
 def test_process_resolution_uses_sampler_key_and_rejects_native_paths(monkeypatch):
