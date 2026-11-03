@@ -222,9 +222,11 @@ def _private_desktop() -> str:
             raise _fail("ConvertStringSecurityDescriptorToSecurityDescriptor")
         try:
             attrs = SECURITY_ATTRIBUTES(ctypes.sizeof(SECURITY_ATTRIBUTES), sd, False)
-            # By name: unnamed, SYSTEM gets Service-0x0-3e7$, the station every LocalSystem
-            # service shares, and this descriptor is ignored. Below SYSTEM a name is refused
-            # (measured: error 5), while unnamed there does make a new station.
+            # By name, so that this descriptor is the one in force. Unnamed returns the logon
+            # session's Service-0x...$ station with its own DACL: under SYSTEM the one all
+            # LocalSystem services share, and in a user session one other apps already hold
+            # (measured: CWF_CREATE_ONLY gives 183). Below SYSTEM a name is refused
+            # (measured: error 5), so that path takes whatever unnamed returns.
             station = _u32.CreateWindowStationW(WORKER_STATION, 0, GENERIC_ALL, ctypes.byref(attrs))
             if not station and ctypes.get_last_error() == ERROR_ACCESS_DENIED and owner != LOCAL_SYSTEM:
                 station = _u32.CreateWindowStationW(None, 0, GENERIC_ALL, ctypes.byref(attrs))
