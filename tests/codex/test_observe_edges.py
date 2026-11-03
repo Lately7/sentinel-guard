@@ -69,20 +69,22 @@ def test_missing_saved_frame_is_a_gap_not_a_clean_walk(tmp_path: Path) -> None:
     assert not walker.report()["complete"]
 
 
-def test_saved_descendant_cannot_escape_fixed_drive(tmp_path: Path) -> None:
+@pytest.mark.parametrize("extended", [False, True])
+def test_saved_descendant_cannot_escape_fixed_drive(tmp_path: Path, extended: bool) -> None:
     # A persisted cursor must stay inside its fixed drive because it is only a resume hint.
-    # expected to fail: only the root saved frame is validated, so a forged child scans outside the drive.
     drive = tmp_path / "drive"
     drive.mkdir()
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "outside.exe").write_bytes(b"harmless")
+    outside_path = "\\\\?\\" + str(outside) if extended else str(outside)
     saved = {"v": 1, "phase": "deep", "smart_cursor": None, "drive": 0,
-             "stack": [[str(drive), ""], [str(outside), ""]]}
+             "stack": [[str(drive), ""], [outside_path, ""]]}
     seen: list[str] = []
     walker = _walker(tmp_path, Cursor(json.dumps(saved)), seen)
     assert walker()
     assert seen == []
+    assert walker.report()["gaps"]["cursor_lost"] == 1
 
 
 def test_done_cursor_restarts_and_missing_drive_stays_incomplete(tmp_path: Path) -> None:
@@ -230,14 +232,15 @@ def test_long_and_extended_paths_are_walked(tmp_path: Path) -> None:
     except OSError as exc:
         pytest.skip(f"long paths unavailable: {exc}")
     seen: list[str] = []
-    data = tmp_path / "home"
+    data = tmp_path / "data-root"  # tests/conftest.py already uses tmp_path / "home"
     data.mkdir()
     cursor = Cursor()
     walker = reconcile.Reconciler(lambda path, reason: seen.append(path) or True,
                                   cursor.get, cursor.set, data_root=str(data), smart_sources={},
-                                  drives=[extended])
+                                  drives=[str(drive)])
     assert walker()
     assert len(seen) == 1 and seen[0].endswith("long.exe")
+    assert len(seen[0]) > 260
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows extended names only")
@@ -262,12 +265,13 @@ def test_trailing_dot_and_space_do_not_gain_risky_suffix(tmp_path: Path) -> None
 @pytest.mark.parametrize("damage", [b"{", b'{"version":1,"first_seen":'])
 def test_damaged_shadow_checkpoint_is_observation_gap(tmp_path: Path, damage: bytes) -> None:
     # Damaged persisted coverage must be reported as unknown because prior observation is lost.
-    # expected to fail: invalid checkpoint bytes are treated as fresh coverage with zero gaps.
     journal = tmp_path / "journal"
     journal.mkdir()
     (journal / "shadow-observation.json").write_bytes(damage)
     report = shadow.ShadowObserver(state_root=tmp_path).report()
     assert report["gaps"] >= 1
+    decisions = (journal / "shadow-decisions.jsonl").read_text().splitlines()
+    assert json.loads(decisions[-1])["reason"] == "checkpoint_invalid"
 
 
 def test_backward_clock_and_unseen_process_never_confirm_a_burst() -> None:
