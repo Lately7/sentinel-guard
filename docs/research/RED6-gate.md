@@ -4,6 +4,8 @@ Tests are in `tests/codex/test_red6_gate.py`. They have been checked against the
 
 ## 1. Orphaned ZIP local entry is certified clean — high
 
+- **FIX8 triage:** Confirmed as a medium-severity product bug; the archive walk now records orphan local headers as incomplete coverage.
+
 - **Attacker:** A downloaded file crafted by an ordinary user or malicious site.
 - **Steps:** Put the harmless marker in a deflated ZIP member, keep its local header and compressed data, remove its central-directory entry, and append a syntactically valid empty central directory. The raw archive contains no plaintext marker. A local-header recovery extractor can still find the payload, while Python's `zipfile` lists zero members.
 - **Effect:** Core and JSON rules read the outer ZIP bytes but inspect no decompressed member. The archive walk records `zip` as complete, so the gate can return `clean` with `trusted_clean=True` for a compressed payload it never inspected. The test requires a non-clean result.
@@ -14,6 +16,8 @@ Tests are in `tests/codex/test_red6_gate.py`. They have been checked against the
 
 ## 2. Same-size changes can create a hash of no file generation — high
 
+- **FIX8 triage:** The test bypassed the Windows deny-write handle; it now checks that a writable mapping makes bound path measurement return `IN_USE`.
+
 - **Attacker:** A medium-integrity process with a writable mapping of its own file before the service opens it.
 - **Steps:** Change both halves of a fixed-size file through the mapping after the first hash chunk has been read. The first chunk in the hash is from the old generation; the next is from the new generation. The test calls the same measurement helper with `ignore_times=True`, as the Windows bound reader does.
 - **Effect:** The helper returns `OK` and stores a SHA-256 that belongs to neither complete generation. Subsequent bound content stages can examine bytes different from those in the measurement, while the Windows reader checks only device, file ID and size. The test requires `CHANGED`.
@@ -23,6 +27,8 @@ Tests are in `tests/codex/test_red6_gate.py`. They have been checked against the
 - **Test:** `test_same_size_change_during_measurement_is_rejected`.
 
 ## 3. Unread middle span is displayed as clean — medium
+
+- **FIX8 triage:** Dropped `test_fixed_partial_middle_gap_is_not_labeled_clean`: R11's fixed-partial policy deliberately returns `clean` with `trusted_clean=False` and reports partial coverage separately.
 
 - **Attacker:** A downloaded file with marker bytes placed between the initial resident scan and the tail sample.
 - **Steps:** Limit resident scanning to 64 bytes in process, put the harmless marker after byte 100, and scan a file long enough that the last 64 bytes also miss it. The full-file hash still runs, but no marker rule has a matching hash; content engines inspect only front and tail.

@@ -83,6 +83,45 @@ def _sort_key(info: zipfile.ZipInfo) -> bool:
     return suffix not in filetype.EXECUTABLE_EXTS and suffix not in filetype.ARCHIVE_EXTS
 
 
+def _has_orphan_local_header(payload: bytes, archive: zipfile.ZipFile,
+                             members: list[zipfile.ZipInfo]) -> bool:
+    """A streaming extractor can recover local entries absent from the directory."""
+    spans: list[tuple[int, int]] = []
+    for info in members:
+        start = info.header_offset
+        head = payload[start:start + 30]
+        if len(head) < 30 or not head.startswith(b"PK\x03\x04"):
+            continue
+        names, extra = struct.unpack_from("<HH", head, 26)
+        end = start + 30 + names + extra + info.compress_size
+        if info.flag_bits & 8:
+            tail = payload[end:end + 24]
+            signature = 4 if tail.startswith(b"PK\x07\x08") else 0
+            expected = (info.CRC, info.compress_size, info.file_size)
+            if len(tail) >= signature + 12 and struct.unpack_from("<LLL", tail, signature) == expected:
+                end += signature + 12
+            elif len(tail) >= signature + 20 and struct.unpack_from("<LQQ", tail, signature) == expected:
+                end += signature + 20
+        spans.append((start, end))
+    spans.sort()
+    position = 0
+    at = 0
+    while (at := payload.find(b"PK\x03\x04", at, archive.start_dir)) >= 0:
+        while position < len(spans) and spans[position][1] <= at:
+            position += 1
+        if position < len(spans) and spans[position][0] <= at:
+            at += 4
+            continue
+        if at + 30 <= archive.start_dir:
+            method = struct.unpack_from("<H", payload, at + 8)[0]
+            names, extra = struct.unpack_from("<HH", payload, at + 26)
+            if (method in _METHODS and 1 <= names <= 1024 and
+                    at + 30 + names + extra <= archive.start_dir):
+                return True
+        at += 4
+    return False
+
+
 def walk(data: bytes, ledger: CoverageLedger, cancel: CancellationToken,
          inspect: MemberCheck, deadline_monotonic_ns: int,
          *, clock: Callable[[], int] = time.monotonic_ns, notice: Notice | None = None) -> str | None:
@@ -153,7 +192,11 @@ def walk(data: bytes, ledger: CoverageLedger, cancel: CancellationToken,
                                     ledger.child("omitted", reason)
                                 ledger.parser("zip", "partial")
                                 return reason
-                ledger.parser("zip", "complete")
+                if _has_orphan_local_header(payload, archive, members):
+                    ledger.child("opaque", "ORPHAN_LOCAL_HEADER")
+                    ledger.parser("zip", "partial")
+                else:
+                    ledger.parser("zip", "complete")
         except _PARSE_ERRORS:
             ledger.parser("zip", "partial")
         return None
