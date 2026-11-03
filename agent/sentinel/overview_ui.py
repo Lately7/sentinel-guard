@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 import tkinter as tk
 from dataclasses import dataclass
@@ -29,12 +30,15 @@ class State:
         return {"ok": theme.OK, "attention": theme.WARN, "off": theme.BAD}[self.level]
 
 
-def protection_state(app: "App", now: float | None = None) -> State:
+def protection_state(app: "App", now: float | None = None,
+                     service_status: dict[str, object] | None = None) -> State:
     """The single answer to "am I protected?", with the most important reason first."""
     now = time.time() if now is None else now
     rt = app.realtime and app.realtime.running
     if not rt:
         return State("off", "Bảo vệ đang tắt", "Bật bảo vệ thời gian thực")
+    if service_status and service_status.get("worker_failure"):
+        return State("attention", "Cần chú ý", "Bộ quét không hoạt động; bảo vệ tệp trên máy đang bị gián đoạn")
     issues = []
     last_feed = max((f["updated"] or 0 for f in app.db.feed_status()), default=0)
     if now - last_feed > FEEDS_STALE:
@@ -112,6 +116,10 @@ class Tile:
 class Overview:
     def __init__(self, pages: ttk.Frame, app: "App") -> None:
         self.app = app
+        self._service_status: dict[str, object] | None = None
+        self._service_checked = float("-inf")
+        self._service_pending = False
+        self._service_lock = threading.Lock()
         pad, gap = theme.px(pages, 24), theme.px(pages, 16)
         self.frame = ttk.Frame(pages, padding=(pad, pad, pad, pad))
         pages.add(self.frame, text="Tổng quan", icon="home")
@@ -174,9 +182,33 @@ class Overview:
 
     # -- refresh -----------------------------------------------------------
 
+    def _poll_service(self) -> None:
+        if self.app.lease is None:
+            return
+        with self._service_lock:
+            if self._service_pending or time.monotonic() - self._service_checked < 5.0:
+                return
+            self._service_pending = True
+
+        def read() -> None:
+            try:
+                status = self.app.lease.status()
+            except Exception:
+                status = None
+            with self._service_lock:
+                self._service_status = status
+                self._service_checked = time.monotonic()
+                self._service_pending = False
+            self.app.ui(self.refresh)
+
+        threading.Thread(target=read, daemon=True, name="service-overview-status").start()
+
     def refresh(self) -> None:
         app, now = self.app, time.time()
-        st = protection_state(app, now)
+        self._poll_service()
+        with self._service_lock:
+            service_status = self._service_status
+        st = protection_state(app, now, service_status)
         self.mark.set(st.color)
         self.title.configure(text=st.title)
         self.sub.configure(text=st.detail)

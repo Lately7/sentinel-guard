@@ -160,8 +160,9 @@ class Host:
             # A scan the service could not finish must not read as a result.
             if done.get("state") != "done" or "verdict" not in done:
                 raise BadRequest(f"the service did not finish this scan ({done.get('code', 'unknown')})")
-            return {k: done.get(k) for k in ("verdict", "reason", "url_reputation", "label", "quarantined",
-                                             "quarantine_id", "error")}
+            if done["verdict"].get("label") != "unknown":
+                return {k: done.get(k) for k in ("verdict", "reason", "url_reputation", "label", "quarantined",
+                                                 "quarantine_id", "error")}
         rep = urlintel.check(self.db, url) if url else None
         v = self.scanner.scan_file(p, use_cache=False)
         escalate_origin(v, rep)

@@ -157,6 +157,20 @@ def _left_to_us(v: Verdict, done: dict[str, Any]) -> bool:
         return False
     decision = getattr(v, "decision", None)
     accepted = set(decision.accepted_evidence_ids) if decision else set()
+    hash_rules: set[str] = set()
+    if decision:
+        for result in decision.engine_results:
+            for evidence in result.evidence:
+                if evidence.evidence_id not in accepted or result.engine_id != "core":
+                    continue
+                if (evidence.signature_id or evidence.detail_code).upper() == "KNOWN_BAD_HASH":
+                    source = "known_bad" if evidence.source_id == "sentinel-core" else evidence.source_id
+                    hash_rules.add(f"hash.{source}")
+    service_verdict = done.get("verdict") or {}
+    service_rules = {item.get("rule") for item in service_verdict.get("findings", ())
+                     if isinstance(item, dict)}
+    if hash_rules and (hash_rules - service_rules or service_verdict.get("sha256") != v.sha256):
+        return True
     finders = {r.engine_id for r in decision.engine_results if any(e.evidence_id in accepted for e in r.evidence)} if decision else set()
     return bool(finders - set(done.get("engines", ())))
 

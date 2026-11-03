@@ -203,6 +203,7 @@ class ProductBackend:
                                     give_up=STALL_SECONDS, on_stall=self._gave_up)
         self._observed = threading.BoundedSemaphore(MAX_OBSERVED)
         self._later: list[tuple[float, str, str, int]] = []
+        self._worker_down_skipped = 0
         self._stop = threading.Event()
         self._maintenance: threading.Thread | None = None
         self.rescans = RescanQueue(DbDownloadStore(db))
@@ -269,6 +270,8 @@ class ProductBackend:
                 log.exception("watch failed")
 
     def _retry_due(self) -> None:
+        if self.scanner.isolation is not None and self.scanner.isolation.failure():
+            return
         now = time.monotonic()
         with self._lock:
             due = [item for item in self._later if item[0] <= now]
@@ -280,7 +283,7 @@ class ProductBackend:
 
     def rescan_on_new_rules(self) -> None:
         generation = self.scanner.gate_id()
-        if self._rule_generation not in (None, generation):
+        if self._rule_generation != generation:
             self.rescans.signatures_changed(generation)
             while (item := self.rescans.pop()) is not None:
                 if not self.observe(item.path, "rescan", True):
@@ -296,6 +299,7 @@ class ProductBackend:
                 # Said out loud: seeing a file after it appeared is not stopping it.
                 "observation": self.observers.report() if self.observers is not None else {"prevention": "none"},
                 "stalled": self._asked_lane.stalled + self._observed_lane.stalled,
+                "worker_down_skipped": self._worker_down_skipped,
                 "worker_failure": self.scanner.isolation.failure() if self.scanner.isolation is not None else ""}
 
     def check_url(self, url: str) -> dict[str, Any]:
@@ -378,12 +382,19 @@ class ProductBackend:
             self._observed.release()
 
     def _after_observed(self, job: _Job) -> None:
+        if self.scanner.isolation is not None and self.scanner.isolation.failure():
+            with self._lock:
+                self._worker_down_skipped += 1
+            return
         verdict = job.result.get("verdict") or {}
-        unfinished = (job.state == "failed" or job.result.get("code") == "CHANGED"
+        reasons = set((verdict.get("scan_result") or {}).get("reason_codes") or ())
+        retryable = bool(reasons & {"IN_USE", "CHANGED", "ENGINE_TIMEOUT", "ENGINE_INCOMPLETE"})
+        unfinished = (job.state == "failed" or job.result.get("code") in ("IN_USE", "CHANGED")
                       or verdict.get("label") == "unknown")
         if not unfinished or not os.path.lexists(job.path):
             return
-        if job.attempts < len(RETRY_SECONDS):
+        if ((job.state == "failed" or job.result.get("code") in ("IN_USE", "CHANGED") or retryable)
+                and job.attempts < len(RETRY_SECONDS)):
             with self._lock:
                 if len(self._later) < MAX_RETRIES:
                     self._later.append((time.monotonic() + RETRY_SECONDS[job.attempts], job.path, job.reason,
@@ -392,8 +403,15 @@ class ProductBackend:
         self._gave_up(job)
 
     def _gave_up(self, job: _Job) -> None:
-        self.db.add_event("realtime", "warning", "Chưa kiểm tra xong tệp",
-                          f"{shown_path(job.path)}: tệp liên tục bị giữ hoặc thay đổi. Hãy chạy Quét ngay để thử lại.",
+        verdict = job.result.get("verdict") or {}
+        reasons = set((verdict.get("scan_result") or {}).get("reason_codes") or ())
+        if self.scanner.isolation is not None and self.scanner.isolation.failure():
+            detail = f"{shown_path(job.path)}: bộ quét đang không hoạt động. Chưa thể quét tệp này."
+        elif "INCOMPLETE_COVERAGE" in reasons and not reasons & {"IN_USE", "CHANGED", "ENGINE_TIMEOUT", "ENGINE_INCOMPLETE"}:
+            detail = f"{shown_path(job.path)}: không thể kiểm tra đầy đủ nội dung tệp này."
+        else:
+            detail = f"{shown_path(job.path)}: tệp liên tục bị giữ hoặc thay đổi. Hãy chạy Quét ngay để thử lại."
+        self.db.add_event("realtime", "warning", "Chưa kiểm tra xong tệp", detail,
                           {"owner_sid": job.owner, "path": job.path})
 
     def _trim(self) -> None:
@@ -451,12 +469,16 @@ class ProductBackend:
             return {"code": "ACCESS_DENIED"}
         source = SOURCES.get(job.reason, "scan")
         owner = {"owner_sid": job.owner}
-        try:
-            with self.barrier.action():
-                outcome = act_on(self.db, verdict, self.settings, source, extra=owner, authority=True)
-        except ProtectionStopped:
-            outcome = act_on(self.db, verdict, dataclasses.replace(self.settings, auto_quarantine=False), source,
-                             extra=owner, authority=True)
+        worker_down = self.scanner.isolation is not None and self.scanner.isolation.failure()
+        if job.reason in ("journal", "process", "reconcile", "rescan") and verdict.label == "unknown" and worker_down:
+            outcome = {"label": "unknown", "quarantined": False, "quarantine_id": None, "error": None}
+        else:
+            try:
+                with self.barrier.action():
+                    outcome = act_on(self.db, verdict, self.settings, source, extra=owner, authority=True)
+            except ProtectionStopped:
+                outcome = act_on(self.db, verdict, dataclasses.replace(self.settings, auto_quarantine=False), source,
+                                 extra=owner, authority=True)
         result = {**outcome, "verdict": verdict.to_dict(max_findings=30), "reason": top_reason(verdict),
                   "url_reputation": reputation,
                   # Only what really looked: "found nothing" means nothing from the others.
@@ -468,7 +490,9 @@ class ProductBackend:
                               {**owner, "source": reputation.get("matched")})
         if outcome.get("code") == "IN_USE" and seen is not None:
             result["repair_id"] = self._offer_repair(verdict, seen.sha256, job.owner)
-        if job.reason == "download" and seen is not None and not outcome["quarantined"]:
+        rescan_complete = (job.reason == "rescan" and decision is not None
+                           and (decision.trusted_clean or verdict.label in ("suspicious", "malicious")))
+        if (job.reason == "download" or rescan_complete) and seen is not None and not outcome["quarantined"]:
             self._remember_download(job, seen)
         return result
 
