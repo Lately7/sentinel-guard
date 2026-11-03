@@ -666,3 +666,34 @@ documentation and may differ; the check logs what it sees. The 30 days start onl
 The latest listed tests are pytest 1039 passed, 10 skipped, 1 xfailed twice in a row, and
 extension 40 passed. Helium e2e was not rerun; with the service installed it now stops unless
 given `--with-service`.
+
+### Eighth round: the second real install and SVC17
+
+The owner opened `tools/install_service.cmd` themself at about 09:25 on 2026-11-03, with SVC1–SVC16 and
+the ETW wiring in the snapshot. The check reported 0 FAIL, 14 PASS and 3 SKIP: `worker_scan` passed
+("worker answered: clean") and so did `clean_stop_and_start`. The cause of the first install's worker
+failure is still not established. The named window station is the main suspect; the worker did not fail,
+so its self-diagnosis did not run. `no journal for G:\` is correct: G: has no USN journal.
+
+ETW turned itself off with `schema_process_missing`. Within the few seconds of the check, 373,432 events
+were lost and 1,380 parsed. The check saw 61 process DCStart events (opcode 3) and no Start (opcode 1);
+FileIo showed opcodes 32 and 76 but no Read or Write. The file events of the whole machine outran a Python
+consumer and took the process events with them.
+
+The install window then looked hung. A click had put the console into QuickEdit selection (title
+"Select Administrator"), which freezes every write to it. The steps had finished and only the final print
+was waiting. The script now tells the owner to press Esc.
+
+| Review | What it caught | Disposition |
+|---|---|---|
+| SVC17 (`d1ef518`, merged `f9838f1`) | The rundown lists every running process at once and went into the 256-entry check buffer. On a desktop with more processes, the service's own entry could be evicted before the check polled it, and ETW would turn off for no reason. | The own entry is recorded as it arrives. A test with 400 processes fails on the round's code and passes after. |
+
+SVC17 enables process events only. The check needs the service's own DCStart, then a Start of its own child;
+without that Start the state is `no_start_events`. Loss during the check is reported apart from the result.
+Codex read Microsoft's documentation on the session properties and changed nothing: FlushTimer 1 s, 64 KB
+buffers, 16 to 64 buffers and the system logger mode hold nothing back, and `SYSTEM_PROCESS_KW_GENERAL`
+covers process start and end. Claude did not check that reading. The payload layouts still come from
+documentation; if the check fails, the next install's log holds the service's own DCStart bytes. Shadow
+scoring has no file event source now: its report says `waiting_for_file_events` and counts no days.
+Tests after the merge: pytest 1048 passed, 10 skipped, 1 xfailed twice in a row (worktree, then `main`);
+extension 40 passed. Helium e2e was not rerun.

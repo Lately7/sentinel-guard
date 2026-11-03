@@ -4,32 +4,33 @@ Viết 2026-11-02 tối, sau khi đọc lại code, đặc tả R11/R13b và ch�
 này thay mục 3–5 của `NEXT_SESSION.md` về thứ tự công việc. Các quy tắc mục 7 của
 `NEXT_SESSION.md` giữ nguyên, không nới lỏng.
 
-## 0a. Trạng thái sau lần cài thật đầu tiên, 2026-11-03
+## 0a. Trạng thái sau lần cài thật thứ hai, 2026-11-03
 
-`tools\install_service.cmd` đã chạy và cài dịch vụ trên máy chủ dự án; Claude khởi chạy tệp đó, trái mục 7,
-và chủ dự án bấm đồng ý ở hộp UAC. Dịch vụ chạy dưới
-LocalSystem lần đầu, nhưng worker không khởi động được: `worker_scan` FAIL, cả bốn giai đoạn đều không
-sẵn sàng và mọi lần quét qua dịch vụ đều `unknown`. Hiện dịch vụ không phát hiện được gì; chưa xác định
-nguyên nhân. Kết quả lần cài là 13 PASS, 1 FAIL, 2 SKIP trong `%TEMP%\sentinel-install.log`; xem
-`REVIEWS.md` vòng thứ sáu. Sau nhiều giờ, trạng thái ghi 73.658 records, 86.988 unresolved, 0 failed
-polls, khoảng trống lớn nhất 10.667 giây; chưa xác định nguyên nhân khoảng trống đó.
+Lần cài đầu (Claude khởi chạy `tools\install_service.cmd`, trái mục 7) cho 13 PASS, 1 FAIL, 2 SKIP: worker
+không khởi động được; xem `REVIEWS.md` vòng thứ sáu. Lần cài thứ hai do chính chủ dự án mở, khoảng 9:25,
+với các vòng SVC1–SVC16 và phần nối ETW: **0 FAIL, 14 PASS, 3 SKIP**. `worker_scan` PASS ("worker answered:
+clean") và `clean_stop_and_start` PASS: dịch vụ chạy LocalSystem và quét được tệp thật. Nguyên nhân lỗi worker
+lần đầu vẫn chưa xác định; window station có tên là nghi phạm chính, nhưng worker không lỗi nên bước tự chẩn
+đoán không chạy. Cảnh báo `no journal for G:\` là đúng: ổ G: không có USN journal.
 
-Bước tiếp theo: chính chủ dự án tự mở lại `tools\install_service.cmd`; Claude không được mở hộp UAC.
-Trong log, các dòng `worker diagnosis:` nêu bước nào hỏng; nếu ETW vẫn tắt, các dòng `etw check:`
-cho thấy payload thật. `sentinel service status` chạy được từ cửa sổ thường. Sau khi bản cài tiếp theo
-vào máy, khay và native host tự quét khi dịch vụ trả `unknown`. Codex đã được dùng lại; các vòng chạy
-trong worktree `..\sentinel-guard-svcN`, theo `NEXT_SESSION.md` mục 4.
+ETW tự tắt với `schema_process_missing`. Trong vài giây kiểm tra mất 373.432 sự kiện, chỉ phân tích được
+1.380: sự kiện tệp của cả máy đến nhanh hơn Python xử lý được và kéo mất cả sự kiện tiến trình. Chỉ có 61
+sự kiện DCStart (danh sách tiến trình đang chạy), không có Start nào. Vòng SVC17 chỉ bật sự kiện tiến trình
+và bỏ hẳn sự kiện tệp qua ETW. Hệ quả: chấm điểm ransomware (shadow) không có nguồn sự kiện tệp, 30 ngày quan
+sát chưa bắt đầu, và trạng thái ghi `waiting_for_file_events` thay vì đếm ngày trống.
 
-Bản dịch vụ đang cài là bản cũ, chưa có các vòng SVC1–SVC16, phần nối ETW và bản sửa CSDL; chúng chỉ có tác dụng sau lần cài
-tới. Nếu lần cài tới `worker_scan` vẫn FAIL, đọc các dòng `worker diagnosis:` và đoạn `[service log]` cuối log: thoát
-`0xC00000xx` là tiến trình con chết sớm, `CreateWindowStation` hoặc `CreateDesktop failed` là lỗi ở phía dịch vụ,
-`CreateProcessAsUser failed` là lỗi khi tạo tiến trình.
+Bước tiếp theo: chính chủ dự án tự mở lại `tools\install_service.cmd` để kiểm ETW cho tiến trình; Claude
+không được mở hộp UAC. Dòng `etw` của verify cho kết quả và số sự kiện mất; nếu ETW vẫn tắt, các dòng
+`etw check:` trong log có 160 byte đầu của sự kiện DCStart của chính dịch vụ. Đừng bấm vào cửa sổ cài: cú
+bấm đưa nó vào chế độ chọn (tiêu đề bắt đầu bằng "Select") và mọi thứ nó in ra bị dừng lại; bấm Esc để chạy
+tiếp. `sentinel service status` chạy được từ cửa sổ thường. Codex được dùng tích cực; các vòng chạy trong
+worktree `..\sentinel-guard-svcN`, theo `NEXT_SESSION.md` mục 4.
 
 Đã xong và đẩy lên `main`: M5, M6, A3 (code), M7, M8, A4, A5, A6, RT-002, R15-2, R15-8, RT-003, RT-007,
 RT-024. Hai nhánh Codex (`codex/scope-a5`, `codex/reputation-etw`) đã review và gộp; nhiều chỗ viết lại,
-xem `REVIEWS.md`. ETW và chấm điểm shadow đã nối vào dịch vụ, nhưng chưa kiểm trên phiên ETW thật;
-schema payload lấy từ tài liệu và có thể khác. Kiểm tra lúc khởi động sẽ ghi payload nếu ETW vẫn tắt.
-Ba mươi ngày quan sát chỉ bắt đầu khi ETW bật. Tệp mồi chờ câu hỏi 11 của chủ dự án.
+xem `REVIEWS.md`. ETW đã chạy trên phiên thật một lần (xem trên) và giờ chỉ dùng sự kiện tiến trình;
+layout payload DCStart/Start lấy từ tài liệu, chưa xác nhận trên byte thật. Ba mươi ngày quan sát cần một
+nguồn sự kiện tệp, hiện chưa có. Tệp mồi chờ câu hỏi 11 của chủ dự án.
 Chủ dự án quyết định ngày 2026-11-03: tiếp tục user-mode với dịch vụ LocalSystem, không dùng driver,
 và dùng ETW bên cạnh bộ chụp tiến trình. Giới hạn vẫn là thấy tệp hoặc tiến trình sau khi xuất hiện,
 không chặn ở mức kernel trước khi chạy.

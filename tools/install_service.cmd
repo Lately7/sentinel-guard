@@ -15,6 +15,8 @@ cd /d "%~dp0.."
 set "SNAPSHOT=%TEMP%\sentinel-snapshot"
 set "LOG=%TEMP%\sentinel-install.log"
 echo Dang cai dich vu, khoang 3 phut. Dung bam vao cua so nay.
+rem A click puts the console in QuickEdit selection, which freezes every write to it.
+echo Neu tieu de cua so bat dau bang chu Select, bam Esc de chay tiep.
 call :steps > "%LOG%" 2>&1
 type "%LOG%"
 echo.

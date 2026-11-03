@@ -52,6 +52,15 @@ of scope for now. Latest listed tests: pytest 1039 passed, 10 skipped, 1 xfailed
 extension 40 passed. Helium e2e was not rerun and stops on a machine with the service installed
 unless given `--with-service`. See `REVIEWS.md` for the seventh review round.
 
+**Update 2026-11-03, after the second install and SVC17.** The owner opened
+`tools\install_service.cmd` themself: 0 FAIL, 14 PASS, 3 SKIP, and the worker scans real files as
+LocalSystem. ETW turned itself off: the file events lost 373,432 events in seconds. SVC17 therefore
+uses process events only, and the shadow scorer has no file event source; the 30 days have not
+started. The next step is the owner reinstalling to check process ETW: read the verify `etw` line
+and any `etw check:` lines. A click in the install window freezes it (title "Select …"); Esc
+resumes it. Latest tests: pytest 1048 passed, 10 skipped, 1 xfailed twice in a row; extension
+40 passed. See `REVIEWS.md` for the eighth review round.
+
 ## 1. Where things are
 
 * Repo: `C:\Users\lately07\Desktop\Folder Group\sentinel-guard`, branch

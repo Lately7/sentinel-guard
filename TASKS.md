@@ -71,6 +71,7 @@ document/image extension.
 | SVC16 | approvals from R6 and R8 | merged `29949a2`; corrected in review |
 | R6 | pipe integrity-label concern | refuted by an ordinary client on the real service; REVIEWS.md |
 | R8 | local clean after service `unknown` claim | not accepted; local scan ran real engines; REVIEWS.md |
-| DOCS2 | records of SVC11–SVC16 and the owner ETW decision | submitted for Claude review |
+| DOCS2 | records of SVC11–SVC16 and the owner ETW decision | merged `50ee284` |
+| SVC17 | ETW for process events only, after the first real session | merged `f9838f1`; corrected in review; real session unverified |
 
 Outcomes are recorded in `REVIEWS.md`.
