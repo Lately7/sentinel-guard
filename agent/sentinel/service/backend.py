@@ -8,6 +8,7 @@ file, the service scans it itself and acts on its own result.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import logging
 import os
@@ -53,6 +54,7 @@ MAINTENANCE_SECONDS = 600.0
 FIRST_MAINTENANCE_SECONDS = 30.0  # a fresh install has no threat data at all until this runs
 MAX_REPAIRS = 64
 WATCH_SECONDS = 5.0
+PROBE_SECONDS = 60.0
 # A job past this is written off: opening a file can wait on a hostile oplock for
 # ever and nothing can interrupt it. Past MAX_STUCK at once, no more threads.
 STALL_SECONDS = config.SCAN_DEADLINE_SECONDS + 30.0
@@ -210,6 +212,8 @@ class ProductBackend:
         self.rescans = RescanQueue(DbDownloadStore(db))
         self._repairs: OrderedDict[str, repair.Repair] = OrderedDict()
         self._rule_generation: str | None = None
+        self._probe_lock = threading.Lock()
+        self._last_probe_at = float("-inf")
         self.observers = observers(self)
 
     # -- lifecycle
@@ -255,6 +259,7 @@ class ProductBackend:
             try:
                 quarantine.reconcile(self.db)
                 self.db.prune_cache()
+                self.db.prune_events()
                 if feeds.is_due(self.db, self.settings.feed_interval_hours):
                     feeds.update_all(self.db)
                 if feeds.engine_update_due(self.db, "yara", 24 * 3600):
@@ -271,6 +276,7 @@ class ProductBackend:
             try:
                 self._asked_lane.sweep()
                 self._observed_lane.sweep()
+                self._schedule_probe()
                 if (self.observers is not None and self.scanner.isolation is not None
                         and not self.scanner.isolation.failure()):
                     with self._lock:
@@ -281,6 +287,29 @@ class ProductBackend:
                 self._retry_due()
             except Exception:
                 log.exception("watch failed")
+
+    def _schedule_probe(self) -> None:
+        isolation = self.scanner.isolation
+        if isolation is None or not isolation.failure() or not hasattr(isolation, "probe"):
+            return
+        now = time.monotonic()
+        if now - self._last_probe_at < PROBE_SECONDS or not self._probe_lock.acquire(blocking=False):
+            return
+        self._last_probe_at = now
+
+        def run() -> None:
+            try:
+                isolation.probe()
+            except Exception:
+                log.exception("worker probe failed")
+            finally:
+                self._probe_lock.release()
+
+        try:
+            threading.Thread(target=run, name="worker-probe", daemon=True).start()
+        except RuntimeError:
+            self._probe_lock.release()
+            raise
 
     def _retry_due(self) -> None:
         if self.scanner.isolation is not None and self.scanner.isolation.failure():
@@ -295,13 +324,22 @@ class ProductBackend:
                     self._later.append((now + WATCH_SECONDS, path, reason, attempts))
 
     def rescan_on_new_rules(self) -> None:
-        generation = self.scanner.gate_id()
+        generation = self._file_rescan_id()
         if self._rule_generation != generation:
             self.rescans.signatures_changed(generation)
             while (item := self.rescans.pop()) is not None:
                 if not self.observe(item.path, "rescan", True):
                     return  # the generation stays old, so the next round asks again
         self._rule_generation = generation
+
+    def _file_rescan_id(self) -> str:
+        plan = getattr(self.scanner, "_plan", None)
+        # An injected gate identifier is the only generation a substitute scanner exposes.
+        if plan is None or "gate_id" in vars(self.scanner):
+            return self.scanner.gate_id()
+        rules = plan("", b"", True).inputs.rule_digests
+        content = json.dumps((sorted(rules), self.db.file_hash_digest()), separators=(",", ":"))
+        return "file-v1:" + hashlib.sha256(content.encode("ascii")).hexdigest()
 
     # -- reads
 
@@ -531,7 +569,7 @@ class ProductBackend:
     def _remember_download(self, job: _Job, seen: Any) -> None:
         if seen.volume_serial is not None and seen.file_id_hex is not None:
             self.rescans.remember(Download(seen.volume_serial, int(seen.file_id_hex, 16), job.path, seen.sha256,
-                                           self.scanner.gate_id(), time.time()))
+                                           self._rule_generation or self._file_rescan_id(), time.time()))
 
     # -- plans
 

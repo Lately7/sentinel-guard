@@ -176,41 +176,57 @@ class WorkerSession:
             if self._lock.acquire(timeout=min(POLL_SECONDS, remaining)):
                 return
 
+    def _ensure_started(self, deadline_ns: int) -> None:
+        if self._proc is not None and self._proc.wait(0) is not None:
+            self._kill()
+        if self._proc is not None:
+            return
+        if time.monotonic() - self._failed_start_at < START_RETRY_SECONDS:
+            raise WorkerFailure(StageStatus.UNAVAILABLE, "WORKER_UNAVAILABLE")
+        self._starting_proc = None
+        try:
+            self._start(deadline_ns)
+        except Exception as e:
+            failed_proc = self._proc or self._starting_proc
+            self._kill()
+            if isinstance(e, OSError):
+                self.last_failure = str(e) or type(e).__name__
+            elif isinstance(e, WorkerFailure):
+                if e.code != "WORKER_DIED":
+                    self.last_failure = e.code
+            else:
+                self.last_failure = f"{type(e).__name__}: {e}"
+            tail = failed_proc.stderr_tail() if isinstance(failed_proc, worker_mod.Worker) else ""
+            self._failed_start_at = time.monotonic()
+            detail = self.last_failure + (f"\nstderr: {tail}" if tail else "")
+            if detail != self._logged_start_failure:
+                log.warning("worker did not start: %s", detail, exc_info=not isinstance(e, (OSError, WorkerFailure)))
+                self._logged_start_failure = detail
+            self._starting_proc = None
+            raise WorkerFailure(StageStatus.UNAVAILABLE, "WORKER_UNAVAILABLE") from e
+        self.last_failure = ""
+        self._starting_proc = None
+        self._logged_start_failure = ""
+
+    def probe(self) -> bool:
+        if not self._lock.acquire(blocking=False):
+            return False
+        try:
+            if not self.last_failure or time.monotonic() - self._failed_start_at < START_RETRY_SECONDS:
+                return False
+            try:
+                self._ensure_started(time.monotonic_ns() + int(START_SECONDS * 1e9))
+            except WorkerFailure:
+                return False
+            return True
+        finally:
+            self._lock.release()
+
     def call(self, op: str, args: dict[str, Any], *, deadline_ns: int,
              cancel: CancellationToken | None = None, handle_from: int | None = None) -> dict[str, Any]:
         self._enter(deadline_ns, cancel)
         try:
-            # A worker that died between calls (crash, OOM kill, external
-            # termination) is replaced before it can fail this request.
-            if self._proc is not None and self._proc.wait(0) is not None:
-                self._kill()
-            if self._proc is None:
-                if time.monotonic() - self._failed_start_at < START_RETRY_SECONDS:
-                    raise WorkerFailure(StageStatus.UNAVAILABLE, "WORKER_UNAVAILABLE")
-                self.last_failure = ""
-                self._starting_proc = None
-                try:
-                    self._start(deadline_ns)
-                except Exception as e:
-                    failed_proc = self._proc or self._starting_proc
-                    self._kill()
-                    if isinstance(e, OSError):
-                        self.last_failure = str(e) or type(e).__name__
-                    elif isinstance(e, WorkerFailure):
-                        self.last_failure = self.last_failure or e.code
-                    else:
-                        self.last_failure = f"{type(e).__name__}: {e}"
-                    tail = failed_proc.stderr_tail() if isinstance(failed_proc, worker_mod.Worker) else ""
-                    self._failed_start_at = time.monotonic()
-                    detail = self.last_failure + (f"\nstderr: {tail}" if tail else "")
-                    if detail != self._logged_start_failure:
-                        log.warning("worker did not start: %s", detail, exc_info=not isinstance(e, (OSError, WorkerFailure)))
-                        self._logged_start_failure = detail
-                    self._starting_proc = None
-                    raise WorkerFailure(StageStatus.UNAVAILABLE, "WORKER_UNAVAILABLE") from e
-                self.last_failure = ""
-                self._starting_proc = None
-                self._logged_start_failure = ""
+            self._ensure_started(deadline_ns)
             if handle_from is not None:
                 try:
                     args = {**args, "handle": self._duplicate(handle_from)}
@@ -254,6 +270,9 @@ class Isolation:
 
     def failure(self) -> str:
         return self.session.last_failure if self.session is not None else ""
+
+    def probe(self) -> bool:
+        return self.session.probe() if self.session is not None else False
 
 
 def _failed(engine_id: str, request: ScanRequest, identity: FileIdentity,
