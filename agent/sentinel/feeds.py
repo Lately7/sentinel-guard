@@ -25,8 +25,8 @@ from .singleton import FEEDS_MUTEX, NamedLock
 
 log = logging.getLogger(__name__)
 
-# A failed signature update is retried after this, not after the full period:
-# advancing the success time on failure left ClamAV 4 h and YARA 24 h stale.
+# Failed signature and indicator updates retry after this, not after the full
+# period; advancing success time on failure left ClamAV and YARA stale.
 ENGINE_RETRY_AFTER = 60 * 60  # ClamAV asks clients not to check more often than hourly
 
 
@@ -228,9 +228,13 @@ def last_update(db: Database) -> float:
 
 
 def is_due(db: Database, interval_hours: float, now: float | None = None) -> bool:
+    now = time.time() if now is None else now
+    last_try = float(db.get_meta("feeds_attempted", "0") or 0)
+    if now - last_try <= ENGINE_RETRY_AFTER:
+        return False
     if db.indicators.outdated:  # old snapshot format: rebuild without waiting for the interval
         return True
-    return (now if now is not None else time.time()) - last_update(db) > interval_hours * 3600
+    return now - last_update(db) > interval_hours * 3600
 
 
 def update_all(db: Database, feeds: list[Feed] | None = None, fetcher: Callable[[str], str] = fetch,
@@ -285,11 +289,20 @@ def _update_all(db: Database, feeds: list[Feed], fetcher: Callable[[str], str],
                 kept = _carry_over(db, builder, feed, popular)
                 statuses.append((feed.name, None, f"error: {e}"))
                 results[feed.name] = f"error: {e} (kept {kept} previous entries)"
+        # A new popular list changes the result even with every source down: it
+        # is what takes a site people actually use off the block list.
+        if popular == db.indicators.popular() and not any(status == "ok" for _, _, status in statuses):
+            builder.discard()
+            db.set_meta("feeds_attempted", str(time.time()))
+            for name, n, status in statuses:
+                db.set_feed(name, n, status)
+            return results
         path = builder.finish()
     except BaseException:
         builder.discard()
         raise
     publish(db, path)
+    db.set_meta("feeds_attempted", str(time.time()))
     for name, n, status in statuses:
         db.set_feed(name, n, status)
     return results
