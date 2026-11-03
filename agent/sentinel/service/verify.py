@@ -153,6 +153,15 @@ def _observing(status: dict[str, Any]) -> tuple[bool | None, str]:
     return True, f"records {seen.get('records', 0)}, failed polls {seen.get('failed_polls', 0)}"
 
 
+def _etw(status: dict[str, Any]) -> tuple[bool | None, str]:
+    seen = status.get("observation", {})
+    state = seen.get("etw", "off")
+    if state != "on":
+        return None, f"ETW tắt: {state}"
+    return True, (f"đã phân tích {seen.get('etw_events_parsed', 0)} sự kiện, "
+                  f"mất {seen.get('etw_events_lost', 0)}")
+
+
 def _settled() -> str:
     """StartService returns while the service is still starting, so this is what a
     verify right after an install sees first."""
@@ -227,6 +236,7 @@ def run(*, restart: bool = False, client: Callable[[], ServiceClient] = ServiceC
             check("refuses_unknown_op", lambda: _refuses_unknown(service))
             check("worker_scan", lambda: _own_scan(service))
             check("observers", lambda: _observed(service))
+            check("etw", lambda: _etw(service.request("status")))
     results.append(Check("medium_token_cannot_approve", None, "needs an unelevated client: the tray's Khôi phục shows it"))
     results.append(Check("remote_client_refused", None, "needs a second machine"))
     if restart:
