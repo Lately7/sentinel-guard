@@ -154,6 +154,13 @@ SCHEMA_VERSION = 4
 SCAN_CACHE_MAX_ROWS = 50_000
 SCAN_CACHE_MAX_AGE = 30 * 86400
 EVENT_MAX_ROWS = 20_000
+BUSY_MILLISECONDS = 30_000
+
+
+def _busy(error: sqlite3.Error) -> bool:
+    """Another process has the file. OperationalError is a DatabaseError too, so
+    without this check a lock reads as damage and a healthy database gets rebuilt."""
+    return (getattr(error, "sqlite_errorcode", None) or 0) & 0xFF in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
 
 
 class Database:
@@ -171,7 +178,11 @@ class Database:
         try:
             self._conn = self._open()
             healthy = self._conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
-        except sqlite3.DatabaseError:
+        except sqlite3.DatabaseError as e:
+            if _busy(e):
+                if self._conn is not None:
+                    self._conn.close()
+                raise
             healthy = False
         if not healthy:
             if not repair:
@@ -181,17 +192,24 @@ class Database:
         self._migrate()
 
     def _open(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, timeout=30, check_same_thread=False, isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        try:
-            conn.execute("PRAGMA busy_timeout=30000")
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.executescript(SCHEMA)
-        except sqlite3.DatabaseError:
-            conn.close()
-            raise
-        return conn
+        deadline = time.monotonic() + BUSY_MILLISECONDS / 1000
+        while True:
+            conn = sqlite3.connect(self.path, timeout=BUSY_MILLISECONDS / 1000, check_same_thread=False,
+                                   isolation_level=None)
+            conn.row_factory = sqlite3.Row
+            try:
+                conn.execute(f"PRAGMA busy_timeout={BUSY_MILLISECONDS}")
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+                conn.executescript(SCHEMA)
+                return conn
+            except sqlite3.DatabaseError as e:
+                conn.close()
+                # Turning on WAL takes no notice of the busy timeout, so two processes
+                # creating the file at once have to wait here.
+                if not _busy(e) or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
 
     def _rebuild(self) -> str:
         """Move the damaged file aside, recreate, and copy back what can still be read."""
@@ -236,8 +254,8 @@ class Database:
         with self._lock:
             try:
                 ok = self._conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
-            except sqlite3.DatabaseError:
-                ok = False
+            except sqlite3.DatabaseError as e:
+                ok = _busy(e)
             if ok:
                 return None
             moved = self._rebuild()

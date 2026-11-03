@@ -230,3 +230,15 @@ def test_status_arriving_after_the_window_closed_goes_through_the_app_not_the_wi
     while not queued and time.monotonic() < deadline:
         time.sleep(0.01)
     assert queued == [view.app.refresh]
+
+
+def test_a_cloud_placeholder_is_neither_retried_nor_reported_file_by_file(tmp_path):
+    path = tmp_path / "cloud.docm"
+    path.write_bytes(b"stand-in")
+    backend = backend_stub()
+    events = []
+    backend.db.add_event = lambda *args: events.append(args)
+    job = _Job("j", str(path), "journal", None, "", None)
+    job.result = {"verdict": {"label": "unknown", "scan_result": {"reason_codes": ["CLOUD_PLACEHOLDER"]}}}
+    backend._after_observed(job)
+    assert backend._later == [] and events == []

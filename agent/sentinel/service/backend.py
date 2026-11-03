@@ -440,6 +440,10 @@ class ProductBackend:
             return
         verdict = job.result.get("verdict") or {}
         reasons = set((verdict.get("scan_result") or {}).get("reason_codes") or ())
+        # A cloud file has nothing here to scan, and syncing touches thousands. Opening
+        # it brings the bytes down, and that change comes back through the journal.
+        if "CLOUD_PLACEHOLDER" in reasons:
+            return
         retryable = bool(reasons & {"IN_USE", "CHANGED", "ENGINE_TIMEOUT", "ENGINE_INCOMPLETE"})
         unfinished = (job.state == "failed" or job.result.get("code") in ("IN_USE", "CHANGED")
                       or verdict.get("label") == "unknown")
