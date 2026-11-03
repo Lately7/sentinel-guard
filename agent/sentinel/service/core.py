@@ -24,7 +24,7 @@ from .protocol import (
 
 log = logging.getLogger(__name__)
 
-PLAN_TTL_SECONDS = 120.0
+PLAN_TTL_SECONDS = 300.0
 MAX_PLANS_PER_CALLER = 8
 MAX_JOBS_PER_CALLER = 64
 MAX_JOBS = 4096
@@ -223,7 +223,9 @@ class ServiceCore:
         return {"protocol": PROTOCOL_VERSION, "elevated_caller": caller.is_admin and caller.integrity in ("high", "system")}
 
     def _op_status(self, caller: Caller, args: dict[str, Any]) -> dict[str, Any]:
-        return self.backend.status()
+        result = self.backend.status()
+        db = getattr(self.backend, "db", None)
+        return {**result, "allow_store_id": db.store_id()} if db is not None else result
 
     def _op_check_url(self, caller: Caller, args: dict[str, Any]) -> dict[str, Any]:
         return self.backend.check_url(args["url"])
@@ -255,7 +257,9 @@ class ServiceCore:
         return {"items": self.backend.quarantine_items(caller)}
 
     def _op_allowed_hosts(self, caller: Caller, args: dict[str, Any]) -> dict[str, Any]:
-        return self.backend.allowed_hosts(args["offset"], args["limit"])
+        result = self.backend.allowed_hosts(args["offset"], args["limit"])
+        db = getattr(self.backend, "db", None)
+        return {**result, "allow_store_id": db.store_id()} if db is not None else result
 
     def _op_events(self, caller: Caller, args: dict[str, Any]) -> dict[str, Any]:
         return self.backend.events_for(caller, args["after"], args["limit"])
@@ -293,8 +297,10 @@ class ServiceCore:
             plan = self._plans.get(plan_id)
         # The helper runs in the requester's interactive session; an approval
         # from another session (or another machine user's desktop) is refused.
-        if plan is None or plan.requester != caller.key:
+        if plan is None or plan.requester[1] != caller.session_id:
             raise ProtocolError("NOT_FOUND", "no such confirmation (expired?)")
+        if plan.requester != caller.key:
+            raise ProtocolError("REQUESTER_MISMATCH", "the requester must approve with the same account")
         return plan
 
     def _op_get_plan(self, caller: Caller, args: dict[str, Any], *, connection_id: str | None = None) -> dict[str, Any]:
@@ -307,7 +313,7 @@ class ServiceCore:
 
     def _op_approve_plan(self, caller: Caller, args: dict[str, Any], *, connection_id: str | None = None) -> dict[str, Any]:
         plan = self._plan_for(caller, args["plan_id"])
-        if plan.claimed_by is not None and plan.claimed_by != (caller.key, connection_id):
+        if plan.claimed_by != (caller.key, connection_id):
             raise ProtocolError("PLAN_CLAIMED", "confirmation belongs to another helper")
         if args["version"] != plan.version:
             raise ProtocolError("STALE_PLAN", "the confirmation changed; show it again")

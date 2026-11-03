@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import sqlite3
 import threading
 import time
@@ -239,6 +240,8 @@ class Database:
             if rows:
                 marks = ",".join("?" * len(cols))
                 self._conn.executemany(f"INSERT OR IGNORE INTO {t}({','.join(cols)}) VALUES({marks})", rows)
+        # A rebuilt database may recover only part of the previous allow list.
+        self._conn.execute("DELETE FROM meta WHERE key='store_id'")
         return str(moved)
 
     def check_and_repair(self) -> str | None:
@@ -498,6 +501,15 @@ class Database:
 
     def allow_version(self) -> str:
         return self.get_meta("allow_version", "0") or "0"
+
+    def store_id(self) -> str:
+        # The counter can restart at zero after a new database is created.
+        existing = self.get_meta("store_id")
+        if existing:
+            return existing
+        self._exec("INSERT INTO meta(key,value) VALUES('store_id',?) "
+                   "ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value=''", (secrets.token_hex(16),))
+        return self.get_meta("store_id") or ""
 
     def _bump_allow(self) -> None:
         self._increment("allow_version")

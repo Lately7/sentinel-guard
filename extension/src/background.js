@@ -2,15 +2,32 @@ import { scoreUrl } from "./url_heuristics.js";
 import { buildBlockRules, buildAllowRules, buildOnceRule, ALLOW_BASE_ID, ONCE_BASE_ID, ONCE_SLOTS, KIND_CODES, KIND_LABELS } from "./rules.js";
 import * as native from "./native.js";
 import { VALID } from "./messages.js";
-import { APPROVAL_MS, recordFailure, recordSuccess, refused, retryable } from "./pending.js";
+import { recordFailure, recordSuccess, refused, retryable } from "./pending.js";
 import { fetchAllowlist } from "./allowlist.js";
 
 const WARN_AT = 70; // heuristic score that earns a full-page warning
 const NOTE_AT = 40; // heuristic score shown in the popup / in-page banner
 const SYNC_MINUTES = 360;
+const APPROVAL_MS = 310000;
 const BLOCKED_PAGE = chrome.runtime.getURL("src/blocked.html");
 
-const DEFAULTS = { enabled: true, blocklistVersion: "", allowVersion: "", blocklistSize: 0, allowHosts: [], pendingAllow: [], pendingDownloads: [], syncError: "", stats: { blocked: 0, warned: 0, downloads: 0 } };
+const DEFAULTS = { enabled: true, blocklistVersion: "", allowVersion: "", serviceAllowSeen: false, blocklistSize: 0, allowHosts: [], pendingAllow: [], pendingDownloads: [], syncError: "", stats: { blocked: 0, warned: 0, downloads: 0 } };
+
+function approvalCode(error) {
+  return typeof error?.message === "string" && error.message.startsWith("approval:") ? error.message.slice(9) : "";
+}
+
+function approvalNotice(code) {
+  if (code === "CANCELLED") return;
+  const reasons = {
+    DECLINED: "Người quản trị đã từ chối xác nhận.",
+    EXPIRED: "Yêu cầu xác nhận đã hết hạn hoặc nội dung đã thay đổi. Hãy thử lại.",
+    CONSENT_TIMEOUT: "Đã hết thời gian chờ xác nhận. Hãy thử lại.",
+    REQUESTER_MISMATCH: "Tài khoản quản trị khác tài khoản đã yêu cầu. Hiện chỉ cùng một tài khoản có thể xác nhận.",
+    SERVICE_UNAVAILABLE: "Không thể kết nối với dịch vụ bảo vệ. Hãy thử lại sau.",
+  };
+  notify("Chưa tin cậy trang web", reasons[code] || "Trình xác nhận gặp lỗi. Hãy thử lại.");
+}
 
 async function getState() {
   const s = await chrome.storage.local.get(DEFAULTS);
@@ -139,7 +156,7 @@ async function doSync(force) {
       await native.request("allow_host", { host }, APPROVAL_MS);
     } catch (e) {
       // An administrator said no: that is an answer, not something to retry.
-      if (refused(e)) {
+      if (refused(e) || approvalCode(e)) {
         await forgetTrust(host);
         continue;
       }
@@ -157,7 +174,14 @@ async function doSync(force) {
     const res = await fetchAllowlist((offset) => native.request("get_allowlist", { offset }));
     if (!res) return { ok: false, error: "allowlist kept changing during sync" };
     allowHosts = res.hosts;
-    await chrome.storage.local.set({ allowHosts, allowVersion: res.version });
+    const serviceList = res.version.startsWith("s");
+    const firstServiceList = serviceList && !state.serviceAllowSeen;
+    await chrome.storage.local.set({ allowHosts, allowVersion: res.version,
+                                     serviceAllowSeen: state.serviceAllowSeen || serviceList });
+    if (firstServiceList && state.allowHosts.length && !allowHosts.length) {
+      notify("Danh sách trang tin cậy đã thay đổi",
+             "Dịch vụ bảo vệ có danh sách tin cậy trống nên các trang đã tin cậy trước đây không còn được bỏ qua. Bạn có thể tin cậy lại một trang qua hộp xác nhận.");
+    }
   }
   const blocklistChanged = force || hello.blocklist_version !== state.blocklistVersion;
   if (!blocklistChanged) {
@@ -458,6 +482,11 @@ async function trust(host) {
       const hello = await native.request("hello", {}, 3000);
       await chrome.storage.local.set({ allowVersion: hello.allow_version });
     } catch (e) {
+      const code = approvalCode(e);
+      if (code) {
+        approvalNotice(code);
+        return false;
+      }
       if (refused(e)) return false;
       // Agent offline: queued and uploaded by the next successful sync.
       const { pendingAllow } = await getState();

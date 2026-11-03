@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from .. import protection
@@ -24,6 +25,15 @@ CHECK_SECONDS = 5.0
 POLL_SECONDS = 0.2
 JOB_SECONDS = 150.0
 FINISHED = ("done", "cancelled", "failed")
+
+
+@dataclass(frozen=True)
+class ApprovalResult:
+    approved: bool
+    code: str = "APPROVED"
+
+    def __bool__(self) -> bool:
+        return self.approved
 
 
 class ServiceLease:
@@ -131,16 +141,28 @@ class ServiceLease:
     def enable_protection(self) -> bool:
         return self._query("enable_protection") is not None
 
-    def approve(self, kind: str, params: dict[str, Any]) -> bool:
-        """Asks for a plan and shows the elevated confirmation; True when it went through."""
+    def approve(self, kind: str, params: dict[str, Any]) -> ApprovalResult:
+        """Asks for a plan and reports why confirmation did not complete."""
         from .consent import ConsentError, launch_consent
 
         try:
             plan = self._call("request_plan", kind=kind, params=params)
-            return plan is not None and launch_consent(str(plan["plan_id"]))
-        except (ServiceError, ConsentError, OSError) as e:
-            log.warning("confirmation of %s did not complete: %s", kind, e)
-            return False
+            if plan is None:
+                log.warning("confirmation of %s: service unavailable", kind)
+                return ApprovalResult(False, "SERVICE_UNAVAILABLE")
+            if not launch_consent(plan["plan_id"]):
+                return ApprovalResult(False, "CANCELLED")
+            return ApprovalResult(True)
+        except ServiceUnavailable:
+            code = "SERVICE_UNAVAILABLE"
+        except ServiceError as exc:
+            code = exc.code
+        except ConsentError as exc:
+            code = exc.code
+        except OSError:
+            code = "HELPER_FAILED"
+        log.warning("confirmation of %s did not complete: %s", kind, code)
+        return ApprovalResult(False, code)
 
 
 def _left_to_us(v: Verdict, done: dict[str, Any]) -> bool:

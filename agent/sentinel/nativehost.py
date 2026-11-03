@@ -97,7 +97,8 @@ class Host:
         self.db.set_meta("extension_seen", str(time.time()))
         service = self.lease.status() if self.lease is not None else None
         return {"version": __version__, "blocklist_version": self.db.get_meta("blocklist_version", "0"),
-                "allow_version": f"s{service['allow_version']}" if service else self.db.allow_version(),
+                "allow_version": (f"s{service['allow_store_id']}:{service['allow_version']}" if service and service.get("allow_store_id")
+                                  else f"s{service['allow_version']}" if service else f"{self.db.store_id()}:{self.db.allow_version()}"),
                 "counts": self.db.counts()}
 
     def on_check_url(self, msg: dict[str, Any]) -> dict[str, Any]:
@@ -136,8 +137,10 @@ class Host:
         limit = _int(msg, "limit", PAGE_LIMIT, 1, PAGE_LIMIT)
         service = self.lease.allowed_hosts(offset, limit) if self.lease is not None else None
         if service is not None:
-            return {**service, "allow_version": f"s{service['allow_version']}"}
-        version = self.db.allow_version()
+            version = (f"s{service['allow_store_id']}:{service['allow_version']}" if service.get("allow_store_id")
+                       else f"s{service['allow_version']}")
+            return {**service, "allow_version": version}
+        version = f"{self.db.store_id()}:{self.db.allow_version()}"
         everything = self.db.allowed_hosts()
         hosts: list[str] = []
         size = 0
@@ -193,8 +196,9 @@ class Host:
             raise BadRequest("invalid host")
         if self.lease is not None and self.lease.available():
             # A page can ask for this; only an administrator's confirmation grants it.
-            if not self.lease.approve("trust_host", {"host": host}):
-                raise BadRequest("not approved")
+            approval = self.lease.approve("trust_host", {"host": host})
+            if not approval:
+                raise BadRequest(f"approval:{getattr(approval, 'code', 'HELPER_FAILED')}")
             return {}
         self.db.allow_host(host)
         self.db.add_event("web", "warning", "Đã tin cậy trang web", host, {"host": host})

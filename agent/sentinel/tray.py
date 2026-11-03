@@ -28,6 +28,23 @@ from .watcher import RealtimeProtection
 log = logging.getLogger(__name__)
 
 APP = "Sentinel Guard"
+
+
+def _approval_message(code: str, action: str) -> str:
+    reasons = {
+        "DECLINED": "Người quản trị đã từ chối xác nhận.",
+        "EXPIRED": "Yêu cầu xác nhận đã hết hạn hoặc nội dung đã thay đổi. Hãy thử lại.",
+        "CONSENT_TIMEOUT": "Đã hết thời gian chờ xác nhận. Hãy thử lại.",
+        "REQUESTER_MISMATCH": "Tài khoản quản trị khác tài khoản đã yêu cầu. Hiện chỉ cùng một tài khoản có thể xác nhận.",
+        "SERVICE_UNAVAILABLE": "Không thể kết nối với dịch vụ bảo vệ. Hãy thử lại sau.",
+    }
+    return f"Chưa {action}: {reasons.get(code, 'Trình xác nhận gặp lỗi. Hãy thử lại.')}"
+
+
+def _show_approval_failure(result: object, action: str) -> None:
+    code = getattr(result, "code", "HELPER_FAILED")
+    if code != "CANCELLED":
+        messagebox.showerror(APP, _approval_message(code, action))
 # The logo is a black-to-grey square in a thin outline; only the outline colour
 # carries state, so the icon stays the same shape in every situation.
 GREEN, AMBER, RED = (116, 116, 122), (212, 163, 42), (224, 82, 74)
@@ -149,8 +166,11 @@ class App:
     def toggle_realtime(self) -> None:
         if self.realtime and self.realtime.running:
             # Turning protection off is the service's to allow, if there is one.
-            if self.lease.available() and not self.lease.approve("disable_protection", {}):
-                return
+            if self.lease.available():
+                approval = self.lease.approve("disable_protection", {})
+                if not approval:
+                    _show_approval_failure(approval, "tắt bảo vệ")
+                    return
             # Called on the Tk thread: wait briefly. A quarantine that already
             # started finishes on its own; none can start after this.
             closed = self.realtime.stop(timeout=2.0)
@@ -384,8 +404,9 @@ class App:
             if qid in self._service_repairs:
                 continue  # still running from where it is: nothing was quarantined yet
             if qid in self._service_items:
-                if not self.lease.approve("restore_quarantine", {"quarantine_id": qid}):
-                    messagebox.showerror(APP, "Chưa khôi phục: cần xác nhận của quản trị viên.")
+                approval = self.lease.approve("restore_quarantine", {"quarantine_id": qid})
+                if not approval:
+                    _show_approval_failure(approval, "khôi phục")
                 continue
             try:
                 p = quarantine.restore(self.db, qid)
@@ -402,18 +423,21 @@ class App:
                     continue
                 if qid not in self._service_items:
                     quarantine.delete(self.db, qid)
-                elif not self.lease.approve("delete_quarantine", {"quarantine_id": qid}):
-                    messagebox.showerror(APP, "Chưa xóa: cần xác nhận của quản trị viên.")
+                else:
+                    approval = self.lease.approve("delete_quarantine", {"quarantine_id": qid})
+                    if not approval:
+                        _show_approval_failure(approval, "xóa")
             self.refresh()
 
     def repair_selected(self) -> None:
         for repair_id in self.q_tv.selection():
             if repair_id not in self._service_repairs:
                 continue
-            if self.lease.approve("approve_repair", {"repair_id": repair_id}):
+            approval = self.lease.approve("approve_repair", {"repair_id": repair_id})
+            if approval:
                 del self._service_repairs[repair_id]
             else:
-                messagebox.showerror(APP, "Chưa xử lý: cần xác nhận của quản trị viên.")
+                _show_approval_failure(approval, "xử lý")
         self.refresh()
 
     def unallow_selected(self) -> None:
