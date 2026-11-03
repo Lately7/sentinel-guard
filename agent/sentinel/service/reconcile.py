@@ -24,6 +24,16 @@ class _Frame:
     entries: Generator[os.DirEntry[str], None, None] | None = None
 
 
+class _ReparseDirectory(Exception):
+    pass
+
+
+def _cursor_path(path: str) -> str:
+    if path.startswith("\\\\?\\"):
+        path = path[4:]
+    return ntpath.normcase(ntpath.normpath(path))
+
+
 class Reconciler:
     """Offer smart targets, then stream fixed drives in bounded passes.
 
@@ -70,7 +80,10 @@ class Reconciler:
                         and all(isinstance(pair, list) and len(pair) == 2
                                 and all(isinstance(part, str) for part in pair) for pair in stack)
                         and (not stack or (value["drive"] < len(self.drives)
-                                           and ntpath.normcase(stack[0][0]) == ntpath.normcase(self.drives[value["drive"]])))):
+                                           and _cursor_path(stack[0][0]) == _cursor_path(self.drives[value["drive"]])
+                                           and all(_cursor_path(child[0]).startswith(
+                                               _cursor_path(parent[0]).rstrip("\\") + "\\")
+                                               for parent, child in zip(stack, stack[1:]))))):
                     return value
             except (ValueError, TypeError, AttributeError):
                 pass
@@ -146,7 +159,13 @@ class Reconciler:
 
     def _open(self, frame: _Frame) -> None:
         def entries() -> Generator[os.DirEntry[str], None, None]:
-            with os.scandir(scope._reachable(frame.path)) as scan:
+            path = scope._reachable(frame.path)
+            with os.scandir(path) as scan:
+                # A saved frame or a directory swapped after listing can now be a junction.
+                info = os.stat(path, follow_symlinks=False)
+                if (stat.S_ISLNK(info.st_mode)
+                        or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+                    raise _ReparseDirectory
                 yield from scan
 
         frame.entries = entries()
@@ -179,6 +198,14 @@ class Reconciler:
                 assert frame.entries is not None
                 item = next(frame.entries)
             except StopIteration:
+                frame.entries = None
+                self._stack.pop()
+                if not self._stack:
+                    self._state["drive"] += 1
+                self._checkpoint()
+                continue
+            except _ReparseDirectory:
+                self.counts["reparse_skipped"] += 1
                 frame.entries = None
                 self._stack.pop()
                 if not self._stack:
