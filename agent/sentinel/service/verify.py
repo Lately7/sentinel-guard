@@ -27,6 +27,7 @@ NAME = "SentinelGuard"
 START_WAIT_SECONDS = 60.0
 PIPE_WAIT_SECONDS = 5.0
 OBSERVE_WAIT_SECONDS = 3 * JOURNAL_SECONDS + 5
+ETW_WAIT_SECONDS = 20
 # What lets a principal stop, pause, reconfigure or take over a service.
 DANGEROUS_RIGHTS = ("WP", "DT", "DC", "WD", "WO", "SD", "GA", "GW")
 ORDINARY_USERS = ("IU", "BU", "AU", "WD", "SU", "BG")
@@ -161,9 +162,31 @@ def _etw(status: dict[str, Any]) -> tuple[bool | None, str]:
     if isinstance(check_loss, int):
         loss += f", mất lúc kiểm tra {check_loss}"
     if state != "on":
+        for key, label in (("etw_truncated", "cắt ngắn"),
+                           ("etw_query_failures", "truy vấn hỏng")):
+            count = seen.get(key)
+            if type(count) is int and count != 0:
+                loss += f", {label} {count}"
         return None, f"ETW tắt: {state}, {loss}"
+    phase = seen.get("etw_check_phase")
+    if isinstance(phase, str) and phase:
+        loss += f", qua ở pha {phase}"
+    if seen.get("etw_flush_assist") is True:
+        loss += ", cần flush mỗi giây"
     return True, (f"đã phân tích {seen.get('etw_events_parsed', 0)} sự kiện, "
                   f"{loss}")
+
+
+def _etw_settled(client: ServiceClient) -> tuple[bool | None, str]:
+    deadline = time.monotonic() + ETW_WAIT_SECONDS
+    while True:
+        status = client.request("status")
+        if status.get("observation", {}).get("etw") != "checking":
+            return _etw(status)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None, "ETW chưa kiểm xong sau 20 giây"
+        time.sleep(min(0.5, remaining))
 
 
 def _settled() -> str:
@@ -240,7 +263,7 @@ def run(*, restart: bool = False, client: Callable[[], ServiceClient] = ServiceC
             check("refuses_unknown_op", lambda: _refuses_unknown(service))
             check("worker_scan", lambda: _own_scan(service))
             check("observers", lambda: _observed(service))
-            check("etw", lambda: _etw(service.request("status")))
+            check("etw", lambda: _etw_settled(service))
     results.append(Check("medium_token_cannot_approve", None, "needs an unelevated client: the tray's Khôi phục shows it"))
     results.append(Check("remote_client_refused", None, "needs a second machine"))
     if restart:
