@@ -92,6 +92,7 @@ class Batch:
     lookup_failed: int = 0
     failed_records: tuple[UsnRecord, ...] = ()
     journal_end: int = 0
+    skipped_by_name: int = 0
 
 
 class CursorStore(Protocol):
@@ -193,7 +194,8 @@ def reset_cursor(volume: str, device: Device, store: CursorStore,
 
 
 def read_batch(volume: str, device: Device, store: CursorStore,
-               resolver: Callable[[UsnRecord], str | None], *,
+               resolver: Callable[[UsnRecord], str | None],
+               wanted_name: Callable[[str], bool] = lambda name: True, *,
                max_bytes: int = 1 << 20, clock: Callable[[], float] = time.time) -> Batch:
     if max_bytes < 80:
         raise ValueError("bounds")
@@ -225,9 +227,13 @@ def read_batch(volume: str, device: Device, store: CursorStore,
         return Batch(gaps=(JournalGap("wrapped_cursor"),))
     resolved: list[ResolvedChange] = []
     unresolved = 0
+    skipped_by_name = 0
     failed: list[UsnRecord] = []
     for record in records:
         if not record.reason & CHANGED or record.reason & USN_REASON_FILE_DELETE:
+            continue
+        if not wanted_name(record.name):
+            skipped_by_name += 1
             continue
         try:
             path = resolver(record)
@@ -243,8 +249,9 @@ def read_batch(volume: str, device: Device, store: CursorStore,
         store.save(advanced)
     except OSError:
         return Batch(tuple(resolved), None, (JournalGap("cursor_store_error"),), unresolved,
-                     len(failed), tuple(failed), info.next_usn)
-    return Batch(tuple(resolved), advanced, (), unresolved, len(failed), tuple(failed), info.next_usn)
+                     len(failed), tuple(failed), info.next_usn, skipped_by_name)
+    return Batch(tuple(resolved), advanced, (), unresolved, len(failed), tuple(failed), info.next_usn,
+                 skipped_by_name)
 
 
 class FILE_ID_DESCRIPTOR(ctypes.Structure):

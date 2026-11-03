@@ -6,6 +6,7 @@ browser-spawned host from blocking on the agent (and vice versa).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -152,6 +153,14 @@ SALVAGE: dict[str, str] = {
 SCHEMA_VERSION = 4
 SCAN_CACHE_MAX_ROWS = 50_000
 SCAN_CACHE_MAX_AGE = 30 * 86400
+EVENT_MAX_ROWS = 20_000
+BUSY_MILLISECONDS = 30_000
+
+
+def _busy(error: sqlite3.Error) -> bool:
+    """Another process has the file. OperationalError is a DatabaseError too, so
+    without this check a lock reads as damage and a healthy database gets rebuilt."""
+    return (getattr(error, "sqlite_errorcode", None) or 0) & 0xFF in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
 
 
 class Database:
@@ -169,7 +178,11 @@ class Database:
         try:
             self._conn = self._open()
             healthy = self._conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
-        except sqlite3.DatabaseError:
+        except sqlite3.DatabaseError as e:
+            if _busy(e):
+                if self._conn is not None:
+                    self._conn.close()
+                raise
             healthy = False
         if not healthy:
             if not repair:
@@ -179,17 +192,24 @@ class Database:
         self._migrate()
 
     def _open(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, timeout=30, check_same_thread=False, isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        try:
-            conn.execute("PRAGMA busy_timeout=30000")
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.executescript(SCHEMA)
-        except sqlite3.DatabaseError:
-            conn.close()
-            raise
-        return conn
+        deadline = time.monotonic() + BUSY_MILLISECONDS / 1000
+        while True:
+            conn = sqlite3.connect(self.path, timeout=BUSY_MILLISECONDS / 1000, check_same_thread=False,
+                                   isolation_level=None)
+            conn.row_factory = sqlite3.Row
+            try:
+                conn.execute(f"PRAGMA busy_timeout={BUSY_MILLISECONDS}")
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+                conn.executescript(SCHEMA)
+                return conn
+            except sqlite3.DatabaseError as e:
+                conn.close()
+                # Turning on WAL takes no notice of the busy timeout, so two processes
+                # creating the file at once have to wait here.
+                if not _busy(e) or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
 
     def _rebuild(self) -> str:
         """Move the damaged file aside, recreate, and copy back what can still be read."""
@@ -234,8 +254,8 @@ class Database:
         with self._lock:
             try:
                 ok = self._conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
-            except sqlite3.DatabaseError:
-                ok = False
+            except sqlite3.DatabaseError as e:
+                ok = _busy(e)
             if ok:
                 return None
             moved = self._rebuild()
@@ -393,6 +413,34 @@ class Database:
         sha256 = sha256.lower()
         return self._exec("SELECT * FROM bad_hashes WHERE sha256=?", (sha256,)).fetchone() or self.indicators.hash(sha256)
 
+    def file_hash_digest(self) -> str:
+        """Identify hash indicators independently of host and URL feed rows."""
+        digest = hashlib.sha256()
+
+        def add(row: sqlite3.Row) -> None:
+            digest.update(json.dumps((row["sha256"], row["source"], row["name"]),
+                                     ensure_ascii=True, separators=(",", ":")).encode("ascii"))
+            digest.update(b"\n")
+
+        for row in self._exec("SELECT sha256, source, name FROM bad_hashes ORDER BY sha256, source").fetchall():
+            add(row)
+        for row in self._exec("SELECT sha256 FROM allow_hashes ORDER BY sha256").fetchall():
+            digest.update(b"allow:")
+            digest.update(json.dumps(row["sha256"], ensure_ascii=True).encode("ascii"))
+            digest.update(b"\n")
+        conn = self.indicators._current()
+        if conn is None:
+            if self.get_meta("indicators_file"):
+                digest.update(b"snapshot unavailable")
+        else:
+            try:
+                with self.indicators._lock:
+                    for row in conn.execute("SELECT sha256, source, name FROM hashes ORDER BY sha256"):
+                        add(row)
+            except sqlite3.DatabaseError:
+                digest.update(b"snapshot unreadable")
+        return digest.hexdigest()
+
     def host_info(self, host: str) -> sqlite3.Row | None:
         host = host.lower()
         return self._exec("SELECT * FROM bad_hosts WHERE host=?", (host,)).fetchone() or self.indicators.host(host)
@@ -525,6 +573,14 @@ class Database:
 
     def events_after(self, last: int, limit: int) -> list[dict[str, Any]]:
         return [dict(r) for r in self._exec("SELECT * FROM events WHERE id>? ORDER BY id LIMIT ?", (last, limit)).fetchall()]
+
+    def prune_events(self, max_rows: int = EVENT_MAX_ROWS) -> int:
+        """Keep the newest log entries while preserving their paging IDs."""
+        if max_rows < 0:
+            raise ValueError("max_rows")
+        return self._exec_count(
+            "DELETE FROM events WHERE id <= COALESCE("
+            "(SELECT id FROM events ORDER BY id DESC LIMIT 1 OFFSET ?), -1)", (max_rows,))
 
     def take_unnotified(self) -> list[dict[str, Any]]:
         with self._lock:

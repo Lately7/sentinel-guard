@@ -101,6 +101,7 @@ class Observers:
         self._again: OrderedDict[str, _Deferred] = OrderedDict()
         self._refused: OrderedDict[str, _Refused] = OrderedDict()
         self._lookup_failures: OrderedDict[tuple[str, bytes], tuple[Volume, UsnRecord, int]] = OrderedDict()
+        self._journal_lag: dict[str, int] = {}
         self._next_volume = 0
         self._lock = threading.RLock()
         self._owed = False  # something was missed and a reconciliation has to make up for it
@@ -112,11 +113,15 @@ class Observers:
 
     def wanted(self, path: str) -> bool:
         lowered = ntpath.normcase(path)
-        if ntpath.splitext(lowered)[1] not in RISKY_SUFFIXES:
+        if not self._wanted_name(lowered):
             return False
         if self.data_root and lowered.startswith(self.data_root + "\\"):
             return False
         return not winfile.is_protected(path)  # nothing there may be acted on, and updates churn it
+
+    @staticmethod
+    def _wanted_name(name: str) -> bool:
+        return ntpath.splitext(ntpath.normcase(name))[1] in RISKY_SUFFIXES
 
     def _offer(self, path: str, reason: str, *, fresh: bool = False) -> None:
         with self._lock:
@@ -222,10 +227,16 @@ class Observers:
             previous_usn: int | None = None
             for _ in range(batch_budget):
                 batch_budget -= 1
-                batch = read_batch(volume.root, volume, self.store, volume.resolve)
+                batch = read_batch(volume.root, volume, self.store, volume.resolve, self._wanted_name)
                 self.counts["records"] += len(batch.records)
                 self.counts["unresolved"] += batch.unresolved
+                self.counts["skipped_by_name"] += batch.skipped_by_name
                 self.counts["lookup_failed"] += batch.lookup_failed
+                with self._lock:  # report() sums these from another thread
+                    if batch.cursor is not None:
+                        self._journal_lag[volume.root] = max(0, batch.journal_end - batch.cursor.next_usn)
+                    else:
+                        self._journal_lag.pop(volume.root, None)
                 for record in batch.failed_records:
                     key = (volume.root, record.file_ref)
                     if key not in self._lookup_failures:
@@ -302,12 +313,15 @@ class Observers:
     def report(self) -> dict[str, Any]:
         with self._lock:
             out: dict[str, Any] = {"prevention": "none", "lookup_failed": 0, **self.counts,
-                                   "refused_paths": len(self._refused)}
+                                   "refused_paths": len(self._refused),
+                                   "journal_lag_bytes": (sum(self._journal_lag.values())
+                                                         if len(self._journal_lag) == len(self.volumes) else None)}
         if self.processes is not None:
             seen = self.processes.report
             out.update(process_observation=seen.process_observation, failed_polls=seen.failed_polls,
                        inaccessible_images=seen.inaccessible_images, exits_before_resolution=seen.exits_before_resolution,
-                       largest_gap=round(seen.largest_gap, 3), queue_saturation=seen.queue_saturation)
+                       largest_gap=round(seen.largest_gap, 3), slept_seconds=round(seen.slept_seconds, 3),
+                       queue_saturation=seen.queue_saturation)
         return out
 
     # -- threads

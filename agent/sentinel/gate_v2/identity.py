@@ -17,6 +17,7 @@ from typing import BinaryIO, Callable
 from .contract import CancellationToken, ContractError, FileIdentity
 
 CHUNK_SIZE = 1024 * 1024
+RECALL_ATTRIBUTES = 0x400000 | 0x40000 | 0x1000
 
 if os.name == "nt":
     import msvcrt
@@ -112,6 +113,8 @@ def measure(
     if _cancelled(cancel):
         return IdentityResult(None, "CANCELLED")
     try:
+        if os.name == "nt" and getattr(os.stat(path, follow_symlinks=False), "st_file_attributes", 0) & RECALL_ATTRIBUTES:
+            return IdentityResult(None, "CLOUD_PLACEHOLDER")
         with open(path, "rb", buffering=0) as stream:
             return measure_stream(stream, path, max_bytes=max_bytes, cancel=cancel, chunk_size=chunk_size,
                                   between_chunks=between_chunks, ignore_times=ignore_times)
@@ -142,6 +145,8 @@ def measure_stream(
         return IdentityResult(None, "CANCELLED")
     try:
             before = os.fstat(stream.fileno())
+            if getattr(before, "st_file_attributes", 0) & RECALL_ATTRIBUTES:
+                return IdentityResult(None, "CLOUD_PLACEHOLDER")
             before_change = _change_time(stream.fileno(), before)
             if not stat.S_ISREG(before.st_mode):
                 return IdentityResult(None, "NOT_REGULAR")
@@ -204,8 +209,12 @@ def revalidate(
         if _cancelled(cancel):
             return IdentityResult(None, "CANCELLED")
         try:
+            if os.name == "nt" and getattr(os.stat(path, follow_symlinks=False), "st_file_attributes", 0) & RECALL_ATTRIBUTES:
+                return IdentityResult(None, "CLOUD_PLACEHOLDER")
             with open(path, "rb", buffering=0) as stream:
                 info = os.fstat(stream.fileno())
+                if getattr(info, "st_file_attributes", 0) & RECALL_ATTRIBUTES:
+                    return IdentityResult(None, "CLOUD_PLACEHOLDER")
                 if not stat.S_ISREG(info.st_mode):
                     return IdentityResult(None, "NOT_REGULAR")
                 if info.st_size > max_bytes:

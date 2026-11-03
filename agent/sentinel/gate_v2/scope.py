@@ -20,6 +20,8 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 
+from .identity import RECALL_ATTRIBUTES
+
 # Reasons that are facts about the machine, not coverage this scan lost.
 NOT_A_GAP = {"resolved", "duplicate", "excluded_data", "missing_key", "missing"}
 LONG_PATH = 248  # past this the plain Win32 path functions stop working
@@ -209,6 +211,9 @@ class Discovery(Iterator[Target]):
         except (OSError, ValueError):
             drop("identity_error")
             return None
+        if getattr(st, "st_file_attributes", 0) & RECALL_ATTRIBUTES:
+            drop("cloud_placeholder")
+            return None
         if stat.S_ISLNK(st.st_mode) or getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
             drop("reparse_skipped")
             return None
@@ -255,7 +260,9 @@ def walk_folder(root: str, source: str, *, max_depth: int = 64) -> Iterator[Sour
             for item in sorted(scan, key=lambda i: i.name):  # a stable order is what makes a cursor resumable
                 try:
                     info = item.stat(follow_symlinks=False)
-                    if item.is_symlink() or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                    if getattr(info, "st_file_attributes", 0) & RECALL_ATTRIBUTES:
+                        yield SourceEntry(source, item.path, reason="cloud_placeholder")
+                    elif item.is_symlink() or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
                         yield SourceEntry(source, item.path, reason="reparse_skipped")
                     elif item.is_dir(follow_symlinks=False):
                         if depth >= max_depth:
