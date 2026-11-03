@@ -167,9 +167,13 @@ def _left_to_us(v: Verdict, done: dict[str, Any]) -> bool:
                     source = "known_bad" if evidence.source_id == "sentinel-core" else evidence.source_id
                     hash_rules.add(f"hash.{source}")
     service_verdict = done.get("verdict") or {}
+    # The file may have changed between the two scans: an answer about other
+    # bytes says nothing about the ones this process found something in.
+    if accepted and service_verdict.get("sha256") != getattr(v, "sha256", None):
+        return True
     service_rules = {item.get("rule") for item in service_verdict.get("findings", ())
                      if isinstance(item, dict)}
-    if hash_rules and (hash_rules - service_rules or service_verdict.get("sha256") != v.sha256):
+    if hash_rules - service_rules:
         return True
     finders = {r.engine_id for r in decision.engine_results if any(e.evidence_id in accepted for e in r.evidence)} if decision else set()
     return bool(finders - set(done.get("engines", ())))

@@ -199,7 +199,8 @@ class Overview:
                 self._service_status = status
                 self._service_checked = time.monotonic()
                 self._service_pending = False
-            self.app.ui(self.refresh)
+            # The window may have closed meanwhile, and only this checks for that.
+            self.app.ui(self.app.refresh)
 
         threading.Thread(target=read, daemon=True, name="service-overview-status").start()
 

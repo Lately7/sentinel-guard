@@ -191,7 +191,7 @@ def test_overview_status_poll_does_not_wait_on_pipe():
         return {"worker_failure": "INSTALL_INTEGRITY"}
 
     view = object.__new__(overview_ui.Overview)
-    view.app = SimpleNamespace(lease=SimpleNamespace(status=blocked_status), ui=lambda *args: None)
+    view.app = SimpleNamespace(lease=SimpleNamespace(status=blocked_status), ui=lambda *args: None, refresh=lambda: None)
     view._service_status = None
     view._service_checked = float("-inf")
     view._service_pending = False
@@ -204,3 +204,29 @@ def test_overview_status_poll_does_not_wait_on_pipe():
         assert view._service_pending
     finally:
         release.set()
+
+
+def test_a_local_detection_stands_when_the_service_saw_other_bytes():
+    hit = SimpleNamespace(evidence_id="hit", signature_id="yara.x", detail_code="YARA_MATCH", source_id="rules")
+    decision = SimpleNamespace(accepted_evidence_ids=("hit",),
+                               engine_results=(SimpleNamespace(engine_id="yara_x", evidence=(hit,)),))
+    verdict = SimpleNamespace(decision=decision, sha256="a" * 64)
+    done = {"state": "done", "engines": ["core", "yara_x"], "verdict": {"sha256": "b" * 64, "findings": []}}
+    assert bridge._left_to_us(verdict, done)
+    done["verdict"]["sha256"] = "a" * 64
+    assert not bridge._left_to_us(verdict, done)
+
+
+def test_status_arriving_after_the_window_closed_goes_through_the_app_not_the_widgets():
+    queued = []
+    view = object.__new__(overview_ui.Overview)
+    view.app = SimpleNamespace(lease=SimpleNamespace(status=lambda: {}), ui=queued.append, refresh=lambda: None)
+    view._service_lock = threading.Lock()
+    view._service_pending = False
+    view._service_checked = float("-inf")
+    view._service_status = None
+    view._poll_service()
+    deadline = time.monotonic() + 5
+    while not queued and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert queued == [view.app.refresh]

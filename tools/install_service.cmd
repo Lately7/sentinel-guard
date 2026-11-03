@@ -23,12 +23,13 @@ pause
 exit /b
 
 :steps
-echo [uninstall]
-.venv\Scripts\python.exe -m sentinel service uninstall
+rem Snapshot first: if it fails, the running service is left as it was.
 if exist "%SNAPSHOT%" rmdir /s /q "%SNAPSHOT%"
 echo [snapshot]
 .venv\Scripts\python.exe -m sentinel service snapshot --source "%SNAPSHOT%"
 if errorlevel 1 exit /b 1
+echo [uninstall]
+.venv\Scripts\python.exe -m sentinel service uninstall
 echo [install]
 .venv\Scripts\python.exe -m sentinel service install --source "%SNAPSHOT%"
 if errorlevel 1 goto servicelog
