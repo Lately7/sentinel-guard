@@ -4,17 +4,25 @@
 // Set SENTINEL_HOME to a temporary folder (and block the test host there) to
 // keep the agent's real data untouched: Helium passes its environment on to
 // the native host it launches.
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const HELIUM = process.env.LOCALAPPDATA + "\\imput\\Helium\\Application\\chrome.exe";
+const withService = process.argv.includes("--with-service");
+const args = process.argv.slice(2).filter((arg) => arg !== "--with-service");
 // Absolute: the browser resolves --load-extension against its own directory.
-const EXT = resolve(process.argv[2] || "extension");
-const SHOTS = process.argv[3] ? resolve(process.argv[3]) : null;
+const EXT = resolve(args[0] || "extension");
+const SHOTS = args[1] ? resolve(args[1]) : null;
 const EXT_ID = "ljnncmaoolpbiifaidkgekkeimmjlcgn";
 const PORT = 9333;
+const serviceInstalled = process.platform === "win32" &&
+  spawnSync("sc.exe", ["query", "SentinelGuard"], { shell: false, stdio: "ignore" }).status === 0;
+if (serviceInstalled && !withService) {
+  console.error("SentinelGuard service is installed. This e2e uses the registered native host and cannot validate local trust checks here. Pass --with-service to run service-aware checks.");
+  process.exit(2);
+}
 const profile = mkdtempSync(join(tmpdir(), "sg-helium-"));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -50,6 +58,12 @@ function session(wsUrl) {
 }
 
 const results = {};
+results.service_mode = serviceInstalled
+  ? { installed: true, meaningful: ["extension_loaded", "sync", "dynamic_rules", "blocklisted", "heuristic", "normal", "once_opened", "once_session_rules", "once_dropped_after_leaving", "once_reblocked_after_leaving"],
+      conditional: ["always_trusted", "always_opened_blocklisted"],
+      not_meaningful: ["crafted_proceed_rejected", "once_not_trusted"],
+      reason: "Service approval may refuse trust, so absence from the list does not prove these checks." }
+  : { installed: false, meaningful: "all checks" };
 let cdp = null;
 try {
   const version = await json("/json/version");

@@ -6,7 +6,7 @@ import pytest
 
 from sentinel.service.authz import Caller
 from sentinel.service.consent import ConsentError, TITLE, confirm, validate_plan_id
-from sentinel.service.core import ServiceCore
+from sentinel.service.core import PLAN_TTL_SECONDS, ServiceCore
 
 from test_service_ipc import Clock, FakeBackend, HELPER, USER, call
 
@@ -77,7 +77,9 @@ def test_service_claim_expiry_and_changed_target():
     backend.describe_plan = lambda kind, params: "Mục tiêu đã đổi"
     assert call(core, HELPER, "approve_plan", plan_id=pid, version=1)["error"]["code"] == "STALE_PLAN"
     assert backend.executed == []
-    clock.t += 121
+    clock.t += PLAN_TTL_SECONDS - 1
+    assert call(core, HELPER, "approve_plan", plan_id=pid, version=1)["error"]["code"] == "STALE_PLAN"
+    clock.t += 2
     assert call(core, HELPER, "approve_plan", plan_id=pid, version=1)["error"]["code"] == "NOT_FOUND"
 
 
@@ -85,7 +87,7 @@ def test_other_admin_sid_cannot_claim_requester_plan():
     core = ServiceCore(FakeBackend())
     pid = call(core, USER, "request_plan", kind="disable_protection", params={})["result"]["plan_id"]
     another_admin = Caller("S-1-5-21-other", USER.session_id, "high", True)
-    assert call(core, another_admin, "get_plan", plan_id=pid)["error"]["code"] == "NOT_FOUND"
+    assert call(core, another_admin, "get_plan", plan_id=pid)["error"]["code"] == "REQUESTER_MISMATCH"
 
 
 def test_claim_is_bound_to_elevated_pipe_connection():
@@ -97,3 +99,13 @@ def test_claim_is_bound_to_elevated_pipe_connection():
     assert core.handle(HELPER, frame("get_plan"), connection_id="second")["error"]["code"] == "PLAN_CLAIMED"
     assert core.handle(HELPER, frame("approve_plan"), connection_id="second")["error"]["code"] == "PLAN_CLAIMED"
     assert core.handle(HELPER, frame("approve_plan"), connection_id="first")["ok"]
+
+
+def test_unclaimed_plan_cannot_be_approved():
+    backend = FakeBackend()
+    core = ServiceCore(backend)
+    pid = call(core, USER, "request_plan", kind="disable_protection", params={})["result"]["plan_id"]
+    assert call(core, HELPER, "approve_plan", plan_id=pid, version=1)["error"]["code"] == "PLAN_CLAIMED"
+    assert backend.executed == []
+    assert call(core, HELPER, "get_plan", plan_id=pid)["ok"]
+    assert call(core, HELPER, "approve_plan", plan_id=pid, version=1)["ok"]

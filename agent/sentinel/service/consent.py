@@ -9,7 +9,7 @@ import re
 from ctypes import wintypes
 from pathlib import Path
 
-from .client import ServiceClient
+from .client import ServiceClient, ServiceError, ServiceUnavailable
 from .installer import registered_version
 from .paths import active_version, installed_paths
 
@@ -18,6 +18,9 @@ PLAN_ID = re.compile(r"[0-9a-f]{32}\Z")
 ERROR_CANCELLED = 1223
 WAIT_OBJECT_0 = 0
 WAIT_TIMEOUT = 0x102
+HELPER_EXITS = {"DECLINED": 1, "EXPIRED": 2, "REQUESTER_MISMATCH": 3,
+                "SERVICE_UNAVAILABLE": 4, "HELPER_FAILED": 5}
+EXIT_REASONS = {value: key for key, value in HELPER_EXITS.items()}
 
 
 class ConsentError(Exception):
@@ -84,7 +87,7 @@ def protected_helper() -> tuple[Path, Path]:
     return exe, version
 
 
-def launch_consent(plan_id: str, *, timeout_ms: int = 150_000) -> bool:
+def launch_consent(plan_id: str, *, timeout_ms: int = 300_000) -> bool:
     plan_id = validate_plan_id(plan_id)
     if os.name != "nt":
         raise ConsentError("WINDOWS_REQUIRED")
@@ -120,17 +123,32 @@ def launch_consent(plan_id: str, *, timeout_ms: int = 150_000) -> bool:
         exit_code = wintypes.DWORD()
         if not k32.GetExitCodeProcess(info.hProcess, ctypes.byref(exit_code)):
             raise OSError(ctypes.get_last_error(), "GetExitCodeProcess")
-        return exit_code.value == 0
+        if exit_code.value:
+            raise ConsentError(EXIT_REASONS.get(exit_code.value, "HELPER_FAILED"))
+        return True
     finally:
         if info.hProcess:
             k32.CloseHandle(info.hProcess)
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--plan-id", required=True)
-    args = parser.parse_args()
-    return 0 if confirm(args.plan_id) else 1
+    # The exit code is the whole report. A log in the state tree would be owned by
+    # whoever approved, and the service refuses to start on a file it cannot vouch for.
+    try:
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--plan-id", required=True)
+        args = parser.parse_args()
+        return 0 if confirm(args.plan_id) else HELPER_EXITS["DECLINED"]
+    except ServiceUnavailable:
+        return HELPER_EXITS["SERVICE_UNAVAILABLE"]
+    except ServiceError as exc:
+        if exc.code == "REQUESTER_MISMATCH":
+            return HELPER_EXITS["REQUESTER_MISMATCH"]
+        if exc.code in ("NOT_FOUND", "STALE_PLAN"):
+            return HELPER_EXITS["EXPIRED"]
+        return HELPER_EXITS["HELPER_FAILED"]
+    except BaseException:
+        return HELPER_EXITS["HELPER_FAILED"]
 
 
 if __name__ == "__main__":
