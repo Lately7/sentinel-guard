@@ -116,7 +116,7 @@ def _own_scan(client: ServiceClient) -> tuple[bool, str]:
         else:
             return False, "the scan did not finish"
         if info["state"] != "done" or "core" not in info.get("engines", ()):
-            return False, f"{info['state']} {info.get('code', '')}"
+            return False, f"{info['state']} {info.get('code', '')}, worker: {client.request('status').get('worker_failure')}"
         return info["verdict"]["label"] == "clean", f"worker answered: {info['verdict']['label']}"
     finally:
         os.unlink(stream.name)

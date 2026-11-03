@@ -80,6 +80,34 @@ def test_a_rule_set_past_the_client_frame_limit_still_reaches_the_worker(tmp_pat
         s.close()
 
 
+def test_a_worker_that_cannot_be_launched_says_why(monkeypatch, caplog):
+    def refused(*args, **kwargs):
+        raise workerclient.worker_mod.WorkerError(1314, "CreateProcessAsUser failed (Windows error 1314)")
+
+    monkeypatch.setattr(workerclient.worker_mod, "launch", refused)
+    s = WorkerSession()
+    with pytest.raises(WorkerFailure) as caught:
+        s.call("scan", {}, deadline_ns=time.monotonic_ns() + 5_000_000_000)
+    assert caught.value.code == "WORKER_UNAVAILABLE"
+    assert "Windows error 1314" in s.last_failure and "Windows error 1314" in caplog.text
+
+
+def test_a_worker_that_dies_at_start_leaves_its_exit_code_until_one_starts(monkeypatch):
+    real = workerclient.worker_mod.bootstrap
+    monkeypatch.setattr(workerclient.worker_mod, "bootstrap", lambda module: ["-c", "import sys; sys.exit(3)"])
+    s = WorkerSession()
+    try:
+        with pytest.raises(WorkerFailure):
+            s.call("scan", {}, deadline_ns=time.monotonic_ns() + 30_000_000_000)
+        assert s.last_failure == "exit 0x3"
+        monkeypatch.setattr(workerclient.worker_mod, "bootstrap", real)
+        with pytest.raises(WorkerFailure):
+            s.call("no_such_op", {}, deadline_ns=time.monotonic_ns() + 30_000_000_000)
+        assert s.last_failure == "" and s.starts == 2
+    finally:
+        s.close()
+
+
 def test_marker_inside_a_zip_is_found_by_the_worker(session, tmp_path):
     p = tmp_path / "bundle.zip"
     with zipfile.ZipFile(p, "w") as z:

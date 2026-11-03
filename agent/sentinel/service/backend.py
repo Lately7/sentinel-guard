@@ -295,7 +295,8 @@ class ProductBackend:
                 "allow_version": self.db.allow_version(),
                 # Said out loud: seeing a file after it appeared is not stopping it.
                 "observation": self.observers.report() if self.observers is not None else {"prevention": "none"},
-                "stalled": self._asked_lane.stalled + self._observed_lane.stalled}
+                "stalled": self._asked_lane.stalled + self._observed_lane.stalled,
+                "worker_failure": self.scanner.isolation.failure() if self.scanner.isolation is not None else ""}
 
     def check_url(self, url: str) -> dict[str, Any]:
         return urlintel.check(self.db, url)

@@ -1065,6 +1065,13 @@ def test_a_new_folder_is_held_from_its_creation_with_no_second_lookup(tmp_path, 
     assert (tmp_path / "a" / "b").is_dir()
 
 
+def test_status_says_why_the_worker_is_down(backend, monkeypatch):
+    monkeypatch.setattr(backend.scanner, "isolation", SimpleNamespace(failure=lambda: "exit 0x1"))
+    assert backend.status()["worker_failure"] == "exit 0x1"
+    monkeypatch.setattr(backend.scanner, "isolation", None)
+    assert backend.status()["worker_failure"] == ""
+
+
 def test_nothing_observed_is_given_up_on_before_a_scan_could_have_finished(backend):
     lane = backend._observed_lane
     assert lane.limit < config.SCAN_DEADLINE_SECONDS < lane.give_up

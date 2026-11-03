@@ -101,6 +101,16 @@ def test_the_pipe_gets_a_moment_after_running_then_the_failure_is_real(monkeypat
         verify._hello(Late(1))
 
 
+def test_a_failed_worker_scan_prints_why_the_worker_is_down():
+    class Service:
+        def request(self, op, **kwargs):
+            return {"scan_request": {"job_id": "j"}, "status": {"worker_failure": "exit 0xc0000142"},
+                    "job_status": {"state": "done", "engines": ["motw"], "verdict": {"label": "unknown"}}}[op]
+
+    passed, detail = verify._own_scan(Service())
+    assert passed is False and "exit 0xc0000142" in detail
+
+
 class Status:
     def __init__(self, *observations):
         self.observations = list(observations)

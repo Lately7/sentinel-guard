@@ -76,6 +76,32 @@ def test_the_private_desktop_is_made_once_on_a_station_windows_named():
     assert all(worker._desktop_handles)
 
 
+@pytest.mark.parametrize(("sid", "attempts"), [
+    # Unnamed, SYSTEM would get the station every LocalSystem service shares.
+    ("S-1-5-18", ["SentinelGuardWorker"]),
+    ("S-1-5-21-1-2-3-1001", ["SentinelGuardWorker", None]),
+])
+def test_the_service_never_falls_back_to_the_shared_station(monkeypatch, sid, attempts):
+    import ctypes
+    from types import SimpleNamespace
+
+    from sentinel.service import winpipe, worker
+
+    asked = []
+
+    def refused(name, flags, access, attrs):
+        asked.append(name)
+        ctypes.set_last_error(5)
+        return 0
+
+    monkeypatch.setattr(worker, "_desktop", None)
+    monkeypatch.setattr(worker._u32, "CreateWindowStationW", refused)
+    monkeypatch.setattr(winpipe, "current_process_caller", lambda: SimpleNamespace(sid=sid))
+    with pytest.raises(worker.WorkerError):
+        worker._private_desktop()
+    assert asked == attempts
+
+
 def test_a_service_worker_starts_detached_on_the_private_desktop(monkeypatch):
     from sentinel.service import worker
 

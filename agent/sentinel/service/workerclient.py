@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import logging
 import ntpath
 import os
 import queue
@@ -31,8 +32,11 @@ from . import worker as worker_mod
 from .paths import active_version, installed_paths
 from .protocol import MAX_FRAME, MAX_RULES_FRAME, ProtocolError, read_frame, write_frame
 
+log = logging.getLogger(__name__)
+
 POLL_SECONDS = 0.05
 START_SECONDS = 30.0
+EXIT_WAIT_SECONDS = 1.0
 
 if os.name == "nt":
     _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -65,6 +69,9 @@ class WorkerSession:
         self._next_id = 0
         self.starts = 0
         self.engines: list[str] = []
+        # A Windows code, never file content, so `status` may show it. service.log is
+        # for administrators, and a scan only sees a typed failure.
+        self.last_failure = ""
 
     # -- lifecycle
 
@@ -106,6 +113,12 @@ class WorkerSession:
             self._proc.kill()
             self._proc = None
 
+    def _died(self) -> WorkerFailure:
+        code = self._proc.wait(EXIT_WAIT_SECONDS) if self._proc is not None else None
+        self.last_failure = "still running" if code is None else f"exit {code:#x}"
+        self._kill()
+        return WorkerFailure(StageStatus.ERROR, "WORKER_DIED")
+
     def close(self) -> None:
         with self._lock:
             self._kill()
@@ -120,8 +133,7 @@ class WorkerSession:
         try:
             write_frame(self._proc.stdin, {"id": rid, "op": op, "args": args}, limit=limit)
         except (OSError, ProtocolError) as e:
-            self._kill()
-            raise WorkerFailure(StageStatus.ERROR, "WORKER_DIED") from e
+            raise self._died() from e
         while True:
             if cancel is not None and cancel.cancelled():
                 self._kill()  # the job kills the worker mid-parse
@@ -135,8 +147,7 @@ class WorkerSession:
             except queue.Empty:
                 continue
             if frame is None:
-                self._kill()
-                raise WorkerFailure(StageStatus.ERROR, "WORKER_DIED")
+                raise self._died()
             if frame.get("id") != rid:
                 self._kill()  # out of step: never pair a reply with the wrong file
                 raise WorkerFailure(StageStatus.ERROR, "WORKER_REPLY_MISMATCH")
@@ -173,7 +184,11 @@ class WorkerSession:
                     self._start(deadline_ns)
                 except (OSError, WorkerFailure) as e:
                     self._kill()
+                    if isinstance(e, OSError):
+                        self.last_failure = str(e)
+                    log.warning("worker did not start: %s (%s)", self.last_failure, getattr(e, "code", ""))
                     raise WorkerFailure(StageStatus.UNAVAILABLE, "WORKER_UNAVAILABLE") from e
+                self.last_failure = ""
             if handle_from is not None:
                 try:
                     args = {**args, "handle": self._duplicate(handle_from)}
@@ -214,6 +229,9 @@ class Isolation:
         if self.session is not None:
             self.session.close()
             self.session = None
+
+    def failure(self) -> str:
+        return self.session.last_failure if self.session is not None else ""
 
 
 def _failed(engine_id: str, request: ScanRequest, identity: FileIdentity,

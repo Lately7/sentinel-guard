@@ -27,6 +27,9 @@ from typing import Sequence
 # DLLs and reach the object namespace, which these three can. None of them is on the
 # state tree or a user's profile, and low integrity stops every write.
 RESTRICTING_SIDS = ("S-1-5-32-545", "S-1-1-0", "S-1-5-12")
+WORKER_STATION = "SentinelGuardWorker"
+LOCAL_SYSTEM = "S-1-5-18"
+ERROR_ACCESS_DENIED = 5
 _desktop: str | None = None
 _desktop_handles: tuple[int, int] = (0, 0)  # kept open: the objects live as long as a handle does
 _desktop_lock = threading.Lock()
@@ -219,9 +222,12 @@ def _private_desktop() -> str:
             raise _fail("ConvertStringSecurityDescriptorToSecurityDescriptor")
         try:
             attrs = SECURITY_ATTRIBUTES(ctypes.sizeof(SECURITY_ATTRIBUTES), sd, False)
-            # Unnamed: Windows names it after the logon session. A chosen name is
-            # refused below SYSTEM (measured: error 5), and nothing needs one.
-            station = _u32.CreateWindowStationW(None, 0, GENERIC_ALL, ctypes.byref(attrs))
+            # By name: unnamed, SYSTEM gets Service-0x0-3e7$, the station every LocalSystem
+            # service shares, and this descriptor is ignored. Below SYSTEM a name is refused
+            # (measured: error 5), while unnamed there does make a new station.
+            station = _u32.CreateWindowStationW(WORKER_STATION, 0, GENERIC_ALL, ctypes.byref(attrs))
+            if not station and ctypes.get_last_error() == ERROR_ACCESS_DENIED and owner != LOCAL_SYSTEM:
+                station = _u32.CreateWindowStationW(None, 0, GENERIC_ALL, ctypes.byref(attrs))
             if not station:
                 raise _fail("CreateWindowStation")
             previous = _u32.GetProcessWindowStation()

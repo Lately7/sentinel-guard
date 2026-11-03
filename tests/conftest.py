@@ -14,6 +14,24 @@ MARKER = b"SENTINEL-GUARD-TEST-MARKER-7f3a9c"
 
 
 @pytest.fixture(autouse=True)
+def no_installed_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A machine may have the real service. It must not answer a test, and no test
+    # should hand it a path: an action lease left by one test decided the next.
+    from sentinel import protection
+    from sentinel.service import winpipe
+
+    real = winpipe.connect
+
+    def connect(name: str = winpipe.PIPE_NAME) -> winpipe.PipeStream:
+        if name == winpipe.PIPE_NAME:
+            raise winpipe.PipeError(2, "tests do not reach an installed service")
+        return real(name)
+
+    monkeypatch.setattr(protection, "delegate", None)
+    monkeypatch.setattr(winpipe, "connect", connect)
+
+
+@pytest.fixture(autouse=True)
 def sentinel_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "home"
     home.mkdir()

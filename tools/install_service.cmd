@@ -14,6 +14,7 @@ set "PYTHONUTF8=1"
 cd /d "%~dp0.."
 set "SNAPSHOT=%TEMP%\sentinel-snapshot"
 set "LOG=%TEMP%\sentinel-install.log"
+echo Dang cai dich vu, khoang 1 phut. Dung bam vao cua so nay.
 call :steps > "%LOG%" 2>&1
 type "%LOG%"
 echo.
@@ -30,7 +31,11 @@ echo [snapshot]
 if errorlevel 1 exit /b 1
 echo [install]
 .venv\Scripts\python.exe -m sentinel service install --source "%SNAPSHOT%"
-if errorlevel 1 exit /b 1
+if errorlevel 1 goto servicelog
 echo [verify]
 .venv\Scripts\python.exe -m sentinel service verify --restart
+:servicelog
+rem Only an administrator can read this, so it is copied while one is here.
+echo [service log]
+powershell -NoProfile -Command "Get-Content -LiteralPath (Join-Path $env:ProgramData 'SentinelGuard\journal\service.log') -Tail 40"
 exit /b
