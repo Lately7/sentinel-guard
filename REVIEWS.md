@@ -723,3 +723,39 @@ could therefore fail even with Start events working.
 
 Tests: pytest 1050 passed, 10 skipped, 1 xfailed; extension tests not affected (no extension file changed).
 Live ETW is still unverified; the next install shows whether the child's Start parses on the real session.
+
+### Tenth round: the fourth install and the ETW investigation
+
+On 2026-11-03 at about 10:26, the owner opened `tools\install_service.cmd` themself for the fourth install.
+It included `8b6f043`: the SID reader skips the TOKEN_USER header, and the check passes on its child's Start
+alone. Before the restart the install reported 0 FAIL, 13 PASS, 3 SKIP; after it, 0 FAIL, 14 PASS, 3 SKIP.
+`worker_scan` PASS. The window again appeared hung after the steps finished at 10:27:16 because a click
+put it into selection mode (title "Select Administrator"); Esc resumed it.
+
+ETW stayed off with `no_start_events`. During the check, Process/3 (DCStart) numbered 11. EventTrace
+`68fdd900-…` appeared twice with opcode 5, once with opcode 8 and twice with opcode 32. No Process/1
+arrived in the 5 s after the child was spawned. Status reported loss during the check of 3 and total
+loss of 1,378.
+
+Claude ran an eight-agent investigation as a workflow: four investigators covered Microsoft documentation,
+the source of krabsetw, ferrisetw, pywintrace, TraceEvent, one-collect, fibratus and Elastic Beats, a code
+audit of `etw.py`, and the five sessions; one agent synthesized the findings and three challenged the plan.
+The ctypes layouts, handles and callback match the SDK; the call order matches the libraries; FlushTimer
+1 s is standard. `ProcessTrace`'s return code is discarded. The loss figure rose by about 1,375 around the
+stop. The investigation first read that as events reaching the Python callback only when the session stopped,
+held in the session rather than lost in Python. A challenger showed the rise can also come from ETW's own
+counters, which the aggregator keeps copying while it drains, and from events generated at stop (DCEnd and the
+system-configuration rundown), so it is not settled. Candidate causes for the missing Start: unflushed
+per-CPU buffers, `ProcessTrace` waiting on quiet per-CPU streams, a rundown written before the consumer
+connected, a GIL stall at service start, or the child created before asynchronous enable took effect. The loss figure adds unlike units: truncated events were delivered, a
+failed QUERY adds 1 to `events_lost`, and `RealTimeBuffersLost` counts 64 KB buffers. EventTrace
+`68fdd900-…` events can be synthetic on consumer connection; opcode 8 does not prove rundown completed.
+
+All three challengers rejected the first plan: reading tallies while the ETW thread adds keys could raise
+and turn a passing check into a failure; the plan did not prove consumer connection; it stopped measuring
+at the first match; a FLUSH response alone cannot distinguish unflushed buffers from `ProcessTrace` waiting
+on quiet streams; `CloseTrace` immediately after STOP cuts off the last events; and the QUERY/FLUSH buffer
+was smaller than the `ControlTrace` documentation asks. Next are Codex SVC18, a phased check in `etw.py`
+with the consumer connected before provider enable, child A, child B, explicit FLUSH, per-phase counts in
+the callback, `ProcessTrace`'s return code and separate loss counters, and SVC18V, where `verify` waits for
+the check. Claude reviews both rounds, then the owner reinstalls.

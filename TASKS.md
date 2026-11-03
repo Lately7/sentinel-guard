@@ -74,5 +74,8 @@ document/image extension.
 | DOCS2 | records of SVC11–SVC16 and the owner ETW decision | merged `50ee284` |
 | SVC17 | ETW for process events only, after the first real session | merged `f9838f1`; corrected in review; real session unverified |
 | (Claude) | TOKEN_USER header found in real bytes; check on the child start | `8b6f043`; REVIEWS.md ninth round |
+| SVC18 | phased ETW check in `etw.py` | in progress; REVIEWS.md tenth round |
+| SVC18V | `verify` waits for the ETW check | in progress; REVIEWS.md tenth round |
+| DOCS3 | fourth install and ETW investigation record | submitted for Claude review |
 
 Outcomes are recorded in `REVIEWS.md`.

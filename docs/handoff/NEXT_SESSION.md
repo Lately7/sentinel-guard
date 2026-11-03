@@ -68,6 +68,24 @@ this through two reviews: test new ETW layouts against captured bytes. The next 
 owner reinstalling. Latest tests: pytest 1050 passed, 10 skipped, 1 xfailed. See `REVIEWS.md`
 ninth round.
 
+**Update 2026-11-03, after the fourth install.** At about 10:26 the owner opened
+`tools\install_service.cmd` themself with `8b6f043`: 0 FAIL, 13 PASS, 3 SKIP before the restart;
+0 FAIL, 14 PASS, 3 SKIP after it; `worker_scan` PASS. ETW stayed off with `no_start_events`:
+the check saw 11 Process/3 (DCStart), EventTrace `68fdd900-…` opcodes 5 twice, 8 once and 32 twice,
+and no Process/1 in the 5 s after the child was spawned. Loss was 3 during the check, 1,378 total.
+The install window appeared hung after the steps finished at 10:27:16 because a click put it in
+selection mode ("Select Administrator"); Esc resumed it. In Claude's eight-agent investigation the
+loss figure's rise of about 1,375 around the stop was first read as events held in the session until
+stop; a challenger showed it may instead be ETW counters copied during the drain or events generated
+at stop, so that is open, and so is the missing Start. The ctypes layouts, handles, callback and call order match the
+SDK and libraries, FlushTimer 1 s is standard, and `ProcessTrace`'s return code is discarded. The loss
+figure mixes unlike units; EventTrace opcode 8 is not proof that rundown completed. Three challengers
+rejected the first plan for unsafe tally reads, no consumer-connection proof, stopping at first match,
+an inconclusive FLUSH response, `CloseTrace` immediately after STOP, and an undersized QUERY/FLUSH buffer.
+Next are Codex SVC18 (phased `etw.py` check: consumer connected before provider enable, child A and B,
+explicit FLUSH, callback phase counts, `ProcessTrace` return code, separate loss counters) and SVC18V
+(`verify` waits for the check). Claude reviews both, then the owner reinstalls. See `REVIEWS.md` tenth round.
+
 ## 1. Where things are
 
 * Repo: `C:\Users\lately07\Desktop\Folder Group\sentinel-guard`, branch
