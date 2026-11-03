@@ -51,6 +51,7 @@ class ObservationReport:
     inaccessible_images: int = 0
     exits_before_resolution: int = 0
     largest_gap: float = 0.0
+    slept_seconds: float = 0.0
     queue_saturation: int = 0
     late_polls: int = 0
     gaps: Counter[str] = field(default_factory=Counter)
@@ -63,16 +64,23 @@ Resolver = Callable[[ProcessKey], tuple[str, tuple[int, int]]]
 class ProcessWatcher:
     def __init__(self, snapshot: Snapshot, resolve: Resolver, *, interval: float = 0.5,
                  capacity: int = 1024, max_snapshot: int = 65536,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic,
+                 wall_clock: Callable[[], float] | None = None,
+                 awake_clock: Callable[[], float] | None = None) -> None:
         if interval <= 0 or capacity <= 0 or max_snapshot <= 0:
             raise ValueError("bounds")
         self.snapshot, self.resolve = snapshot, resolve
         self.interval, self.capacity, self.max_snapshot, self.clock = interval, capacity, max_snapshot, clock
+        self.wall_clock = wall_clock or (_elapsed_seconds if clock is time.monotonic else clock)
+        self.awake_clock = awake_clock or (_unbiased_seconds if clock is time.monotonic else clock)
         self.queue: deque[ProcessTarget] = deque()
         self.report = ObservationReport()
         self._seen: set[ProcessKey] = set()
         self._denied: set[int] = set()
-        self._last_success: float | None = None
+        self._last_wall: float | None = None
+        self._last_awake: float | None = None
+        self._first_wall: float | None = None
+        self._first_awake: float | None = None
 
     def _note(self, reason: str) -> None:
         self.report.gaps[reason] += 1
@@ -137,16 +145,25 @@ class ProcessWatcher:
         self._seen = (self._seen & observed) | handled
         end = self.clock()
         self.report.poll_duration = end - start
-        if self._last_success is not None:
-            gap = end - self._last_success
+        wall = self.wall_clock()
+        awake = self.awake_clock()
+        if self._last_wall is not None and self._last_awake is not None:
+            gap = max(0.0, awake - self._last_awake)
+            # Unbiased interrupt time excludes sleep, so largest_gap measures awake stalls.
             self.report.largest_gap = max(self.report.largest_gap, gap)
+            assert self._first_wall is not None and self._first_awake is not None
+            self.report.slept_seconds = max(self.report.slept_seconds,
+                                            (wall - self._first_wall) - (awake - self._first_awake))
             if gap > self.interval * 2:
                 self.report.late_polls += 1
                 self._note("late_poll")
         if self.report.poll_duration > self.interval:
             self.report.late_polls += 1
             self._note("slow_poll")
-        self._last_success = end
+        if self._first_wall is None:
+            self._first_wall, self._first_awake = wall, awake
+        self._last_wall = wall
+        self._last_awake = awake
         return tuple(found)
 
     def pop(self) -> ProcessTarget | None:
@@ -163,6 +180,10 @@ class PROCESSENTRY32W(ctypes.Structure):
 
 if os.name == "nt":
     _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _k32.GetTickCount64.argtypes = []
+    _k32.GetTickCount64.restype = ctypes.c_ulonglong
+    _k32.QueryUnbiasedInterruptTime.argtypes = [ctypes.POINTER(ctypes.c_ulonglong)]
+    _k32.QueryUnbiasedInterruptTime.restype = wintypes.BOOL
     _k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
     _k32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
     _k32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
@@ -173,6 +194,21 @@ if os.name == "nt":
     _k32.GetProcessTimes.argtypes = [wintypes.HANDLE, *([ctypes.POINTER(wintypes.FILETIME)] * 4)]
     _k32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
                                                 ctypes.POINTER(wintypes.DWORD)]
+
+
+def _elapsed_seconds() -> float:
+    if os.name != "nt":
+        return time.monotonic()
+    return _k32.GetTickCount64() / 1000
+
+
+def _unbiased_seconds() -> float:
+    if os.name != "nt":
+        return time.monotonic()
+    ticks = ctypes.c_ulonglong()
+    if not _k32.QueryUnbiasedInterruptTime(ctypes.byref(ticks)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return ticks.value / 10_000_000
 
 
 def _creation_time(process: int) -> int | None:
