@@ -407,6 +407,30 @@ class Collector:
                 thread.join(timeout=max(0.0, deadline - time.monotonic()))
 
 
+FORWARDED = frozenset(("name", "read", "write", "process_start", "process_stop"))
+
+
+def device_map() -> dict[str, str]:
+    """\\Device\\HarddiskVolume3 -> C:, since file events name files by device."""
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.QueryDosDeviceW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+    k32.QueryDosDeviceW.restype = wintypes.DWORD
+    found: dict[str, str] = {}
+    buffer = ctypes.create_unicode_buffer(1024)
+    for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+        if k32.QueryDosDeviceW(f"{letter}:", buffer, len(buffer)):
+            found[buffer.value.lower()] = f"{letter}:"
+    return found
+
+
+def on_drive(path: str, devices: dict[str, str]) -> str:
+    """The drive-letter form of a device path, or the path unchanged."""
+    head, slash, rest = path[1:].partition("\\")
+    device, slash2, tail = rest.partition("\\")
+    drive = devices.get(f"\\{head}\\{device}".lower()) if path.startswith("\\") else None
+    return f"{drive}\\{tail}" if drive else path
+
+
 class EtwObserver:
     """Optional scan hints, gated by a bounded live layout check."""
 
@@ -555,9 +579,11 @@ class EtwObserver:
                 return
             except OSError:
                 return
-            if ntpath.basename(path).casefold() == event.image_name.casefold():
+            # startswith: the event's short name may be cut to 15 characters.
+            if ntpath.basename(path).casefold().startswith(event.image_name.casefold()):
                 self.on_process(path)
-        elif event.kind in ("name", "read", "write") and self.on_file_event is not None:
+        # Process events too: scoring needs to know when a pid starts and ends.
+        if self.on_file_event is not None and event.kind in FORWARDED:
             self.on_file_event(event)
 
     def status(self) -> dict[str, object]:

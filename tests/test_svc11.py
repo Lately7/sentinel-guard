@@ -1,9 +1,12 @@
 """Regression tests for optional ETW observation; all events are synthetic."""
 
+import os
 import struct
 import sys
 import threading
 import uuid
+
+import pytest
 
 from sentinel.service import backend, etw, procwatch, verify
 
@@ -115,7 +118,7 @@ def test_verified_process_event_only_offers_image_and_file_callback():
     observer._parsed(etw.ParsedEvent("process_start", 12, 0, image_name="safe.exe"))
     observer._parsed(etw.ParsedEvent("write", 12, 0, file_object=1))
     assert offers == ["C:\\safe.exe"]
-    assert [item.kind for item in files] == ["write"]
+    assert [item.kind for item in files] == ["process_start", "write"]
     assert observer.status()["etw"] == "on"
     observer.stop()
 
@@ -468,3 +471,51 @@ def test_file_rate_guard_disables_io_retries_and_reports_cost(monkeypatch):
     now[0] = 1805.0
     collector._file_rate_guard()
     assert collector._retry_delay == etw.FILE_RETRY_MAX
+
+
+def test_a_device_path_becomes_the_drive_path_the_rest_of_the_product_uses():
+    from sentinel.service import etw
+
+    devices = {"\\device\\harddiskvolume3": "C:"}
+    assert etw.on_drive("\\Device\\HarddiskVolume3\\Users\\u\\a.docx", devices) == "C:\\Users\\u\\a.docx"
+    assert etw.on_drive("\\Device\\HarddiskVolume9\\x.bin", devices) == "\\Device\\HarddiskVolume9\\x.bin"
+    assert etw.on_drive("C:\\Users\\u\\a.docx", devices) == "C:\\Users\\u\\a.docx"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the real device names")
+def test_this_machine_has_a_device_for_its_system_drive():
+    from sentinel.service import etw
+
+    devices = etw.device_map()
+    system = os.environ.get("SystemDrive", "C:")
+    assert system in devices.values()
+    device = next(name for name, drive in devices.items() if drive == system)
+    assert etw.on_drive(device + "\\Windows", devices) == system + "\\Windows"
+
+
+def test_scoring_hears_about_processes_as_well_as_files():
+    from sentinel.service import etw
+
+    heard = []
+    observer = etw.EtwObserver(lambda path: None, on_file_event=heard.append)
+    observer.state = "on"
+    observer._resolve_process = lambda pid: "C:\\Program Files\\A\\averyveryverylongname.exe"
+    start = etw.ParsedEvent("process_start", 42, 1, image_name="averyveryverylo")
+    stop = etw.ParsedEvent("process_stop", 42, 1)
+    observer._parsed(start)
+    observer._parsed(stop)
+    assert heard == [start, stop]
+
+
+def test_a_short_name_cut_by_the_kernel_still_offers_the_process():
+    from sentinel.service import etw
+
+    offered = []
+    observer = etw.EtwObserver(offered.append)
+    observer.state = "on"
+    observer._resolve_process = lambda pid: "C:\\Program Files\\A\\averyveryverylongname.exe"
+    observer._parsed(etw.ParsedEvent("process_start", 42, 1, image_name="averyveryverylo"))
+    assert offered == ["C:\\Program Files\\A\\averyveryverylongname.exe"]
+    observer._resolve_process = lambda pid: "C:\\Program Files\\A\\other.exe"
+    observer._parsed(etw.ParsedEvent("process_start", 43, 1, image_name="averyveryverylo"))
+    assert len(offered) == 1, "a reused pid running something else is not this process"

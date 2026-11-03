@@ -687,8 +687,24 @@ def _host(host: str) -> str | None:
     return ascii_host if HOST.fullmatch(ascii_host) else None
 
 
+def _document_roots() -> tuple[str, ...]:
+    """Where a user's documents are, on the system drive, for every profile there."""
+    users = Path(os.environ.get("SystemDrive", "C:") + "\\") / "Users"
+    roots = []
+    try:
+        with os.scandir(users) as profiles:
+            for profile in profiles:
+                if profile.is_dir(follow_symlinks=False) and profile.name.lower() not in ("public", "default", "default user", "all users"):
+                    roots.extend(str(Path(profile.path) / name) for name in ("Documents", "Desktop", "Pictures", "Downloads"))
+    except OSError:
+        pass
+    return tuple(roots)
+
+
 def _machine_observers(backend: ProductBackend) -> Observers:
     from . import etw
+    from .reconcile import Reconciler
+    from .shadow import ShadowObserver
     import threading
 
     class MachineObservers(Observers):
@@ -706,6 +722,9 @@ def _machine_observers(backend: ProductBackend) -> Observers:
                 self._etw_thread.join(timeout=0.2)
             super().stop()
 
+        def report(self) -> dict[str, Any]:
+            return {**super().report(), "reconcile": walker.report(), "shadow": shadow.report()}
+
     volumes = []
     for root in scope.fixed_drives():
         try:
@@ -713,22 +732,25 @@ def _machine_observers(backend: ProductBackend) -> Observers:
         except OSError:
             log.warning("no journal for %s", root)
 
-    def reconcile() -> bool:
-        # Autostart and what is running now; the folders of each user are the tray's.
-        for target in scope.discover("smart", scope.windows_sources("smart", []), data_root=str(config.data_dir())):
-            if not backend.observe(target.path, "reconcile"):
-                return False  # still owed
-        return True
-
+    walker = Reconciler(backend.observe, lambda: backend.db.get_meta("reconcile:cursor", ""),
+                        lambda value: backend.db.set_meta("reconcile:cursor", value),
+                        data_root=str(config.data_dir()))
     observer = MachineObservers(backend.observe, volumes, DbCursorStore(backend.db),
                                 processes=ProcessWatcher(windows_snapshot, windows_resolve), rescans=backend.rescans,
-                                reconcile=reconcile, data_root=str(config.data_dir()))
+                                reconcile=walker, data_root=str(config.data_dir()))
+    # Observation only: shadow.py cannot reach anything that acts.
+    shadow = ShadowObserver(_document_roots(), state_root=config.data_dir(),
+                            image_name=lambda pid, created: etw.EtwObserver._resolve_process(pid))
+    devices = etw.device_map()
+
+    def score(event: etw.ParsedEvent) -> None:
+        shadow.feed(dataclasses.replace(event, path=etw.on_drive(event.path, devices)) if event.path else event)
 
     def offer_process(path: str) -> None:
         if observer.wanted(path):
             observer._offer(path, "process")
 
-    observer.etw = etw.EtwObserver(offer_process,
+    observer.etw = etw.EtwObserver(offer_process, on_file_event=score,
                                   read_guid=lambda: backend.db.get_meta("etw:session_guid", ""),
                                   write_guid=lambda value: backend.db.set_meta("etw:session_guid", value))
     return observer
