@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ctypes
+import contextlib
+import json
 import logging
 import ntpath
 import os
@@ -42,6 +44,9 @@ IO_PROVIDER = uuid.UUID("3d5c43e3-0f1c-4202-b817-174c0070dc79")
 PROCESS_PROVIDER = uuid.UUID("151f55dc-467d-471f-83b5-5f889d46ff66")
 FILE_IO_CLASS = uuid.UUID("90cbdc39-4a3e-11d1-84f4-0000f80464e3")
 PROCESS_CLASS = uuid.UUID("3d6fa8d0-fe05-11d0-9dda-00c04fd7ba7c")
+EVENT_TRACE_CLASS = uuid.UUID("68fdd900-4a3e-11d1-84f4-0000f80464e3")
+LOST_EVENT_CLASS = uuid.UUID("6a399ae0-4bc6-4de9-870b-3657f8947e7e")
+SYSTEM_CONFIG_CLASS = uuid.UUID("01853a65-418f-4f36-aefc-dc0f1d2fd235")
 # The system providers keep the classic MOF numbering: the operation is the
 # event's opcode, and only these class versions have the layouts parsed below.
 FILE_VERSIONS = (2, 3)
@@ -77,6 +82,7 @@ class RawEvent:
     payload: bytes
     received_at: float = 0.0
     truncated: bool = False
+    cpu: int = -1
 
 
 @dataclass(frozen=True)
@@ -184,12 +190,14 @@ class Counters:
     callbacks_per_second: float = 0.0
     file_callbacks: int = 0
     guarded_gaps: int = 0
+    query_failures: int = 0
 
     @property
     def gap(self) -> bool:
-        return any((self.queue_drops, self.truncated, self.events_lost,
+        # Not truncated: a clipped event is still delivered, and long command lines are common.
+        return any((self.queue_drops, self.events_lost,
                     self.realtime_buffers_lost, self.log_buffers_lost, self.join_gaps,
-                    self.handler_failures, self.guarded_gaps))
+                    self.handler_failures, self.guarded_gaps, self.query_failures))
 
 
 class Correlator:
@@ -265,6 +273,18 @@ class Collector:
         self._guard_requested = False
         self._retry_at = 0.0
         self._retry_delay = FILE_RETRY_SECONDS
+        self._stop_lock = threading.Lock()
+        self._stopped = False
+        self.phase: str | None = None
+        self._measure_lock = threading.Lock()
+        self._tallies: dict[str, Counter[str]] = {}
+        self.kids: dict[int, tuple[str, float]] = {}
+        self.tally_errors = 0
+        self._own_pid = os.getpid()
+        self._newest_timestamp = 0
+        self._last_dc_time: float | None = None
+        self._flush_results: deque[int] = deque(maxlen=8)
+        self.flush_every = 0.0
 
     def callback(self, event: RawEvent) -> None:
         # No parsing, disk access, or blocking in the ETW callback.
@@ -288,14 +308,21 @@ class Collector:
         if event.provider in (IO_PROVIDER, FILE_IO_CLASS):
             self.counters.file_callbacks += 1
         if not isinstance(event.payload, bytes) or len(event.payload) > MAX_PAYLOAD:
+            # Unreadable, and never queued: a drop as well.
             self.counters.truncated += 1
+            self.counters.queue_drops += 1
             self.counters.callback_cpu_s += time.thread_time() - started
             return
+        if self.phase is not None:
+            try:
+                self._measure(event, now)
+            except Exception:
+                self.tally_errors += 1
         try:
             lane = self.priority_queue if self.priority and self.priority(event) else self.queue
             lane.put_nowait(RawEvent(event.provider, event.opcode, event.version,
                                       event.pid, event.tid, event.timestamp, event.payload,
-                                      time.monotonic(), event.truncated))
+                                      time.monotonic(), event.truncated, event.cpu))
             self.counters.queued += 1
             self.counters.queue_high_water = max(self.counters.queue_high_water,
                 self.queue.qsize() + self.priority_queue.qsize())
@@ -312,19 +339,104 @@ class Collector:
         self._consumer = threading.Thread(target=self.backend.process, daemon=True)
         self._aggregator.start()
         self._consumer.start()
+        if hasattr(self.backend, "wait_consumer"):
+            self.backend.wait_consumer = lambda: self._consumer.join(3.0)
         return result
+
+    def enable(self) -> StartResult:
+        method = getattr(self.backend, "enable", None)
+        return method() if method is not None else StartResult("STARTED")
+
+    def _measure(self, event: RawEvent, now: float) -> None:
+        phase = self.phase
+        if phase is None:
+            return
+        provider = event.provider
+        if provider in (PROCESS_CLASS, PROCESS_PROVIDER):
+            kind = f"p{event.opcode}"
+        elif provider == EVENT_TRACE_CLASS:
+            kind = f"e{event.opcode}"
+        elif provider == LOST_EVENT_CLASS:
+            kind = f"l{event.opcode}"
+        elif provider == SYSTEM_CONFIG_CLASS:
+            kind = "s"
+        elif provider in (IO_PROVIDER, FILE_IO_CLASS):
+            kind = "f"
+        else:
+            kind = "o"
+        with self._measure_lock:
+            tally = self._tallies.setdefault(phase, Counter())
+            tally[kind] += 1
+            if event.truncated:
+                tally[f"trunc_{kind}"] += 1
+            if kind in ("p1", "p3"):
+                tally[f"{kind}@{event.cpu}"] += 1
+            if event.timestamp < self._newest_timestamp:
+                tally["ts_back"] += 1
+                tally["ts_back_max_ms"] = max(tally["ts_back_max_ms"],
+                                               (self._newest_timestamp - event.timestamp) // 10_000)
+            self._newest_timestamp = max(self._newest_timestamp, event.timestamp)
+            age = (time.time_ns() // 100 + 116444736000000000 - event.timestamp) / 10_000_000
+            tally["age<1s" if age < 1 else "age<3s" if age < 3 else "age>=3s"] += 1
+            if kind == "p3":
+                if len(event.payload) >= 12 and struct.unpack_from("<I", event.payload, 8)[0] == self._own_pid:
+                    tally["own_p3"] += 1
+                if self._last_dc_time is not None:
+                    gap_us = round((now - self._last_dc_time) * 1_000_000)
+                    tally["dcgap_sum_us"] += gap_us
+                    tally["dcgap_max_ms"] = max(tally["dcgap_max_ms"], gap_us // 1000)
+                self._last_dc_time = now
+            if kind in ("p1", "p2") and len(event.payload) >= 16:
+                pid, parent = struct.unpack_from("<II", event.payload, 8)
+                if parent == self._own_pid:
+                    tally[f"child_{kind}"] += 1
+                    if kind == "p1" and pid not in self.kids and len(self.kids) < 8:
+                        self.kids[pid] = (phase, time.perf_counter())
+
+    def measured(self) -> dict[str, dict[str, int]]:
+        with self._measure_lock:
+            return {phase: dict(tally) for phase, tally in self._tallies.items()}
+
+    def flush(self) -> int:
+        method = getattr(self.backend, "flush", None)
+        rc = method() if method is not None else -1
+        self._flush_results.append(rc)
+        return rc
+
+    def session_stats(self) -> dict[str, int]:
+        method = getattr(self.backend, "stats", None)
+        if method is None:
+            return {}
+        try:
+            return method()
+        except OSError as error:
+            return {"qrc": error.errno if error.errno is not None else -1}
+
+    def lifecycle(self) -> dict[str, object]:
+        result = getattr(self.backend, "process_result", None)
+        return {"consumer_alive": self._consumer.is_alive() if self._consumer else False,
+                "process_result": result,
+                "process_entered": getattr(self.backend, "process_entered", None)}
 
     def _aggregate(self) -> None:
         next_loss_query = time.monotonic() + 3.0
         next_guard = time.monotonic() + 0.2
-        while not self._stop.is_set() or not self.queue.empty() or not self.priority_queue.empty():
+        next_flush = time.monotonic() + self.flush_every if self.flush_every else 0.0
+        while (not self._stop.is_set() or (self._consumer is not None and self._consumer.is_alive())
+               or not self.queue.empty() or not self.priority_queue.empty()):
             now = time.monotonic()
-            if now >= next_guard:
+            if not self._stop.is_set() and now >= next_guard:
                 self._file_rate_guard()
                 next_guard = now + 0.2
-            if now >= next_loss_query:
+            if not self._stop.is_set() and now >= next_loss_query:
                 self.poll_loss()
                 next_loss_query = time.monotonic() + 3.0
+            if not self._stop.is_set() and self.flush_every:
+                if not next_flush:
+                    next_flush = now + self.flush_every
+                elif now >= next_flush:
+                    self.flush()
+                    next_flush = now + self.flush_every
             try:
                 try:
                     raw = self.priority_queue.get_nowait()
@@ -397,22 +509,30 @@ class Collector:
         return self.counters.callbacks_per_second if time.monotonic() - self._rate_start < 2.0 else 0.0
 
     def poll_loss(self) -> Counters:
+        if self._stop.is_set():
+            return self.counters
         try:
             events, realtime, logs = self.backend.loss()
             self.counters.events_lost = max(self.counters.events_lost, events)
             self.counters.realtime_buffers_lost = max(self.counters.realtime_buffers_lost, realtime)
             self.counters.log_buffers_lost = max(self.counters.log_buffers_lost, logs)
         except OSError:
-            self.counters.events_lost += 1
+            self.counters.query_failures += 1
         return self.counters
 
-    def stop(self) -> None:
-        self._stop.set()
+    def stop(self) -> bool:
+        """True only for the call that stopped the session."""
+        with self._stop_lock:
+            if self._stopped:
+                return False
+            self._stopped = True
+            self._stop.set()
+        deadline = time.monotonic() + 6.0
         self.backend.stop()
-        deadline = time.monotonic() + 5.0
         for thread in (self._consumer, self._aggregator):
             if thread:
                 thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        return True
 
 
 FORWARDED = frozenset(("name", "read", "write", "process_start", "process_stop"))
@@ -456,8 +576,16 @@ class EtwObserver:
         self._checking: deque[ParsedEvent] = deque(maxlen=256)
         self._check_counts: Counter[tuple[str, int]] = Counter()
         self._check_raw: deque[RawEvent] = deque(maxlen=1)  # the service's own DCStart
-        self._raw_starts: deque[RawEvent] = deque(maxlen=64)
-        self._check_child = 0
+        self._raw_starts: deque[RawEvent] = deque(maxlen=256)
+        self._raw_start_pids: set[int] = set()
+        self._check_children: dict[int, float] = {}
+        self._check_event_phases: dict[int, str] = {}
+        self._pass_phase: str | None = None
+        self.flush_assist = False
+        self.check_phase: str | None = None
+        self._sleep_count = 0
+        self._sleep_late = 0
+        self._sleep_worst_ms = 0.0
         self._check_loss: int | None = None
         self._lock = threading.Lock()
         self._lifecycle = threading.Lock()
@@ -500,62 +628,142 @@ class EtwObserver:
             collector = Collector(self.backend_factory(guid), self._parsed,
                                   priority=lambda raw: raw.provider in (PROCESS_PROVIDER, PROCESS_CLASS),
                                   on_raw=self._check_raw_event)
+            collector.phase = "P"
             self.collector = collector
             result = collector.start()
         if result.status != "STARTED":
             self.state = result.status.lower() + (f"_{result.error}" if result.error else "")
             return
+        if getattr(collector.backend, "enable", None) is not None:
+            connected_at = time.monotonic()
+            while (collector.counters.callbacks == 0 and not self._stopping.is_set()
+                   and time.monotonic() - connected_at < 2.0):
+                self._stopping.wait(0.05)
+            path = "callback" if collector.counters.callbacks else "timeout"
+            elapsed_ms = round((time.monotonic() - connected_at) * 1000)
+            try:
+                self._log_check("connect", path=path, ms=elapsed_ms,
+                                callbacks=collector.counters.callbacks,
+                                processes=self._process_count(), stats=collector.session_stats(),
+                                phase_p=collector.measured().get("P", {}))
+            except Exception:
+                pass
+            if self._stopping.is_set():
+                self._stop_check(collector)
+                return
+            collector.phase = "W"
+            self.check_phase = "W"
+            enabled = collector.enable()
+            if enabled.status != "STARTED":
+                # A service stop in between makes the enable fail; the state stays "off".
+                if not self._stopping.is_set():
+                    self.state = "enable_" + enabled.status.lower() + (f"_{enabled.error}" if enabled.error else "")
+                self._stop_check(collector)
+                return
+        else:
+            collector.phase = "W"
+            self.check_phase = "W"
         try:
             reason = self.check(collector)
         except (OSError, subprocess.SubprocessError, ValueError):
             reason = "schema_check_failed"
         self._check_loss = self._loss_total(collector.poll_loss())
+        self._log_result(collector, reason)
         if reason or self._stopping.is_set():
             if reason and not self._stopping.is_set():
                 self.state = reason
                 self._log_check_failure(reason)
-            collector.stop()
+            self._stop_check(collector)
             return
         with self._lifecycle:
             if self._stopping.is_set():
                 collector.stop()
                 return
             collector.file_events = "off"
+            collector.phase = None
             with self._lock:
                 self.state = "on"
                 self._checking.clear()
                 self._check_raw.clear()
                 self._raw_starts.clear()
+                self._raw_start_pids.clear()
                 collector.on_raw = None
 
-    def _check_schema(self, collector: Collector) -> str:
-        # The service's own DCStart is not required. The rundown is written when the
-        # provider is enabled, before ProcessTrace connects, and on the owner's machine
-        # 43 of about 340 arrived without the service's own. A Start of our own child,
-        # with its pid, parent and image read back, proves the layout and live delivery.
+    def _check_schema(self, collector: Collector | None) -> str:
         image = ntpath.basename(sys.executable).casefold()
-        with subprocess.Popen([sys.executable, "-I", "-B", "-c", "import time; time.sleep(3)"],
-                              shell=False, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                              stderr=subprocess.DEVNULL) as child:
-            with self._lock:
-                self._check_child = child.pid
-            deadline = time.monotonic() + 5.0
-            while time.monotonic() < deadline and not self._stopping.is_set():
+        began = time.monotonic()
+        spawned: dict[str, int] = {}
+        flushed: set[int] = set()
+        phase = "W"
+        matched: str | None = None
+        with contextlib.ExitStack() as stack:
+            while not self._stopping.is_set():
+                now = time.monotonic()
                 with self._lock:
-                    started = any(event.pid == child.pid and event.parent_pid == os.getpid()
-                                  and event.image_name.casefold() == image for event in self._checking)
-                if started:
-                    return ""
-                time.sleep(0.1)
+                    for event in self._checking:
+                        if (event.pid in spawned.values() and event.parent_pid == os.getpid()
+                                and event.image_name.casefold() == image):
+                            seen_phase = self._check_event_phases.get(event.pid, phase)
+                            if matched is None:
+                                matched = seen_phase
+                elapsed = now - began
+                if elapsed >= 7.0:
+                    break
+                if "A" not in spawned:
+                    self._spawn_check_child(stack, spawned, "A")
+                if elapsed >= 3.0 and "B" not in spawned:
+                    self._phase_end(collector, phase)
+                    phase = "B"
+                    if collector is not None:
+                        collector.phase = phase
+                    self.check_phase = phase
+                    self._spawn_check_child(stack, spawned, "B")
+                if elapsed >= 5.0 and phase != "F":
+                    self._phase_end(collector, phase)
+                    phase = "F"
+                    if collector is not None:
+                        collector.phase = phase
+                    self.check_phase = phase
+                for second in (5, 6):
+                    if elapsed >= second and second not in flushed:
+                        flushed.add(second)
+                        if collector is not None:
+                            collector.flush()
+                self._check_sleep(min(began + 7, now + 0.05))
+        self._phase_end(collector, phase)
+        self._pass_phase = matched
+        if matched in ("W", "B", "F"):
+            if matched == "F":
+                self.flush_assist = True
+                if collector is not None:
+                    collector.flush_every = 1.0
+            return ""
         with self._lock:
-            delivered = any(struct.unpack_from("<I", raw.payload, 8)[0] == child.pid
-                            for raw in self._raw_starts)
-        # Delivered but not matched means the layout is wrong, not the session.
+            delivered = any(pid in self._raw_start_pids for pid in spawned.values())
         return "schema_process_mismatch" if delivered else "no_start_events"
+
+    def _spawn_check_child(self, stack: contextlib.ExitStack, spawned: dict[str, int], label: str) -> None:
+        spawn_at = time.perf_counter()
+        child = stack.enter_context(subprocess.Popen(
+            [sys.executable, "-I", "-B", "-c", "import time; time.sleep(3)"],
+            shell=False, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL))
+        spawned[label] = child.pid
+        with self._lock:
+            self._check_children[child.pid] = spawn_at
+
+    def _check_sleep(self, target: float) -> None:
+        remaining = target - time.monotonic()
+        if remaining > 0:
+            time.sleep(remaining)
+        late_ms = max(0.0, (time.monotonic() - target) * 1000)
+        self._sleep_count += 1
+        self._sleep_late += late_ms > 50
+        self._sleep_worst_ms = max(self._sleep_worst_ms, late_ms)
 
     @staticmethod
     def _loss_total(counters: Counters) -> int:
-        return (counters.queue_drops + counters.truncated + counters.events_lost
+        return (counters.queue_drops + counters.events_lost
                 + counters.realtime_buffers_lost + counters.log_buffers_lost
                 + counters.handler_failures)
 
@@ -565,8 +773,10 @@ class EtwObserver:
             if state == "checking":
                 # Only starts: the rundown lists every running process at once and
                 # would push the child's start out of the bounded deque.
-                if event.kind == "process_start":
+                if event.kind == "process_start" and event.parent_pid == os.getpid():
                     self._checking.append(event)
+                    if self.collector is not None:
+                        self._check_event_phases.setdefault(event.pid, self.collector.phase or "W")
                 return
         if state != "on":
             return
@@ -592,6 +802,10 @@ class EtwObserver:
         return {"etw": state, "etw_events_parsed": counters.parsed,
                 "etw_events_lost": lost, "etw_join_gaps": counters.join_gaps,
                 "etw_gap": counters.gap,
+                "etw_flush_assist": self.flush_assist,
+                "etw_check_phase": self._pass_phase or "",
+                "etw_truncated": counters.truncated,
+                "etw_query_failures": counters.query_failures,
                 "etw_exits_before_resolution": self.exits_before_resolution,
                 "etw_file_events": "off",
                 "etw_file_events_reason": "Python không theo kịp tốc độ sự kiện tệp",
@@ -601,10 +815,19 @@ class EtwObserver:
 
     def stop(self) -> None:
         self._stopping.set()
+        checking = self.state == "checking"
         self.state = "off"
         with self._lifecycle:
             if self.collector is not None:
-                self.collector.stop()
+                if checking:
+                    self.collector.phase = "S"
+                if self.collector.stop() and checking:
+                    try:
+                        self._log_check("stop", tallies=self.collector.measured().get("S", {}),
+                                        final_stats=getattr(self.collector.backend, "final_stats", None),
+                                        lifecycle=self.collector.lifecycle())
+                    except Exception:
+                        pass
 
     @staticmethod
     def _resolve_process(pid: int) -> str:
@@ -627,28 +850,90 @@ class EtwObserver:
             self._check_counts[(raw.provider.hex, raw.opcode)] += 1
             if raw.provider not in (PROCESS_PROVIDER, PROCESS_CLASS) or len(raw.payload) < 12:
                 return
-            # Every start is kept, since the child's pid may be known only after its
-            # event arrives; only the service's own and its child's are ever logged.
             if raw.opcode == OP_PROCESS_START:
+                self._raw_start_pids.add(struct.unpack_from("<I", raw.payload, 8)[0])
                 self._raw_starts.append(raw)
             elif (raw.opcode == OP_PROCESS_DCSTART and not self._check_raw
                   and struct.unpack_from("<I", raw.payload, 8)[0] == os.getpid()):
                 self._check_raw.append(raw)
 
     def _log_check_failure(self, reason: str) -> None:
-        with self._lock:
-            counts = sorted(self._check_counts.items())
-            child = self._check_child
-            samples = tuple(self._check_raw) + tuple(
-                raw for raw in self._raw_starts
-                if child and struct.unpack_from("<I", raw.payload, 8)[0] == child)[:2]
-            # Other processes' command lines are not kept past the check.
-            self._raw_starts.clear()
-        log = logging.getLogger(__name__)
-        log.warning("etw check: %s counts %s", reason,
-                    ", ".join(f"{provider}/{opcode}={count}" for (provider, opcode), count in counts))
-        for raw in samples:
-            log.warning("etw check: process/%d v%d %s", raw.opcode, raw.version, raw.payload[:160].hex())
+        try:
+            with self._lock:
+                counts = sorted(self._check_counts.items())
+                samples = tuple(self._check_raw) + tuple(
+                    raw for raw in self._raw_starts
+                    if struct.unpack_from("<I", raw.payload, 8)[0] in self._check_children)[:2]
+                self._raw_starts.clear()
+                self._raw_start_pids.clear()
+            log = logging.getLogger(__name__)
+            log.warning("etw check: %s counts %s", reason,
+                        ", ".join(f"{provider}/{opcode}={count}" for (provider, opcode), count in counts))
+            for raw in samples:
+                log.warning("etw check: process/%d v%d %s", raw.opcode, raw.version, raw.payload[:160].hex())
+        except Exception:
+            pass
+
+    @staticmethod
+    def _log_check(label: str, **fields: object) -> None:
+        try:
+            logging.getLogger(__name__).warning("etw check: %s %s", label,
+                json.dumps(fields, sort_keys=True, default=lambda _value: "<unsupported>"))
+        except Exception:
+            pass
+
+    @staticmethod
+    def _process_count() -> int | None:
+        try:
+            return len(procwatch.windows_snapshot().keys)
+        except Exception:
+            return None
+
+    def _phase_end(self, collector: Collector | None, phase: str) -> None:
+        if collector is None:
+            return
+        try:
+            tally = collector.measured().get(phase, {})
+            self._log_check("phase " + phase, tallies=tally,
+                            cpu={key: value for key, value in tally.items() if "@" in key},
+                            stats=collector.session_stats(),
+                            sleeps=self._sleep_count, late=self._sleep_late,
+                            worst_ms=round(self._sleep_worst_ms))
+        except Exception:
+            pass
+
+    def _log_result(self, collector: Collector, reason: str) -> None:
+        try:
+            with self._lock:
+                children = {}
+                for label, (pid, spawned_at) in zip(("A", "B"), self._check_children.items()):
+                    child = collector.kids.get(pid)
+                    children[label] = (self._check_event_phases.get(pid),
+                                       round((child[1] - spawned_at) * 1000) if child else None)
+            c = collector.counters
+            self._log_check("result", result="interrupted" if self._stopping.is_set() else
+                            reason or "pass", pass_phase=self._pass_phase, children=children,
+                            flush=list(collector._flush_results), lifecycle=collector.lifecycle(),
+                            queue_drops=c.queue_drops, truncated=c.truncated,
+                            events_lost=c.events_lost, realtime_buffers_lost=c.realtime_buffers_lost,
+                            log_buffers_lost=c.log_buffers_lost, query_failures=c.query_failures,
+                            handler_failures=c.handler_failures, join_gaps=c.join_gaps,
+                            guarded_gaps=c.guarded_gaps,
+                            callbacks=c.callbacks, queued=c.queued, high_water=c.queue_high_water,
+                            max_delivery_ms=round(c.max_delivery_ms), tally_errors=collector.tally_errors)
+        except Exception:
+            pass
+
+    def _stop_check(self, collector: Collector) -> None:
+        collector.phase = "S"
+        if not collector.stop():
+            return  # EtwObserver.stop got there first and logged it
+        try:
+            self._log_check("stop", tallies=collector.measured().get("S", {}),
+                            final_stats=getattr(collector.backend, "final_stats", None),
+                            lifecycle=collector.lifecycle())
+        except Exception:
+            pass
 
 
 def _same_file(event_path: str, known_path: str) -> bool:
@@ -740,6 +1025,26 @@ def _properties(session_guid: uuid.UUID = SESSION_MARKER) -> ctypes.Array[ctypes
     return buf
 
 
+def _control_properties(session_guid: uuid.UUID = SESSION_MARKER) -> ctypes.Array[ctypes.c_byte]:
+    buf = ctypes.create_string_buffer(ctypes.sizeof(EVENT_TRACE_PROPERTIES) + 2 * 1024 * 2)
+    props = EVENT_TRACE_PROPERTIES.from_buffer(buf)
+    props.Wnode.BufferSize = len(buf)
+    props.Wnode.Guid = _guid(session_guid)
+    props.LoggerNameOffset = ctypes.sizeof(EVENT_TRACE_PROPERTIES)
+    props.LogFileNameOffset = props.LoggerNameOffset + 1024 * 2
+    name = (SESSION_NAME + "\0").encode("utf-16-le")
+    ctypes.memmove(ctypes.addressof(buf) + props.LoggerNameOffset, name, len(name))
+    return buf
+
+
+def _stats(buf: ctypes.Array[ctypes.c_byte]) -> dict[str, int]:
+    props = EVENT_TRACE_PROPERTIES.from_buffer(buf)
+    return {name: int(getattr(props, name)) for name in (
+        "BufferSize", "MinimumBuffers", "MaximumBuffers", "FlushTimer",
+        "NumberOfBuffers", "FreeBuffers", "BuffersWritten", "EventsLost",
+        "RealTimeBuffersLost", "LogBuffersLost")}
+
+
 def capability_probe() -> Capability:
     if os.name != "nt":
         return Capability(False, "non_windows", False)
@@ -766,7 +1071,7 @@ def cleanup_orphan(expected_guid: uuid.UUID, *, stored_name: str,
         if os.name != "nt":
             return StartResult("UNAVAILABLE")
         api = ctypes.WinDLL("advapi32", use_last_error=True)
-    props = _properties()
+    props = _control_properties()
     code = api.ControlTraceW(ctypes.c_uint64(0), SESSION_NAME, props, 0)
     if code == ERROR_WMI_INSTANCE_NOT_FOUND:
         return StartResult("ABSENT")
@@ -775,6 +1080,7 @@ def cleanup_orphan(expected_guid: uuid.UUID, *, stored_name: str,
     actual = uuid.UUID(bytes_le=bytes(EVENT_TRACE_PROPERTIES.from_buffer(props).Wnode.Guid))
     if actual != expected_guid:
         return StartResult("FOREIGN_SESSION")
+    props = _control_properties(expected_guid)
     code = api.ControlTraceW(ctypes.c_uint64(0), SESSION_NAME, props, 1)
     return StartResult("STOPPED" if code == 0 else "ERROR", code)
 
@@ -793,6 +1099,10 @@ class NativeBackend:
         self.owned = False
         self._callback = None
         self._logfile = None
+        self.process_entered: float | None = None
+        self.process_result: tuple[int, float] | None = None
+        self.final_stats: dict[str, int] | None = None
+        self.wait_consumer: Callable[[], None] | None = None
         self._api = ctypes.WinDLL("advapi32", use_last_error=True) if os.name == "nt" else None
 
     def start(self, callback: Callable[[RawEvent], None]) -> StartResult:
@@ -810,13 +1120,6 @@ class NativeBackend:
             return StartResult(status, code)
         self.owned = True
         try:
-            for provider, keywords in ((PROCESS_PROVIDER, self.process_keywords),):
-                guid = _guid(provider)
-                code = self._api.EnableTraceEx2(self.handle, ctypes.byref(guid), 1, 0,
-                                                ctypes.c_uint64(keywords), 0, 0, None)
-                if code:
-                    self.stop()
-                    return StartResult("DENIED" if code == ERROR_ACCESS_DENIED else "ERROR", code)
             factory = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)
 
             def receive(ptr: ctypes.POINTER(EVENT_RECORD)) -> None:
@@ -832,7 +1135,8 @@ class NativeBackend:
                 callback(RawEvent(uuid.UUID(bytes_le=bytes(header.ProviderId)),
                                   header.EventDescriptor.Opcode, header.EventDescriptor.Version,
                                   header.ProcessId, header.ThreadId, header.TimeStamp, payload,
-                                  truncated=length > MAX_PAYLOAD))
+                                  truncated=length > MAX_PAYLOAD,
+                                  cpu=record.BufferContext & 0xffff))
 
             self._callback = factory(None, ctypes.POINTER(EVENT_RECORD))(receive)
             self._logfile = EVENT_TRACE_LOGFILEW()
@@ -849,10 +1153,26 @@ class NativeBackend:
             self.stop()
             return StartResult("ERROR", ctypes.get_last_error())
 
+    def enable(self) -> StartResult:
+        if not self.owned or self._api is None:
+            return StartResult("ERROR")
+        try:
+            for provider, keywords in ((PROCESS_PROVIDER, self.process_keywords),):
+                guid = _guid(provider)
+                code = self._api.EnableTraceEx2(self.handle, ctypes.byref(guid), 1, 0,
+                                                ctypes.c_uint64(keywords), 0, 0, None)
+                if code:
+                    return StartResult("DENIED" if code == ERROR_ACCESS_DENIED else "ERROR", code)
+            return StartResult("STARTED")
+        except (OSError, ValueError):
+            return StartResult("ERROR", ctypes.get_last_error())
+
     def process(self) -> None:
         if self._api and self.trace.value != 0xffffffffffffffff:
             handles = (ctypes.c_uint64 * 1)(self.trace.value)
-            self._api.ProcessTrace(handles, 1, None, None)
+            self.process_entered = time.monotonic()
+            rc = self._api.ProcessTrace(handles, 1, None, None)
+            self.process_result = (rc, time.monotonic())
 
     def set_file_events(self, enabled: bool) -> bool:
         if not self.owned or self._api is None:
@@ -864,19 +1184,28 @@ class NativeBackend:
         return code == 0
 
     def loss(self) -> tuple[int, int, int]:
+        stats = self.stats()
+        return stats["EventsLost"], stats["RealTimeBuffersLost"], stats["LogBuffersLost"]
+
+    def stats(self) -> dict[str, int]:
         if not self.owned or self._api is None:
             raise OSError("trace unavailable")
-        props = _properties(self.session_guid)
+        props = _control_properties(self.session_guid)
         code = self._api.ControlTraceW(self.handle, SESSION_NAME, props, 0)
         if code:
             raise OSError(code, "ControlTrace query failed")
-        p = EVENT_TRACE_PROPERTIES.from_buffer(props)
-        return p.EventsLost, p.RealTimeBuffersLost, p.LogBuffersLost
+        return _stats(props)
+
+    def flush(self) -> int:
+        if not self.owned or self._api is None:
+            return -1
+        return self._api.ControlTraceW(self.handle, SESSION_NAME,
+                                       _control_properties(self.session_guid), 3)
 
     def stop(self) -> None:
         if self._api is None:
             return
-        props = _properties(self.session_guid)
+        props = _control_properties(self.session_guid)
         query = self._api.ControlTraceW(self.handle, SESSION_NAME, props, 0) if self.owned else 1
         same_guid = (query == 0 and
                      uuid.UUID(bytes_le=bytes(EVENT_TRACE_PROPERTIES.from_buffer(props).Wnode.Guid))
@@ -885,8 +1214,13 @@ class NativeBackend:
             for provider in (PROCESS_PROVIDER,):
                 guid = _guid(provider)
                 self._api.EnableTraceEx2(self.handle, ctypes.byref(guid), 0, 0, 0, 0, 0, None)
-            self._api.ControlTraceW(self.handle, SESSION_NAME, props, 1)
+            props = _control_properties(self.session_guid)
+            stop_rc = self._api.ControlTraceW(self.handle, SESSION_NAME, props, 1)
+            if self.final_stats is None:
+                self.final_stats = {**_stats(props), "stop_rc": stop_rc}
         self.owned = False
+        if self.wait_consumer is not None:
+            self.wait_consumer()
         if self.trace.value != 0xffffffffffffffff:
             self._api.CloseTrace(self.trace)
             self.trace = ctypes.c_uint64(0xffffffffffffffff)
