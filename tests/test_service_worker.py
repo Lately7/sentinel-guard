@@ -8,6 +8,7 @@ token; that case is the owner's elevated acceptance check.
 from __future__ import annotations
 
 import os
+import threading
 import time
 
 import pytest
@@ -171,8 +172,21 @@ def test_worker_environment_does_not_leak_the_parents(monkeypatch):
 def test_kill_ends_a_busy_worker_promptly():
     from sentinel.service import worker
 
-    w = worker.launch(["-c", "import time; time.sleep(60)"])
+    w = worker.launch(["-c", "import time; time.sleep(15)"])
+    entered = threading.Event()
+    output = []
+
+    def blocked_reader() -> None:
+        entered.set()
+        output.append(w.stdout.read(1))
+
+    reader = threading.Thread(target=blocked_reader, daemon=True)
+    reader.start()
+    assert entered.wait(2)
+    time.sleep(0.1)
     start = time.monotonic()
     w.kill()
+    reader.join(2)
     assert time.monotonic() - start < 10
+    assert not reader.is_alive() and output == [b""]
     assert w._process == 0

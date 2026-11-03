@@ -66,6 +66,7 @@ class WorkerSession:
         self._memory_limit = memory_limit
         self._lock = threading.Lock()
         self._proc: worker_mod.Worker | None = None
+        self._starting_proc: worker_mod.Worker | None = None
         self._replies: queue.Queue[dict[str, Any] | None] = queue.Queue()
         self._next_id = 0
         self.starts = 0
@@ -93,6 +94,7 @@ class WorkerSession:
                                            memory_limit=self._memory_limit, python=str(version / "python.exe"),
                                            cwd=str(version), service_sid=sid)
         self.starts += 1
+        self._starting_proc = self._proc
         self._replies = queue.Queue()
         threading.Thread(target=self._pump, args=(self._proc, self._replies), daemon=True,
                          name="worker-reader").start()
@@ -185,20 +187,29 @@ class WorkerSession:
             if self._proc is None:
                 if time.monotonic() - self._failed_start_at < START_RETRY_SECONDS:
                     raise WorkerFailure(StageStatus.UNAVAILABLE, "WORKER_UNAVAILABLE")
+                self.last_failure = ""
+                self._starting_proc = None
                 try:
                     self._start(deadline_ns)
-                except (OSError, WorkerFailure) as e:
+                except Exception as e:
+                    failed_proc = self._proc or self._starting_proc
                     self._kill()
                     if isinstance(e, OSError):
                         self.last_failure = str(e) or type(e).__name__
-                    elif e.code != "WORKER_DIED" or not self.last_failure:
-                        self.last_failure = e.code
+                    elif isinstance(e, WorkerFailure):
+                        self.last_failure = self.last_failure or e.code
+                    else:
+                        self.last_failure = f"{type(e).__name__}: {e}"
+                    tail = failed_proc.stderr_tail() if isinstance(failed_proc, worker_mod.Worker) else ""
                     self._failed_start_at = time.monotonic()
-                    if self.last_failure != self._logged_start_failure:
-                        log.warning("worker did not start: %s", self.last_failure)
-                        self._logged_start_failure = self.last_failure
+                    detail = self.last_failure + (f"\nstderr: {tail}" if tail else "")
+                    if detail != self._logged_start_failure:
+                        log.warning("worker did not start: %s", detail, exc_info=not isinstance(e, (OSError, WorkerFailure)))
+                        self._logged_start_failure = detail
+                    self._starting_proc = None
                     raise WorkerFailure(StageStatus.UNAVAILABLE, "WORKER_UNAVAILABLE") from e
                 self.last_failure = ""
+                self._starting_proc = None
                 self._logged_start_failure = ""
             if handle_from is not None:
                 try:
