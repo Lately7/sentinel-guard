@@ -36,6 +36,11 @@ class ApprovalResult:
         return self.approved
 
 
+@dataclass(frozen=True)
+class RestoreApprovalResult(ApprovalResult):
+    zone_identifier_preserved: bool | None = None
+
+
 class ServiceLease:
     def __init__(self, make_client: Any = ServiceClient) -> None:
         self.make_client = make_client
@@ -143,15 +148,19 @@ class ServiceLease:
 
     def approve(self, kind: str, params: dict[str, Any]) -> ApprovalResult:
         """Asks for a plan and reports why confirmation did not complete."""
-        from .consent import ConsentError, launch_consent
+        from .consent import ConsentError, RestoreConsent, launch_consent
 
         try:
             plan = self._call("request_plan", kind=kind, params=params)
             if plan is None:
                 log.warning("confirmation of %s: service unavailable", kind)
                 return ApprovalResult(False, "SERVICE_UNAVAILABLE")
-            if not launch_consent(plan["plan_id"]):
+            consent = launch_consent(plan["plan_id"])
+            if not consent:
                 return ApprovalResult(False, "CANCELLED")
+            if kind == "restore_quarantine":
+                preserved = consent.zone_identifier_preserved if isinstance(consent, RestoreConsent) else None
+                return RestoreApprovalResult(True, zone_identifier_preserved=preserved)
             return ApprovalResult(True)
         except ServiceUnavailable:
             code = "SERVICE_UNAVAILABLE"
