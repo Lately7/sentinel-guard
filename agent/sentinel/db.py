@@ -173,6 +173,7 @@ class Database:
         self._lock = threading.RLock()
         self._popular: frozenset[str] | None = None
         self.repaired_from: str | None = None  # where a damaged DB was moved to, if it was
+        self._snapshot_hashes: tuple[int, str] = (-1, "")
         from .indicators import Indicators
 
         self._conn: sqlite3.Connection | None = None  # type: ignore[assignment]
@@ -431,17 +432,29 @@ class Database:
             digest.update(b"allow:")
             digest.update(json.dumps(row["sha256"], ensure_ascii=True).encode("ascii"))
             digest.update(b"\n")
+        # The local tables are small and change without a publish. The snapshot can
+        # be 500,000 rows under the indicators lock, and only a publish changes it.
+        generation = self.generation()
+        if self._snapshot_hashes[0] != generation:
+            self._snapshot_hashes = (generation, self._snapshot_hash_digest())
+        digest.update(self._snapshot_hashes[1].encode("ascii"))
+        return digest.hexdigest()
+
+    def _snapshot_hash_digest(self) -> str:
+        digest = hashlib.sha256()
         conn = self.indicators._current()
         if conn is None:
             if self.get_meta("indicators_file"):
                 digest.update(b"snapshot unavailable")
-        else:
-            try:
-                with self.indicators._lock:
-                    for row in conn.execute("SELECT sha256, source, name FROM hashes ORDER BY sha256"):
-                        add(row)
-            except sqlite3.DatabaseError:
-                digest.update(b"snapshot unreadable")
+            return digest.hexdigest()
+        try:
+            with self.indicators._lock:
+                for row in conn.execute("SELECT sha256, source, name FROM hashes ORDER BY sha256"):
+                    digest.update(json.dumps((row["sha256"], row["source"], row["name"]),
+                                             ensure_ascii=True, separators=(",", ":")).encode("ascii"))
+                    digest.update(b"\n")
+        except sqlite3.DatabaseError:
+            digest.update(b"snapshot unreadable")
         return digest.hexdigest()
 
     def host_info(self, host: str) -> sqlite3.Row | None:

@@ -182,3 +182,16 @@ def test_maintenance_prunes_event_log(db: Database, monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(backend_module.feeds, "engine_update_due", lambda current, name, seconds: False)
     backend._maintain()
     assert calls == [1]
+
+
+def test_the_snapshot_is_hashed_only_after_a_publish_and_local_rows_always_count(db: Database, monkeypatch) -> None:
+    calls = []
+    real = db._snapshot_hash_digest
+    monkeypatch.setattr(db, "_snapshot_hash_digest", lambda: calls.append(1) or real())
+    first = db.file_hash_digest()
+    assert db.file_hash_digest() == first and len(calls) == 1
+    db.add_hashes((("c" * 64, "test", None),))
+    assert db.file_hash_digest() != first and len(calls) == 1
+    db.bump_generation()
+    db.file_hash_digest()
+    assert len(calls) == 2

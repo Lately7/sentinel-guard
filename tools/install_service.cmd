@@ -14,7 +14,7 @@ set "PYTHONUTF8=1"
 cd /d "%~dp0.."
 set "SNAPSHOT=%TEMP%\sentinel-snapshot"
 set "LOG=%TEMP%\sentinel-install.log"
-echo Dang cai dich vu, khoang 2 phut. Dung bam vao cua so nay.
+echo Dang cai dich vu, khoang 3 phut. Dung bam vao cua so nay.
 call :steps > "%LOG%" 2>&1
 type "%LOG%"
 echo.
@@ -35,8 +35,8 @@ echo [install]
 if errorlevel 1 goto servicelog
 echo [verify]
 .venv\Scripts\python.exe -m sentinel service verify
-rem A failed worker starts a self-diagnosis, and a restart would cut it off.
-powershell -NoProfile -Command "Start-Sleep -Seconds 30"
+rem A failed worker diagnoses itself, up to 70 s, and a restart would cut that off.
+if errorlevel 1 powershell -NoProfile -Command "Start-Sleep -Seconds 80"
 :servicelog
 rem Only an administrator can read this, so it is copied while one is here.
 echo [service log]
