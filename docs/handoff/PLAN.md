@@ -23,6 +23,28 @@ Lần cài thứ ba (9:57, có SVC17) vẫn 0 FAIL, nhưng ETW vẫn tắt. Byte
 16 byte header TOKEN_USER đứng trước, nên trước giờ chưa sự kiện tiến trình nào được đọc đúng; `8b6f043` sửa bộ
 đọc và chỉ còn kiểm bằng sự kiện Start của tiến trình con. Xem `REVIEWS.md` vòng thứ chín.
 
+Lần cài thứ tư (2026-11-03, khoảng 10:26, chủ dự án tự mở `tools\install_service.cmd`, có `8b6f043`)
+cho 0 FAIL, 13 PASS, 3 SKIP trước khi khởi động lại và 0 FAIL, 14 PASS, 3 SKIP sau đó;
+`worker_scan` PASS. ETW vẫn tắt với `no_start_events`: trong lúc kiểm có 11 Process/3 (DCStart),
+EventTrace `68fdd900-…` opcode 5 hai lần, opcode 8 một lần, opcode 32 hai lần, nhưng không có
+Process/1 trong 5 giây sau khi tạo tiến trình con; số mất là 3 trong lúc kiểm, tổng 1.378.
+Sau khi các bước hoàn tất lúc 10:27:16, cửa sổ lại trông như treo vì một cú bấm đưa nó vào chế độ
+chọn (tiêu đề "Select Administrator"); Esc tiếp tục. Claude điều tra theo quy trình tám agent:
+bốn người xem tài liệu Microsoft, mã nguồn krabsetw/ferrisetw/pywintrace/TraceEvent/one-collect/
+fibratus/Elastic Beats, `etw.py` và năm phiên; một người tổng hợp, ba người phản biện. Bố cục ctypes,
+handle và callback khớp SDK, thứ tự gọi khớp các thư viện, FlushTimer 1 giây là thông thường, nhưng
+mã trả về của `ProcessTrace` bị bỏ qua. Số mất tăng khoảng 1.375 quanh lúc dừng; lúc đầu đọc là sự kiện
+bị giữ trong phiên tới khi dừng, nhưng một người phản biện chỉ ra nó có thể là bộ đếm của ETW được chép lại
+khi xả hàng đợi hoặc sự kiện sinh ra lúc dừng, nên điều đó và nguyên nhân thiếu Start đều chưa rõ. Số mất cộng
+các đơn vị khác nhau; EventTrace opcode 8 không chứng minh rundown đã xong. Ba người phản biện
+bác kế hoạch đầu: đọc bộ đếm khi luồng ETW thêm khóa có thể gây lỗi, chưa chứng minh consumer đã nối,
+dừng đo ở kết quả khớp đầu, FLUSH không phân biệt được hai khả năng về buffer và `ProcessTrace`,
+`CloseTrace` ngay sau STOP cắt các sự kiện cuối, và buffer QUERY/FLUSH nhỏ hơn tài liệu
+`ControlTrace` yêu cầu. Tiếp theo Codex làm SVC18: kiểm tra theo pha trong `etw.py` (consumer nối
+trước khi bật provider, tiến trình con A rồi B, FLUSH rõ ràng, đếm từng pha trong callback, mã trả về
+`ProcessTrace`, các bộ đếm mất riêng); SVC18V để `verify` chờ kiểm tra; Claude rà soát cả hai, rồi
+chủ dự án cài lại.
+
 Bước tiếp theo: chính chủ dự án tự mở lại `tools\install_service.cmd` để kiểm ETW cho tiến trình; Claude
 không được mở hộp UAC. Dòng `etw` của verify cho kết quả và số sự kiện mất; nếu ETW vẫn tắt, các dòng
 `etw check:` trong log có 160 byte đầu của sự kiện DCStart của chính dịch vụ. Đừng bấm vào cửa sổ cài: cú
