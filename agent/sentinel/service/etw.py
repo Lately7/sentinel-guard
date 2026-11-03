@@ -49,6 +49,7 @@ PROCESS_VERSIONS = (3, 4)
 OP_FILE_NAME = (0, 32, 35, 36)  # name, create, delete, rundown
 OP_READ, OP_WRITE = 67, 68
 OP_PROCESS_START, OP_PROCESS_END = 1, 2
+OP_PROCESS_DCSTART = 3
 
 
 @dataclass(frozen=True)
@@ -139,14 +140,17 @@ def parse_event(event: RawEvent) -> ParsedEvent | None:
                 return ParsedEvent("write" if event.opcode == OP_WRITE else "read",
                                    event.pid, event.tid, file_object, io_size=io_size)
         if (event.provider in (PROCESS_PROVIDER, PROCESS_CLASS) and event.version in PROCESS_VERSIONS
-                and event.opcode in (OP_PROCESS_START, OP_PROCESS_END) and len(data) >= 16):
+                and event.opcode in (OP_PROCESS_START, OP_PROCESS_END, OP_PROCESS_DCSTART)
+                and len(data) >= 16):
             # Process_TypeGroup1: UniqueProcessKey, ProcessId, ... The class has no
             # creation time; the start event's own timestamp is that time.
             pid = struct.unpack_from("<I", data, 8)[0]
             image_name, command_line = _process_strings(data, event.version)
             if not image_name and len(data) != 16:
                 return None
-            return ParsedEvent("process_start" if event.opcode == OP_PROCESS_START else "process_stop",
+            kind = ("process_start" if event.opcode == OP_PROCESS_START else
+                    "process_rundown" if event.opcode == OP_PROCESS_DCSTART else "process_stop")
+            return ParsedEvent(kind,
                                pid, event.tid, creation_time=event.timestamp,
                                image_name=image_name, command_line=command_line)
     except (UnicodeError, struct.error, ValueError, OverflowError, TypeError, AttributeError):
@@ -447,10 +451,9 @@ class EtwObserver:
         self.collector: Collector | None = None
         self._checking: deque[ParsedEvent] = deque(maxlen=256)
         self._check_counts: Counter[tuple[str, int]] = Counter()
-        self._check_raw: deque[tuple[RawEvent, ParsedEvent | None]] = deque(maxlen=4)
-        self._check_file_objects: set[int] = set()
-        self._check_pid = 0
-        self._check_file = ""
+        self._check_raw: deque[RawEvent] = deque(maxlen=2)
+        self._check_loss: int | None = None
+        self._own_rundown = False
         self._lock = threading.Lock()
         self._lifecycle = threading.Lock()
         self._stopping = threading.Event()
@@ -501,6 +504,7 @@ class EtwObserver:
             reason = self.check(collector)
         except (OSError, subprocess.SubprocessError, ValueError):
             reason = "schema_check_failed"
+        self._check_loss = self._loss_total(collector.poll_loss())
         if reason or self._stopping.is_set():
             if reason and not self._stopping.is_set():
                 self.state = reason
@@ -511,11 +515,7 @@ class EtwObserver:
             if self._stopping.is_set():
                 collector.stop()
                 return
-            if not collector.after_check(self.on_file_event is not None):
-                self.state = "io_disable_failed"
-                self._log_check_failure("io_disable_failed")
-                collector.stop()
-                return
+            collector.file_events = "off"
             with self._lock:
                 self.state = "on"
                 self._checking.clear()
@@ -523,51 +523,52 @@ class EtwObserver:
                 collector.on_raw = None
 
     def _check_schema(self, collector: Collector) -> str:
-        # A child identifies the payload PID and image independently of the event header.
+        image = ntpath.basename(sys.executable).casefold()
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not self._stopping.is_set():
+            with self._lock:
+                rundown = self._own_rundown
+            if rundown:
+                break
+            time.sleep(0.1)
+        else:
+            return "schema_process_missing"
+        if self._stopping.is_set():
+            return "schema_process_missing"
+        # Spawn only after rundown, so the live start cannot precede the check.
+        with self._lock:
+            self._checking.clear()
         with subprocess.Popen([sys.executable, "-I", "-B", "-c", "import time; time.sleep(3)"],
                               shell=False, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                               stderr=subprocess.DEVNULL) as child:
-            own_file = os.path.abspath(__file__)
-            with self._lock:
-                self._check_pid, self._check_file = child.pid, own_file
-            with open(own_file, "rb") as stream:
-                stream.read(4096)
-                deadline = time.monotonic() + 5.0
-                process_ok = False
-                file_ok = False
-                file_name = 0
-                while time.monotonic() < deadline and not self._stopping.is_set():
-                    with self._lock:
-                        events = tuple(self._checking)
-                    for event in events:
-                        if (event.kind == "process_start" and event.pid == child.pid
-                                and event.image_name.casefold() == ntpath.basename(sys.executable).casefold()):
-                            try:
-                                path = self._resolve_process(event.pid)
-                                process_ok = _same_file(path, sys.executable)
-                            except (OSError, ProcessLookupError):
-                                pass
-                        if event.kind == "name" and event.path:
-                            try:
-                                if _same_file(event.path, own_file):
-                                    file_name = event.file_object
-                            except OSError:
-                                pass
-                    if file_name:
-                        file_ok = any(event.kind == "read" and event.file_object == file_name
-                                      and event.io_size > 0 for event in events)
-                    if process_ok and file_ok:
-                        return ""
-                    time.sleep(0.1)
-                if not process_ok:
-                    return "schema_process_missing"
-                return "schema_file_missing"
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and not self._stopping.is_set():
+                with self._lock:
+                    started = any(event.kind == "process_start" and event.pid == child.pid
+                                  and event.image_name.casefold() == image for event in self._checking)
+                if started:
+                    return ""
+                time.sleep(0.1)
+        return "no_start_events"
+
+    @staticmethod
+    def _loss_total(counters: Counters) -> int:
+        return (counters.queue_drops + counters.truncated + counters.events_lost
+                + counters.realtime_buffers_lost + counters.log_buffers_lost
+                + counters.handler_failures)
 
     def _parsed(self, event: ParsedEvent) -> None:
         with self._lock:
             state = self.state
             if state == "checking":
-                self._checking.append(event)
+                # The rundown lists every running process at once and would push the
+                # service's own entry out of the bounded deque before the check polls.
+                if event.kind == "process_rundown":
+                    self._own_rundown = self._own_rundown or (
+                        event.pid == os.getpid()
+                        and event.image_name.casefold() == ntpath.basename(sys.executable).casefold())
+                elif event.kind == "process_start":
+                    self._checking.append(event)
                 return
         if state != "on":
             return
@@ -588,14 +589,15 @@ class EtwObserver:
 
     def status(self) -> dict[str, object]:
         counters = self.collector.counters if self.collector is not None else Counters()
-        lost = counters.queue_drops + counters.truncated + counters.events_lost + \
-            counters.realtime_buffers_lost + counters.log_buffers_lost + counters.handler_failures
+        lost = self._loss_total(counters)
         state = "io_guard_failed" if self.collector and self.collector.file_events == "disable_failed" else self.state
         return {"etw": state, "etw_events_parsed": counters.parsed,
                 "etw_events_lost": lost, "etw_join_gaps": counters.join_gaps,
                 "etw_gap": counters.gap,
                 "etw_exits_before_resolution": self.exits_before_resolution,
-                "etw_file_events": self.collector.file_events if self.collector else "off",
+                "etw_file_events": "off",
+                "etw_file_events_reason": "Python không theo kịp tốc độ sự kiện tệp",
+                "etw_check_events_lost": self._check_loss,
                 "etw_events_per_second": self.collector.callback_rate() if self.collector else 0.0,
                 "etw_callback_cpu_s": counters.callback_cpu_s}
 
@@ -625,42 +627,21 @@ class EtwObserver:
             if self.state != "checking":
                 return
             self._check_counts[(raw.provider.hex, raw.opcode)] += 1
-            if raw.provider in (PROCESS_PROVIDER, PROCESS_CLASS) and self._check_pid > 0 and len(raw.payload) >= 12:
-                if (struct.unpack_from("<I", raw.payload, 8)[0] == self._check_pid
-                        and sum(item.provider in (PROCESS_PROVIDER, PROCESS_CLASS)
-                                for item, _parsed in self._check_raw) < 2):
-                    self._check_raw.append((raw, parsed))
-            elif raw.provider in (IO_PROVIDER, FILE_IO_CLASS) and parsed is not None:
-                if (parsed.kind == "name" and self._check_file
-                        and _same_file_safe(parsed.path, self._check_file)):
-                    self._check_file_objects.add(parsed.file_object)
-                if (parsed.file_object in self._check_file_objects
-                        and sum(item.provider in (IO_PROVIDER, FILE_IO_CLASS)
-                                for item, _parsed in self._check_raw) < 2):
-                    self._check_raw.append((raw, parsed))
+            if (raw.provider in (PROCESS_PROVIDER, PROCESS_CLASS)
+                    and raw.opcode == OP_PROCESS_DCSTART and len(raw.payload) >= 12
+                    and struct.unpack_from("<I", raw.payload, 8)[0] == os.getpid()
+                    and len(self._check_raw) < 2):
+                self._check_raw.append(raw)
 
     def _log_check_failure(self, reason: str) -> None:
         with self._lock:
             counts = sorted(self._check_counts.items())
             samples = tuple(self._check_raw)
-            own_file = self._check_file
-            child_pid = self._check_pid
         log = logging.getLogger(__name__)
         log.warning("etw check: %s counts %s", reason,
                     ", ".join(f"{provider}/{opcode}={count}" for (provider, opcode), count in counts))
-        file_objects = {parsed.file_object for _raw, parsed in samples
-                        if parsed is not None and parsed.kind == "name" and own_file
-                        and _same_file_safe(parsed.path, own_file)}
-        process, files = 0, 0
-        for raw, parsed in samples:
-            if raw.provider in (PROCESS_PROVIDER, PROCESS_CLASS) and process < 2 and len(raw.payload) >= 12:
-                if struct.unpack_from("<I", raw.payload, 8)[0] == child_pid:
-                    log.warning("etw check: process/%d %s", raw.opcode, raw.payload[:160].hex())
-                    process += 1
-            elif (raw.provider in (IO_PROVIDER, FILE_IO_CLASS) and files < 2 and parsed is not None
-                  and parsed.file_object in file_objects):
-                log.warning("etw check: file/%d %s", raw.opcode, raw.payload[:160].hex())
-                files += 1
+        for raw in samples:
+            log.warning("etw check: process/%d %s", raw.opcode, raw.payload[:160].hex())
 
 
 def _same_file(event_path: str, known_path: str) -> bool:
@@ -812,7 +793,7 @@ class NativeBackend:
             return StartResult("UNAVAILABLE")
         if ctypes.sizeof(ctypes.c_void_p) != 8:
             return StartResult("UNAVAILABLE")
-        if not self.io_keywords or not self.process_keywords:
+        if not self.process_keywords:
             return StartResult("UNAVAILABLE")
         props = _properties(self.session_guid)
         code = self._api.StartTraceW(ctypes.byref(self.handle), SESSION_NAME, props)
@@ -822,8 +803,7 @@ class NativeBackend:
             return StartResult(status, code)
         self.owned = True
         try:
-            for provider, keywords in ((IO_PROVIDER, self.io_keywords),
-                                       (PROCESS_PROVIDER, self.process_keywords)):
+            for provider, keywords in ((PROCESS_PROVIDER, self.process_keywords),):
                 guid = _guid(provider)
                 code = self._api.EnableTraceEx2(self.handle, ctypes.byref(guid), 1, 0,
                                                 ctypes.c_uint64(keywords), 0, 0, None)
@@ -895,7 +875,7 @@ class NativeBackend:
                      uuid.UUID(bytes_le=bytes(EVENT_TRACE_PROPERTIES.from_buffer(props).Wnode.Guid))
                      == self.session_guid)
         if self.owned and same_guid:
-            for provider in (IO_PROVIDER, PROCESS_PROVIDER):
+            for provider in (PROCESS_PROVIDER,):
                 guid = _guid(provider)
                 self._api.EnableTraceEx2(self.handle, ctypes.byref(guid), 0, 0, 0, 0, 0, None)
             self._api.ControlTraceW(self.handle, SESSION_NAME, props, 1)

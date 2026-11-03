@@ -348,7 +348,10 @@ class ProductBackend:
         etw_observer = getattr(self.observers, "etw", None)
         observation.update(etw_observer.status() if etw_observer is not None else
                            {"etw": "off", "etw_events_parsed": 0, "etw_events_lost": 0,
-                            "etw_join_gaps": 0, "etw_gap": False})
+                            "etw_join_gaps": 0, "etw_gap": False,
+                            "etw_file_events": "off",
+                            "etw_file_events_reason": "Python không theo kịp tốc độ sự kiện tệp",
+                            "etw_check_events_lost": None})
         return {"version": __version__, "realtime": self.barrier.current() is not None,
                 "quarantined": len(self.db.quarantine_items()), "blocklist_version": self.db.get_meta("blocklist_version", "0"),
                 "allow_version": self.db.allow_version(),
@@ -723,7 +726,10 @@ def _machine_observers(backend: ProductBackend) -> Observers:
             super().stop()
 
         def report(self) -> dict[str, Any]:
-            return {**super().report(), "reconcile": walker.report(), "shadow": shadow.report()}
+            shadow_status = shadow.report()
+            shadow_status.update(state="waiting_for_file_events", days_observed=None)
+            return {**super().report(), "reconcile": walker.report(),
+                    "shadow": shadow_status}
 
     volumes = []
     for root in scope.fixed_drives():
@@ -741,16 +747,11 @@ def _machine_observers(backend: ProductBackend) -> Observers:
     # Observation only: shadow.py cannot reach anything that acts.
     shadow = ShadowObserver(_document_roots(), state_root=config.data_dir(),
                             image_name=lambda pid, created: etw.EtwObserver._resolve_process(pid))
-    devices = etw.device_map()
-
-    def score(event: etw.ParsedEvent) -> None:
-        shadow.feed(dataclasses.replace(event, path=etw.on_drive(event.path, devices)) if event.path else event)
-
     def offer_process(path: str) -> None:
         if observer.wanted(path):
             observer._offer(path, "process")
 
-    observer.etw = etw.EtwObserver(offer_process, on_file_event=score,
+    observer.etw = etw.EtwObserver(offer_process,
                                   read_guid=lambda: backend.db.get_meta("etw:session_guid", ""),
                                   write_guid=lambda value: backend.db.set_meta("etw:session_guid", value))
     return observer
