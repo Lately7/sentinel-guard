@@ -75,10 +75,12 @@ class RollingDecisionLog:
             with self.checkpoint_path.open("rb") as stream:
                 data = stream.read(1025)
             if len(data) > 1024:
-                return None
+                raise ValueError("checkpoint exceeds bound")
             value = json.loads(data)
-            return value if isinstance(value, dict) else None
-        except (FileNotFoundError, OSError, ValueError, UnicodeError):
+            if not isinstance(value, dict):
+                raise ValueError("invalid checkpoint")
+            return value
+        except FileNotFoundError:
             return None
 
     def save_checkpoint(self, value: dict[str, object]) -> None:
@@ -138,9 +140,12 @@ class ShadowObserver:
         self._in_gap = False
         self._last_checkpoint: float | None = None
         if self._log is not None:
-            saved = self._log.load_checkpoint()
-            if saved is not None:
-                if self._restore(saved):
+            try:
+                saved = self._log.load_checkpoint()
+            except (OSError, ValueError, UnicodeError):
+                self._gap("checkpoint_invalid")
+            else:
+                if saved is not None and self._restore(saved):
                     self._gap("downtime")
 
     def _restore(self, saved: dict[str, object]) -> bool:

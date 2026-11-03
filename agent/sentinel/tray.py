@@ -407,10 +407,16 @@ class App:
                 approval = self.lease.approve("restore_quarantine", {"quarantine_id": qid})
                 if not approval:
                     _show_approval_failure(approval, "khôi phục")
+                elif getattr(approval, "zone_identifier_preserved", None) is False:
+                    messagebox.showwarning(APP, "Đã khôi phục, nhưng không giữ được dấu tải từ Internet: "
+                                           "Windows sẽ không cảnh báo khi mở tệp này.")
                 continue
             try:
                 p = quarantine.restore(self.db, qid)
                 self.db.add_event("system", "warning", "Đã khôi phục tệp từ cách ly", str(p))
+                if p.zone_identifier_preserved is False:
+                    messagebox.showwarning(APP, "Đã khôi phục, nhưng không giữ được dấu tải từ Internet: "
+                                           "Windows sẽ không cảnh báo khi mở tệp này.")
             except quarantine.QuarantineError as e:
                 messagebox.showerror(APP, str(e))
         self.refresh()

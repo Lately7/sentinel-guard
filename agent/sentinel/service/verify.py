@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import installer
+from . import installer, lowclient
 from .client import ServiceClient, ServiceError, ServiceUnavailable
 from .observers import JOURNAL_SECONDS
 from .paths import InstalledPaths, installed_paths
@@ -234,6 +234,40 @@ def _restart() -> tuple[bool, str]:
     return False, "did not come back"
 
 
+def _medium_token_cannot_approve(python: Path, version: Path, *,
+                                 api: lowclient.WindowsProbe | None = None) -> tuple[bool | None, str]:
+    try:
+        probe = api or lowclient.WindowsProbe()
+        if not probe.has_split_token():
+            return None, "token không được tách (UAC tắt hoặc tài khoản Administrator tích hợp)"
+        token, reason = probe.shell_token()
+    except OSError as exc:
+        return None, f"không lấy được token shell: {exc}"
+    if token is None:
+        return None, reason
+    try:
+        try:
+            code, output = probe.run(token, python, version)
+        except (OSError, TimeoutError) as exc:
+            return None, f"tiến trình thường không hoàn tất: {exc}"
+    finally:
+        probe.close(token)
+    if code != 0:
+        return None, f"tiến trình thường thoát với mã {code}"
+    try:
+        reply = json.loads(output)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None, "tiến trình thường không trả về JSON hợp lệ"
+    if not isinstance(reply, dict) or reply.get("integrity") != "medium" or reply.get("admin") is not False:
+        return None, "tiến trình con không xác nhận token quyền thường"
+    if reply.get("result") == "refused" and reply.get("code") == "ELEVATION_REQUIRED":
+        return True, "ELEVATION_REQUIRED"
+    if reply.get("result") == "approved":
+        return False, "tiến trình thường được phép phê duyệt"
+    code_value = reply.get("code")
+    return None, f"kết quả tiến trình thường: {code_value if isinstance(code_value, str) else 'không có mã từ chối'}"
+
+
 def run(*, restart: bool = False, client: Callable[[], ServiceClient] = ServiceClient) -> list[Check]:
     results: list[Check] = []
 
@@ -264,7 +298,8 @@ def run(*, restart: bool = False, client: Callable[[], ServiceClient] = ServiceC
             check("worker_scan", lambda: _own_scan(service))
             check("observers", lambda: _observed(service))
             check("etw", lambda: _etw_settled(service))
-    results.append(Check("medium_token_cannot_approve", None, "needs an unelevated client: the tray's Khôi phục shows it"))
+    passed, detail = _medium_token_cannot_approve(paths.python, paths.version)
+    results.append(Check("medium_token_cannot_approve", passed, detail))
     results.append(Check("remote_client_refused", None, "needs a second machine"))
     if restart:
         check("clean_stop_and_start", _restart)

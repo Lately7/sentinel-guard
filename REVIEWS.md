@@ -759,3 +759,24 @@ was smaller than the `ControlTrace` documentation asks. Next are Codex SVC18, a 
 with the consumer connected before provider enable, child A, child B, explicit FLUSH, per-phase counts in
 the callback, `ProcessTrace`'s return code and separate loss counters, and SVC18V, where `verify` waits for
 the check. Claude reviews both rounds, then the owner reinstalls.
+
+### Eleventh round: the phased check and its adversarial review
+
+SVC18 (`502c87b`, merged `07bacfc`) built the phased start check in `etw.py`. SVC18V (`c5b8b67`, merged
+`540d56a`) makes `verify` wait while the check runs. DOCS3 (`41ef3d1`, merged `df2b22b`) recorded the fourth
+install. SVC18B (`94b6780`, merged `099075b`) fixed what the adversarial review confirmed.
+
+The check now waits for the consumer's first callback before it enables the provider, then runs a fixed 7 s
+schedule whatever happens: child A at once, child B at 3 s, ControlTrace FLUSH at 5 and 6 s, and phase E after
+the window. Each phase logs counts taken in the callback itself, the session's own statistics, the sleep gauge,
+ProcessTrace's return code and every loss counter apart. A pass after the flush alone turns on a flush every
+second. None of this has run on a real session yet.
+
+| Review | What it caught | Disposition |
+|---|---|---|
+| Claude, SVC18 | Status named the last phase, not the one that passed; a truncated but delivered event counted as a gap while an unreadable dropped one was not a drop; a service stop during the enable turned "off" into a failure state; a stop during the check was logged twice. | Fixed in `502c87b`; four tests fail on the round's code. |
+| Claude, DOCS3 | The brief's own claim that about 1,380 events reached the callback only at stop; a challenger had refuted it. | Corrected in `41ef3d1`. |
+| Adversarial workflow on SVC18 (three lenses, each finding attacked by a skeptic): 9 confirmed, 1 refuted | A second stopper returned before the stop was done, so the service could exit before the stop line; the phase was stamped after the queue, up to 200 ms late, which could fake an F pass and flush assistance; a correctly parsed Start near the end read as a mismatch; phase S could be overwritten and child B spawned after a stop began; the pass path could turn on after a stop; the sleep gauge counted the check's own work; a failed spawn of B failed the whole check. | Fixed in SVC18B. Refuted: reading ProcessorIndex without the processor-index flag. |
+| Claude, SVC18B | The sleep gauge stored the sleep's length, not how late the thread woke; a service stop could wait 6.5 s for another thread's stop line on top of 6 s of stop, past the 10 s stop hint; phase E counts reached no log line. Three old check tests fed Starts past on_raw, which the aggregator never does. | Fixed in `94b6780` with tests that fail before. |
+
+Tests after the merge: see `docs/ROADMAP.md`. The owner's next install is the first real run of the phased check.

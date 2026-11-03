@@ -150,6 +150,15 @@ def _excluded(relative: Path) -> bool:
 class RuntimeFile:
     source: Path
     relative: Path
+    sha256: str
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while block := source.read(1024 * 1024):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def plan_runtime(source: Path) -> tuple[RuntimeFile, ...]:
@@ -172,7 +181,7 @@ def plan_runtime(source: Path) -> tuple[RuntimeFile, ...]:
                 (path.name.lower() in root_files or _PYTHON_DLL.fullmatch(path.name.lower())
                  or re.fullmatch(r"vcruntime[\d_]*\.dll", path.name.lower()))):
             continue
-        result.append(RuntimeFile(path, relative))
+        result.append(RuntimeFile(path, relative, _file_sha256(path)))
     names = {str(item.relative).lower() for item in result}
     if "python.exe" not in names or "pythonw.exe" not in names or "python3.dll" not in names \
             or not any(_PYTHON_DLL.fullmatch(n) for n in names):
@@ -195,12 +204,13 @@ def write_runtime(plan: tuple[RuntimeFile, ...], target: Path) -> dict[str, str]
         dest.parent.mkdir(parents=True, exist_ok=True)
         if dest.is_symlink() or dest.exists():
             raise InstallError("INSTALL_PATH_OCCUPIED", str(dest))
-        digest = hashlib.sha256()
         with item.source.open("rb") as src, dest.open("xb") as dst:
             while block := src.read(1024 * 1024):
                 dst.write(block)
-                digest.update(block)
-        hashes[item.relative.as_posix()] = digest.hexdigest()
+        copied_hash = _file_sha256(dest)
+        if copied_hash != item.sha256:
+            raise InstallError("INSTALL_INTEGRITY", item.relative.as_posix())
+        hashes[item.relative.as_posix()] = copied_hash
     pth = target / (Path(dlls[0]).stem + "._pth")
     body = b"Lib\nDLLs\napp\nvendor\n"
     with pth.open("xb") as out:
