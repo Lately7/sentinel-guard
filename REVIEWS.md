@@ -640,3 +640,29 @@ explained. A reconciliation
 after a lost journal is limited to the smart scope. Short-lived processes between samples are not seen.
 Restored files take the destination's ACL and the service as owner. Repairs leave scheduled tasks and
 WMI consumers in place and report that they were left.
+
+### Seventh round: ETW, scoring and approvals
+
+SVC11/SVC11B (`6e7bf87`, merged `5862224`) added ETW with a live check beside the process sampler.
+SVC12/SVC12B (`1a4e938`, merged `00dba83`) added shadow scoring. SVC13 (`61ffc91`,
+merged `d1d1940`) added `sentinel service status`; SVC14 (`ee417a2`, merged `53848c0`)
+added the fixed-drive walk; SVC15 (`4f27ec0`, merged `dfe10d5`) added worker self-diagnosis;
+SVC16 (`8a27629`, merged `29949a2`) changed approvals after R6 and R8. Claude wired ETW,
+scoring and the walk into the service in `fefd11d`.
+
+| Review | What it caught | Disposition |
+|---|---|---|
+| SVC11 | The process event holds a short name, not a path, so ETW would never have come on. The check held up service start, any dropped event failed it, and every file read called into Python. | Fixed in SVC11B; the file event path has a rate guard. |
+| SVC12 | An event without a known name or process wiped the state. Thirty days could have read as clean while the scorer never filled. Each document event also rewrote the disk state. | Fixed in SVC12B. `would_have_suspended` needs a canary; its zero is not a result, as the report says. |
+| SVC15 | The restart check would have cut off worker diagnosis. | `tools/install_service.cmd` now waits before the restart check (`77b01ad`). |
+| SVC14 | A completed fixed-drive walk answered done on every later call, clearing new debts without looking at files. | Corrected in review. |
+| SVC16 | The elevated helper's `consent.log` in the state tree could have failed the ownership check at the next start. | The helper reports through its exit code alone. |
+| Wiring | File events name files by device; process events did not reach the scorer. | Corrected when Claude wired the service (`fefd11d`). |
+| R6 | Concern that the pipe's integrity label blocked ordinary clients. | Refuted by measurement: an ordinary client talked to the real service. |
+| R8 | Claim that a local clean after a service `unknown` is false. | Not accepted: that local scan ran real engines. |
+
+None of ETW has been verified on a real session. The process and file payload layouts come from
+documentation and may differ; the check logs what it sees. The 30 days start only when ETW comes on.
+The latest listed tests are pytest 1039 passed, 10 skipped, 1 xfailed twice in a row, and
+extension 40 passed. Helium e2e was not rerun; with the service installed it now stops unless
+given `--with-service`.

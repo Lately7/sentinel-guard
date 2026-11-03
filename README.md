@@ -79,6 +79,8 @@ trình đang chạy đều phải qua hộp xác nhận quản trị. Cách cài
 bấm **Có** ở hộp UAC; kết quả kiểm tra nằm ở `%TEMP%\sentinel-install.log`. Làm tay thì trong PowerShell
 chạy Administrator:
 
+Dịch vụ dùng ETW khi bước kiểm tra ETW đạt; nếu ETW tắt, dịch vụ vẫn hoạt động.
+
 ```powershell
 .\.venv\Scripts\python -m sentinel service snapshot --source C:\SentinelSnapshot
 # xem lại thư mục đó, rồi:
@@ -87,12 +89,13 @@ chạy Administrator:
 .\.venv\Scripts\python -m sentinel service uninstall          # giữ khu cách ly và nhật ký
 ```
 
-Chưa chạy thật ở bản này: chưa ai cài dịch vụ dưới LocalSystem, `verify` là lần đầu.
+Dịch vụ đã chạy dưới LocalSystem; lần cài đầu báo `worker_scan` FAIL, đang chờ lần cài tiếp theo để kiểm tra bản mới.
 
 ## Lệnh
 
 ```powershell
 sentinel scan [--smart | --deep | <tệp|thư mục>] [--quarantine] [--json] [-v]   # 0 sạch, 1 đáng ngờ, 2 độc hại, 3 có phần chưa kiểm tra được; -v in kết quả từng lớp
+sentinel service status
 sentinel service snapshot | install | verify | uninstall
 sentinel clamav update | start | stop | status
 sentinel rules update

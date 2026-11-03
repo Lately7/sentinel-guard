@@ -14,20 +14,25 @@ nguyên nhân. Kết quả lần cài là 13 PASS, 1 FAIL, 2 SKIP trong `%TEMP%\
 `REVIEWS.md` vòng thứ sáu. Sau nhiều giờ, trạng thái ghi 73.658 records, 86.988 unresolved, 0 failed
 polls, khoảng trống lớn nhất 10.667 giây; chưa xác định nguyên nhân khoảng trống đó.
 
-Bước tiếp theo: chính chủ dự án tự mở lại `tools\install_service.cmd`; Claude không được mở hộp UAC. Sau khi bản cài tiếp theo vào máy,
-khay và native host tự quét khi dịch vụ trả `unknown`; trường `worker_failure` trong `status` nêu lỗi
-khởi động worker. Codex đã được dùng lại; các vòng chạy trong worktree `..\sentinel-guard-svcN`,
-theo `NEXT_SESSION.md` mục 4.
+Bước tiếp theo: chính chủ dự án tự mở lại `tools\install_service.cmd`; Claude không được mở hộp UAC.
+Trong log, các dòng `worker diagnosis:` nêu bước nào hỏng; nếu ETW vẫn tắt, các dòng `etw check:`
+cho thấy payload thật. `sentinel service status` chạy được từ cửa sổ thường. Sau khi bản cài tiếp theo
+vào máy, khay và native host tự quét khi dịch vụ trả `unknown`. Codex đã được dùng lại; các vòng chạy
+trong worktree `..\sentinel-guard-svcN`, theo `NEXT_SESSION.md` mục 4.
 
-Bản dịch vụ đang cài là bản cũ, chưa có các vòng SVC1–SVC10 và bản sửa CSDL; chúng chỉ có tác dụng sau lần cài
-tới. Nếu lần cài tới `worker_scan` vẫn FAIL, đọc `worker_failure` và đoạn `[service log]` cuối log: thoát
+Bản dịch vụ đang cài là bản cũ, chưa có các vòng SVC1–SVC16, phần nối ETW và bản sửa CSDL; chúng chỉ có tác dụng sau lần cài
+tới. Nếu lần cài tới `worker_scan` vẫn FAIL, đọc các dòng `worker diagnosis:` và đoạn `[service log]` cuối log: thoát
 `0xC00000xx` là tiến trình con chết sớm, `CreateWindowStation` hoặc `CreateDesktop failed` là lỗi ở phía dịch vụ,
 `CreateProcessAsUser failed` là lỗi khi tạo tiến trình.
 
 Đã xong và đẩy lên `main`: M5, M6, A3 (code), M7, M8, A4, A5, A6, RT-002, R15-2, R15-8, RT-003, RT-007,
 RT-024. Hai nhánh Codex (`codex/scope-a5`, `codex/reputation-etw`) đã review và gộp; nhiều chỗ viết lại,
-xem `REVIEWS.md`. ETW, canary, chấm điểm burst có code và test nhưng **chưa nối** và ETW tự từ chối chạy
-cho tới khi schema được kiểm trên máy thật.
+xem `REVIEWS.md`. ETW và chấm điểm shadow đã nối vào dịch vụ, nhưng chưa kiểm trên phiên ETW thật;
+schema payload lấy từ tài liệu và có thể khác. Kiểm tra lúc khởi động sẽ ghi payload nếu ETW vẫn tắt.
+Ba mươi ngày quan sát chỉ bắt đầu khi ETW bật. Tệp mồi chờ câu hỏi 11 của chủ dự án.
+Chủ dự án quyết định ngày 2026-11-03: tiếp tục user-mode với dịch vụ LocalSystem, không dùng driver,
+và dùng ETW bên cạnh bộ chụp tiến trình. Giới hạn vẫn là thấy tệp hoặc tiến trình sau khi xuất hiện,
+không chặn ở mức kernel trước khi chạy.
 
 Lệnh cài của chủ dự án chụp snapshot vào `%TEMP%\sentinel-snapshot`, cài rồi chạy `verify --restart`;
 PASS/FAIL/SKIP từng mục nằm ở `%TEMP%\sentinel-install.log`. Gỡ bằng `sentinel service uninstall`
@@ -44,7 +49,7 @@ chế (hai nguyên nhân), bộ luật quá 1 MiB không tới được worker, 
   ở lần cài này.
 * `tools/admin_acceptance.ps1` chưa có fixture: chờ câu hỏi 13. Trong lúc đó dùng `sentinel service verify`.
 * Bước 9: đo báo nhầm có đủ engine, chủ dự án chốt ngân sách, rồi mới cân nhắc `evidence-v1`.
-* Bước 10: nối canary và ETW sau khi kiểm schema; tự dừng tiến trình cần 30 ngày quan sát (R14).
+* Bước 10: kiểm ETW trên phiên thật, hỏi chủ dự án về tệp mồi (câu 11); tự dừng tiến trình cần 30 ngày quan sát (R14).
 * M7, A6 và phần dịch vụ đã qua rà soát độc lập hai vòng, xem `REVIEWS.md`. Tải về từ URL bị chặn trong
   dịch vụ nay chỉ cảnh báo, không cách ly theo URL: URL do client gửi nên không được quyền quyết định
   (câu hỏi 2 vẫn mở cho chế độ không có dịch vụ).
@@ -241,10 +246,11 @@ extension; "Luôn tin cậy" đi qua UAC; các tính năng giai đoạn 6 theo t
 nhầm với `SENTINEL_HOME` tạm, tắt tự cách ly, không dùng mẫu độc; so bản cũ/bản mới; **chủ dự án chốt ngân
 sách** rồi mới cân nhắc chuyển `evidence-v1`.
 
-### Bước 10 — ≈7/10 (chưa làm, chờ chủ dự án đồng ý)
+### Bước 10 — ≈7/10 (ETW và chấm điểm đã nối, chưa kiểm trên phiên thật)
 
-Danh tiếng hash/URL, chống ransomware ETW + tệp mồi (R14 chỉ là nghiên cứu, chưa cam kết làm), Defender
-làm engine khi đang chủ động, ML tĩnh cho PE mức "đáng ngờ".
+Danh tiếng hash/URL, chống ransomware ETW + tệp mồi, Defender làm engine khi đang chủ động,
+ML tĩnh cho PE mức "đáng ngờ". ETW và chấm điểm shadow đã nối vào dịch vụ nhưng chưa kiểm trên
+phiên thật; tệp mồi chờ câu hỏi 11, còn tự dừng tiến trình chờ 30 ngày quan sát kể từ khi ETW bật.
 
 ## 5. Việc chỉ chủ dự án làm được
 
@@ -254,14 +260,14 @@ làm engine khi đang chủ động, ML tĩnh cho PE mức "đáng ngờ".
 * Tự bật Controlled Folder Access nếu muốn; Claude không đổi cài đặt Defender.
 * Trả lời mục 6.
 
-## 6. Câu hỏi mở cho chủ dự án (chưa ai quyết)
+## 6. Câu hỏi và quyết định của chủ dự án
 
 | # | Câu hỏi | Đề xuất | Chặn bước |
 |---|---|---|---|
 | 1 | "Luôn tin cậy": đòi UAC hay chỉ tin cậy trong trình duyệt | đòi UAC | 4 |
 | 2 | Tải từ URL bị chặn: cảnh báo + quét, cách ly khi tệp có bằng chứng; hay giữ cách ly theo URL | cảnh báo + quét (M6 giữ hành vi cũ cho tới khi có quyết định) | 4 |
 | 3 | Cô lập mạng worker: cam kết "không có code mạng" hay ép bằng hệ điều hành | cam kết trước | 4 |
-| 4 | Theo dõi tiến trình: chụp 500 ms hay ETW | 500 ms trước | 6 |
+| 4 | Theo dõi tiến trình: chụp 500 ms hay ETW | Chủ dự án quyết ngày 2026-11-03: ETW bên cạnh bộ chụp; chưa kiểm trên phiên thật | đã quyết |
 | 5 | Gỡ cài đặt giữ lại khu cách ly và nhật ký | giữ | 3 |
 | 6a | Engine nào bắt buộc để "sạch đáng tin" (R11 §9) | bảng ở bước 2 | **2** |
 | 6b | Giới hạn cỡ tệp, ngân sách số (worker, bộ nhớ, thời gian) | 4 GiB; 60 s thời gian thực, 120 s quét sâu; đo rồi chốt | **2** |

@@ -61,5 +61,16 @@ document/image extension.
 | SVC9 | journal lookup cost, sleep and lag reporting | merged `edb0f00`; reviewed in REVIEWS.md |
 | SVC10 | false-positive sampler with every engine | merged `b7daecb`; tool only, no rate measured |
 | DOCS1 | records of these rounds | corrected in review, merged with this entry |
+| SVC11 | ETW beside the sampler, with a live check | merged `5862224`; real session unverified |
+| SVC11B | review fixes for ETW and a rate guard | merged with SVC11 in `5862224` |
+| SVC12 | ransomware scoring in shadow | merged `00dba83`; 30 days not started |
+| SVC12B | review fixes for shadow state and disk writes | merged with SVC12 in `00dba83` |
+| SVC13 | `sentinel service status` | merged `d1d1940` |
+| SVC14 | fixed-drive walk after a lost journal | merged `53848c0`; corrected in review |
+| SVC15 | worker self-diagnosis | merged `dfe10d5`; install wait fixed in `77b01ad` |
+| SVC16 | approvals from R6 and R8 | merged `29949a2`; corrected in review |
+| R6 | pipe integrity-label concern | refuted by an ordinary client on the real service; REVIEWS.md |
+| R8 | local clean after service `unknown` claim | not accepted; local scan ran real engines; REVIEWS.md |
+| DOCS2 | records of SVC11–SVC16 and the owner ETW decision | submitted for Claude review |
 
 Outcomes are recorded in `REVIEWS.md`.

@@ -41,6 +41,17 @@ native host fall back to their own scans when the service answers `unknown`; `wo
 `..\sentinel-guard-svcN` worktrees as described in §4. See `REVIEWS.md` for the install checks and
 the SVC1–SVC6 review.
 
+**Update 2026-11-03, after SVC11–SVC16.** The owner chose user-mode LocalSystem with no driver,
+and ETW beside the process sampler. ETW, shadow scoring and the fixed-drive walk are wired into
+the service, but ETW has not been verified on a real session. The 30 days start when ETW comes on;
+canaries wait for owner question 11. The next step is the owner opening `tools\install_service.cmd`.
+In `%TEMP%\sentinel-install.log`, `worker diagnosis:` lines name the failing step, and `etw check:`
+lines show real payloads if ETW stayed off. `sentinel service status` works from an ordinary window.
+The product sees a file or process after it appears; kernel-level blocking before it runs is out
+of scope for now. Latest listed tests: pytest 1039 passed, 10 skipped, 1 xfailed twice in a row;
+extension 40 passed. Helium e2e was not rerun and stops on a machine with the service installed
+unless given `--with-service`. See `REVIEWS.md` for the seventh review round.
+
 ## 1. Where things are
 
 * Repo: `C:\Users\lately07\Desktop\Folder Group\sentinel-guard`, branch
@@ -186,7 +197,7 @@ tests because an earlier brief said "report it and stop".)
    as suspicious-only. First step: a Codex read-only research brief (R14) on
    the ETW ransomware detector.
 
-## 6. Owner questions still open (list them in every report; do not decide)
+## 6. Owner questions and decisions (list open questions in every report)
 
 1. "Luôn tin cậy" on the warning page: require UAC confirmation for a
    service-wide trust (recommended) or keep browser-only trust.
@@ -194,7 +205,7 @@ tests because an earlier brief said "report it and stop".)
    file evidence (recommended), or keep today's URL-only auto-quarantine.
 3. Worker network isolation: "no network code" contract first
    (recommended) or OS-enforced isolation.
-4. Process observation: 500 ms snapshots first (recommended) or ETW in A5.
+4. Decided by the owner on 2026-11-03: ETW beside the 500 ms process sampler.
 5. Uninstall keeps quarantine and repair journal by default (recommended).
 6. R11 §9 items (switch `legacy-v0` → `evidence-v1`, required engines for
    trusted clean, clamd verification method, opaque containers, trust scope,
