@@ -125,10 +125,10 @@ def test_verified_process_event_only_offers_image_and_file_callback():
 
 def test_verify_reports_optional_etw_as_skip_or_pass():
     assert verify._etw({"observation": {"etw": "on", "etw_events_parsed": 2}}) == (True, "đã phân tích 2 sự kiện, mất 0")
-    assert verify._etw({"observation": {"etw": "schema_file_missing"}}) == (None, "ETW tắt: schema_file_missing")
+    assert verify._etw({"observation": {"etw": "schema_file_missing"}}) == (None, "ETW tắt: schema_file_missing, mất 0")
 
 
-def test_live_check_requires_child_image_and_real_file_match(monkeypatch):
+def test_live_check_requires_own_rundown_and_child_start(monkeypatch):
     class Child:
         pid = 123
 
@@ -138,18 +138,21 @@ def test_live_check_requires_child_image_and_real_file_match(monkeypatch):
         def __exit__(self, *args):
             return None
 
-    monkeypatch.setattr(etw.subprocess, "Popen", lambda *args, **kwargs: Child())
-    monkeypatch.setattr(etw, "_same_file", lambda path, known: path == known)
     observer = etw.EtwObserver(lambda path: None)
-    observer._resolve_process = lambda pid: sys.executable
-    observer._checking.extend((
-        etw.ParsedEvent("process_start", 123, 0, image_name=etw.ntpath.basename(sys.executable)),
-        etw.ParsedEvent("name", 0, 0, file_object=7, path=etw.os.path.abspath(etw.__file__)),
-        etw.ParsedEvent("read", 0, 0, file_object=7, io_size=4096)))
+    observer.state = "checking"
+    def popen(*args, **kwargs):
+        observer._parsed(etw.ParsedEvent(
+            "process_start", 123, 0, image_name=etw.ntpath.basename(sys.executable)))
+        return Child()
+    monkeypatch.setattr(etw.subprocess, "Popen", popen)
+    observer._parsed(etw.ParsedEvent(
+        "process_rundown", os.getpid(), 0,
+        image_name=etw.ntpath.basename(sys.executable)))
     assert observer._check_schema(None) == ""
-    observer._checking.popleft()
+    missing = etw.EtwObserver(lambda path: None)
+    missing.state = "checking"
     monkeypatch.setattr(etw.time, "monotonic", iter((0.0, 6.0)).__next__)
-    assert observer._check_schema(None) == "schema_process_missing"
+    assert missing._check_schema(None) == "schema_process_missing"
 
 
 def test_orphan_is_recovered_before_new_session(monkeypatch):
@@ -366,7 +369,7 @@ def test_unrelated_queue_drop_does_not_fail_successful_check():
     observer.stop()
 
 
-def test_without_file_handler_io_is_disabled_after_check():
+def test_observer_does_not_enable_io_after_check():
     class Fake:
         controls = []
         def start(self, callback):
@@ -384,7 +387,7 @@ def test_without_file_handler_io_is_disabled_after_check():
     observer = etw.EtwObserver(lambda path: None, backend_factory=lambda guid: fake,
                                check=lambda collector: "")
     observer.start()
-    assert fake.controls == [False]
+    assert fake.controls == []
     assert observer.status()["etw_file_events"] == "off"
     observer.stop()
 
@@ -405,22 +408,18 @@ def test_native_io_control_uses_disable_provider_code():
 
 
 def test_failed_check_logs_only_own_bounded_payloads(caplog, monkeypatch):
-    monkeypatch.setattr(etw, "_same_file", lambda path, known: path == known)
     observer = etw.EtwObserver(lambda path: None)
     observer.state = "checking"
-    observer._check_pid, observer._check_file = 123, "C:\\own.py"
-    own = etw.RawEvent(etw.PROCESS_PROVIDER, 1, 4, 123, 1, 0, process_payload(command="secret"))
-    other = etw.RawEvent(etw.PROCESS_PROVIDER, 1, 4, 456, 1, 0, process_payload(pid=456, command="private"))
-    file = etw.RawEvent(etw.IO_PROVIDER, 35, 3, etw.os.getpid(), 1, 0,
-                        struct.pack("<Q", 7) + "C:\\own.py\0".encode("utf-16-le"))
+    own = etw.RawEvent(etw.PROCESS_PROVIDER, 3, 4, 123, 1, 0,
+                       process_payload(pid=os.getpid(), command="secret"))
+    other = etw.RawEvent(etw.PROCESS_PROVIDER, 3, 4, 456, 1, 0,
+                         process_payload(pid=456, command="private"))
     observer._check_raw_event(own, etw.parse_event(own))
     observer._check_raw_event(other, etw.parse_event(other))
-    observer._check_raw_event(file, etw.parse_event(file))
-    observer._log_check_failure("schema_file_missing")
+    observer._log_check_failure("no_start_events")
     lines = [record.message for record in caplog.records if record.message.startswith("etw check:")]
     assert 1 <= len(lines) < 12
-    assert any("process/1" in line for line in lines)
-    assert any("file/35" in line for line in lines)
+    assert any("process/3" in line for line in lines)
     assert "private" not in " ".join(lines)
     assert other.payload[:160].hex() not in " ".join(lines)
     assert "secret" not in " ".join(lines)

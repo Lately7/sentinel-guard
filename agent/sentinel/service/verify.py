@@ -156,10 +156,14 @@ def _observing(status: dict[str, Any]) -> tuple[bool | None, str]:
 def _etw(status: dict[str, Any]) -> tuple[bool | None, str]:
     seen = status.get("observation", {})
     state = seen.get("etw", "off")
+    loss = f"mất {seen.get('etw_events_lost', 0)}"
+    check_loss = seen.get("etw_check_events_lost")
+    if isinstance(check_loss, int):
+        loss += f", mất lúc kiểm tra {check_loss}"
     if state != "on":
-        return None, f"ETW tắt: {state}"
+        return None, f"ETW tắt: {state}, {loss}"
     return True, (f"đã phân tích {seen.get('etw_events_parsed', 0)} sự kiện, "
-                  f"mất {seen.get('etw_events_lost', 0)}")
+                  f"{loss}")
 
 
 def _settled() -> str:
