@@ -6,6 +6,7 @@ import logging
 import os
 import threading
 from collections.abc import Callable
+from logging.handlers import RotatingFileHandler
 from typing import Any
 
 from .core import ServiceCore
@@ -59,8 +60,11 @@ def main() -> None:
     paths = installed_paths(version.name)
     # The service keeps its own state in the protected tree, never in a profile.
     os.environ["SENTINEL_HOME"] = str(paths.state_root)
-    logging.basicConfig(filename=str(paths.state("journal") / "service.log"), level=logging.INFO,
-                        format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    if not logging.getLogger().handlers:
+        logging.basicConfig(handlers=[RotatingFileHandler(paths.state("journal") / "service.log",
+                                                          maxBytes=5 * 1024 * 1024, backupCount=3,
+                                                          encoding="utf-8")],
+                            level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     try:
         run(lambda: ProductService(lambda: _state_backend(paths)), version.name)
     except Exception:
