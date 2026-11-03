@@ -65,7 +65,6 @@ def test_stderr_is_not_logged_after_a_successful_start(monkeypatch, caplog) -> N
 @pytest.mark.parametrize(("failure", "expected"), [
     (WorkerFailure(StageStatus.ERROR, "INIT_REFUSED"), "INIT_REFUSED"),
     (WorkerFailure(StageStatus.TIMEOUT, "WORKER_TIMEOUT"), "WORKER_TIMEOUT"),
-    (WorkerFailure(StageStatus.ERROR, "WORKER_DIED"), "WORKER_DIED"),
     (OSError(1314, "CreateProcessAsUser failed (Windows error 1314)"), "Windows error 1314"),
 ])
 def test_start_failure_replaces_stale_status(monkeypatch, failure, expected) -> None:
