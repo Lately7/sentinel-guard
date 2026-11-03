@@ -44,6 +44,8 @@ No elevated operations, service calls, network access, or pytest runs were made.
 
 **Test:** `test_red2_service_log_is_not_copied_to_user_temp`. The redirection and copy are proven structurally; cross-integrity readability follows from the shared user TEMP ACL and is inferred here.
 
+FIX3: Dropped this test by design because the install script intentionally copies the service log to the owner's own `%TEMP%` while an administrator is present so the owner can read it.
+
 ## Other probes
 
 The current code quotes the service binary path (`installer.py:282-286`) and validates the version component (`paths.py:17,66-72`). It refuses occupied code roots and version paths (`installer.py:302-304`), including preplanted directories and junctions. It creates code and state directories with explicit protected descriptors (`648-667`), requires SYSTEM ownership when reusing state (`775-806`), rejects reparse points while traversing state (`793-806`), and retains the protected state tree on uninstall (`353-362`). It generates `python315._pth` in protected staging (`183-208`) and limits snapshot root DLL names (`155-180`); the elevated checkout interpreter remains the DLL-loading concern in the critical finding. These checks did not yield a separate concrete finding in this round. The snapshot root's predictability and writable lifetime are covered by the high finding above.
