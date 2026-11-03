@@ -32,7 +32,9 @@ if os.name == "nt":
 def _open_measured(path: str) -> BinaryIO:
     if os.name != "nt":
         return open(path, "rb", buffering=0)
-    handle = _create_file(path, 0x80000000, 0x1 | 0x4, None, 3, 0x80, None)
+    # OPEN_NO_RECALL: the main way into a scan must not download a cloud placeholder.
+    # measure_stream reads the attributes first and stops before any content.
+    handle = _create_file(path, 0x80000000, 0x1 | 0x4, None, 3, 0x80 | 0x00100000, None)
     if handle == ctypes.c_void_p(-1).value:
         code = ctypes.windll.kernel32.GetLastError()
         if code in (32, 33):
